@@ -1,0 +1,36 @@
+{
+  "name": "ai-wiki-rag",
+  "version": "0.1.0",
+  "description": "Local RAG over the ai-wiki knowledge base (kb/) using Ollama + LanceDB + BM25, fully on-device.",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "ingest": "tsx src/cli/ingest.ts",
+    "ask": "tsx src/cli/ask.ts",
+    "search": "tsx src/cli/search.ts",
+    "serve": "tsx src/server/index.ts",
+    "eval": "tsx src/cli/eval.ts",
+    "eval:validate": "tsx src/cli/validate-evals.ts",
+    "doctor": "tsx src/cli/doctor.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@fastify/cors": "^11.3.0",
+    "@fastify/static": "^8.3.0",
+    "@lancedb/lancedb": "^0.38.0",
+    "apache-arrow": "18.1.0",
+    "dotenv": "^17.2.0",
+    "fastify": "^5.12.0",
+    "yaml": "^2.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.0",
+    "tsx": "^4.23.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}

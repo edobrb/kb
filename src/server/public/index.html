@@ -1,0 +1,393 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ai-wiki · knowledge assistant</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1c1f26; --muted: #6b7280; --border: #e3e6eb;
+    --accent: #2f5bea; --accent-soft: #e8eefc; --user: #eef1f7; --code: #f1f3f6; --warn: #b45309;
+    --binding: #7c3aed; --normative: #0f766e; --descriptive: #6b7280;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --panel: #171a21; --text: #e6e8ee; --muted: #9aa1ad; --border: #262b35;
+      --accent: #7c9cff; --accent-soft: #1d2540; --user: #1f2430; --code: #1c2029;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+    background: var(--bg); color: var(--text); display: flex; flex-direction: column;
+  }
+  header {
+    display: flex; align-items: center; gap: 14px; padding: 12px 20px; border-bottom: 1px solid var(--border);
+    background: var(--panel); position: sticky; top: 0; z-index: 2;
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 650; letter-spacing: .1px; }
+  header .meta { color: var(--muted); font-size: 12.5px; }
+  header .spacer { flex: 1; }
+  header button, .chip, .send { font: inherit; }
+  header button {
+    border: 1px solid var(--border); background: transparent; color: var(--text); border-radius: 8px;
+    padding: 6px 10px; cursor: pointer; font-size: 13px;
+  }
+  header button:hover { border-color: var(--accent); }
+  main { flex: 1; overflow-y: auto; }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 20px 20px 120px; }
+  .filters { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 18px; align-items: center; }
+  .filters .label { color: var(--muted); font-size: 12.5px; margin-right: 4px; }
+  .chip {
+    border: 1px solid var(--border); background: var(--panel); border-radius: 999px; padding: 4px 11px;
+    font-size: 12.5px; cursor: pointer; color: var(--muted); user-select: none;
+  }
+  .chip.on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+  .msg { margin: 0 0 18px; }
+  .msg.user .bubble { background: var(--user); border-radius: 14px 14px 4px 14px; padding: 10px 14px; margin-left: 15%; white-space: pre-wrap; }
+  .msg.assistant .bubble {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 14px 14px 14px 4px; padding: 14px 18px; margin-right: 8%;
+  }
+  .status { color: var(--muted); font-size: 12.5px; margin: 4px 0 8px 4px; min-height: 16px; }
+  .status .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); margin-right: 6px; animation: pulse 1s infinite; }
+  @keyframes pulse { 50% { opacity: .3; } }
+  .answer p { margin: 0 0 10px; } .answer p:last-child { margin-bottom: 0; }
+  .answer h1, .answer h2, .answer h3 { font-size: 15px; margin: 14px 0 6px; }
+  .answer ul, .answer ol { margin: 4px 0 10px; padding-left: 22px; }
+  .answer code { background: var(--code); padding: 1px 5px; border-radius: 5px; font-size: 13px; }
+  .answer pre { background: var(--code); padding: 10px 12px; border-radius: 8px; overflow-x: auto; font-size: 13px; }
+  .answer pre code { background: none; padding: 0; }
+  .answer blockquote { margin: 8px 0; padding: 2px 0 2px 12px; border-left: 3px solid var(--border); color: var(--muted); }
+  .answer table { border-collapse: collapse; margin: 8px 0; font-size: 13.5px; display: block; overflow-x: auto; }
+  .answer th, .answer td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; }
+  .cite {
+    display: inline-block; background: var(--accent-soft); color: var(--accent); border-radius: 5px; font-size: 11px;
+    padding: 0 5px; margin: 0 1px; vertical-align: super; line-height: 1.4; cursor: pointer; text-decoration: none; font-weight: 600;
+  }
+  .sources { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 10px; }
+  .sources summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
+  .src { display: grid; grid-template-columns: 26px 1fr; gap: 6px 8px; padding: 8px 0; border-bottom: 1px dashed var(--border); font-size: 13px; }
+  .src:last-child { border-bottom: none; }
+  .src .n { color: var(--accent); font-weight: 650; }
+  .src .title a { color: var(--text); text-decoration: none; font-weight: 600; }
+  .src .title a:hover { text-decoration: underline; }
+  .src .path { color: var(--muted); font-size: 12px; }
+  .badge { display: inline-block; font-size: 10.5px; padding: 1px 6px; border-radius: 5px; border: 1px solid var(--border); color: var(--muted); margin-left: 4px; vertical-align: middle; }
+  .badge.binding { color: var(--binding); border-color: var(--binding); }
+  .badge.normative { color: var(--normative); border-color: var(--normative); }
+  .src.unused { opacity: .55; }
+  .src .excerpt { grid-column: 2; color: var(--muted); font-size: 12px; white-space: pre-wrap; max-height: 0; overflow: hidden; transition: max-height .2s; }
+  .src.open .excerpt { max-height: 400px; }
+  .src .toggle { color: var(--accent); cursor: pointer; font-size: 12px; }
+  .think {
+    border: 1px solid var(--border); border-radius: 10px; background: var(--code); margin: 0 0 12px; font-size: 13px;
+  }
+  .think summary {
+    cursor: pointer; color: var(--muted); padding: 7px 12px; list-style: none; display: flex; gap: 8px; align-items: center;
+  }
+  .think summary::-webkit-details-marker { display: none; }
+  .think summary::before { content: "\25b8"; font-size: 11px; }
+  .think[open] summary::before { content: "\25be"; }
+  .think.live .label::after { content: "\2026"; }
+  .think .ttime { margin-left: auto; font-size: 11.5px; opacity: .8; }
+  .think .think-body {
+    margin: 0 12px 10px; padding-top: 8px; border-top: 1px solid var(--border); color: var(--muted);
+    white-space: pre-wrap; max-height: 240px; overflow-y: auto; font-size: 12.5px; line-height: 1.5;
+  }
+  .cursor {
+    display: inline-block; width: 7px; height: 13px; background: var(--accent); vertical-align: -2px;
+    margin-left: 2px; border-radius: 1px; animation: pulse 1s infinite;
+  }
+  header button.on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+  .error { color: #dc2626; }
+  .timing { color: var(--muted); font-size: 11.5px; margin-top: 8px; }
+  .composer {
+    position: fixed; bottom: 0; left: 0; right: 0; background: linear-gradient(transparent, var(--bg) 30%); padding: 20px;
+  }
+  .composer form {
+    max-width: 900px; margin: 0 auto; display: flex; gap: 8px; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 14px; padding: 8px 8px 8px 14px; box-shadow: 0 6px 24px rgba(0,0,0,.06);
+  }
+  .composer form:focus-within { border-color: var(--accent); }
+  textarea {
+    flex: 1; border: none; outline: none; resize: none; background: transparent; color: var(--text); font: inherit; max-height: 160px; padding: 6px 0;
+  }
+  .send {
+    border: none; background: var(--accent); color: white; border-radius: 10px; padding: 0 16px; cursor: pointer; font-weight: 600;
+  }
+  .send:disabled { opacity: .5; cursor: default; }
+  .empty { color: var(--muted); text-align: center; margin-top: 12vh; }
+  .empty h2 { font-weight: 600; color: var(--text); font-size: 18px; margin-bottom: 6px; }
+  .empty .ex { display: inline-block; margin: 4px; border: 1px solid var(--border); border-radius: 10px; padding: 6px 10px; cursor: pointer; font-size: 13px; background: var(--panel); }
+  .empty .ex:hover { border-color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>ai-wiki assistant</h1>
+  <span class="meta" id="meta">connecting…</span>
+  <span class="spacer"></span>
+  <button id="thinkToggle" title="Ask the model to reason step by step and stream its reasoning">Reasoning</button>
+  <button id="newChat" title="Start a new conversation">New chat</button>
+  <button id="reindex" title="Incrementally re-index kb/">Re-index</button>
+</header>
+<main>
+  <div class="wrap">
+    <div class="filters" id="filters"><span class="label">Sources:</span></div>
+    <div id="thread">
+      <div class="empty" id="empty">
+        <h2>Ask anything about the knowledge base</h2>
+        <div>Answers are generated only from <code>kb/</code> and every claim is cited.</div>
+        <div style="margin-top:14px">
+          <span class="ex">What does ADR0010 say about client credentials for M2M access?</span>
+          <span class="ex">Come funziona il social login in TSID?</span>
+          <span class="ex">What are the OnePlatform data store tiers?</span>
+          <span class="ex">How should errors be returned according to RFC 9457 in OnePlatform?</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</main>
+<div class="composer">
+  <form id="form">
+    <textarea id="input" rows="1" placeholder="Ask a question… (Enter to send, Shift+Enter for newline)"></textarea>
+    <button class="send" id="send" type="submit">Ask</button>
+  </form>
+</div>
+
+<script>
+(() => {
+  const $ = (s) => document.querySelector(s);
+  const thread = $("#thread"), input = $("#input"), sendBtn = $("#send"), form = $("#form");
+  const messages = [];            // conversation sent to the API
+  const activeTypes = new Set();  // source_type filter
+
+  // ---- header info + facets --------------------------------------------------
+  fetch("/api/health").then(r => r.json()).then(h => {
+    $("#meta").textContent = `${h.chunks} chunks · ${h.embeddingModel} · ${h.chatModel}`;
+    if (h.think) setThink(true);
+  }).catch(() => { $("#meta").textContent = "API not reachable"; });
+
+  // ---- reasoning toggle (streams the model's thinking when the model supports it) ----
+  let think = false;
+  function setThink(on) { think = on; $("#thinkToggle").classList.toggle("on", on); }
+  $("#thinkToggle").onclick = () => setThink(!think);
+
+  fetch("/api/facets").then(r => r.json()).then(f => {
+    const box = $("#filters");
+    Object.entries(f.sourceTypes).sort((a, b) => b[1] - a[1]).forEach(([type, n]) => {
+      const c = document.createElement("span");
+      c.className = "chip"; c.textContent = `${type} (${n})`; c.title = "Toggle to restrict retrieval to this source";
+      c.onclick = () => { c.classList.toggle("on"); c.classList.contains("on") ? activeTypes.add(type) : activeTypes.delete(type); };
+      box.appendChild(c);
+    });
+  }).catch(() => {});
+
+  // ---- tiny markdown renderer (safe: escapes HTML first) ----------------------
+  const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  function inline(s) {
+    return s
+      .replace(/`([^`]+)`/g, (_, c) => `<code>${c}</code>`)
+      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+      .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>")
+      .replace(/\[(https?:\/\/[^\]\s]+)\]\((https?:\/\/[^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+      .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+      .replace(/\[(\d{1,2})\]/g, '<a class="cite" data-n="$1" href="#">$1</a>');
+  }
+  function renderMarkdown(md) {
+    const lines = esc(md).split("\n");
+    let html = "", i = 0, para = [];
+    const flush = () => { if (para.length) { html += `<p>${inline(para.join(" "))}</p>`; para = []; } };
+    while (i < lines.length) {
+      const l = lines[i];
+      if (/^```/.test(l)) { flush(); let buf = []; i++; while (i < lines.length && !/^```/.test(lines[i])) buf.push(lines[i++]); i++; html += `<pre><code>${buf.join("\n")}</code></pre>`; continue; }
+      const h = /^(#{1,6})\s+(.*)/.exec(l);
+      if (h) { flush(); html += `<h${Math.min(3, h[1].length)}>${inline(h[2])}</h${Math.min(3, h[1].length)}>`; i++; continue; }
+      if (/^\s*[-*]\s+/.test(l)) { flush(); html += "<ul>"; while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) html += `<li>${inline(lines[i++].replace(/^\s*[-*]\s+/, ""))}</li>`; html += "</ul>"; continue; }
+      if (/^\s*\d+[.)]\s+/.test(l)) { flush(); html += "<ol>"; while (i < lines.length && /^\s*\d+[.)]\s+/.test(lines[i])) html += `<li>${inline(lines[i++].replace(/^\s*\d+[.)]\s+/, ""))}</li>`; html += "</ol>"; continue; }
+      if (/^\s*\|/.test(l)) {
+        flush(); const rows = []; while (i < lines.length && /^\s*\|/.test(lines[i])) rows.push(lines[i++]);
+        const cells = (r) => r.trim().replace(/^\||\|$/g, "").split("|").map(c => inline(c.trim()));
+        const body = rows.filter(r => !/^\s*\|?\s*:?-{2,}/.test(r));
+        html += "<table>" + body.map((r, ri) => `<tr>${cells(r).map(c => ri === 0 ? `<th>${c}</th>` : `<td>${c}</td>`).join("")}</tr>`).join("") + "</table>";
+        continue;
+      }
+      if (/^\s*&gt;\s?/.test(l)) {
+        flush(); const quoted = [];
+        while (i < lines.length && /^\s*&gt;\s?/.test(lines[i])) quoted.push(lines[i++].replace(/^\s*&gt;\s?/, ""));
+        html += `<blockquote>${inline(quoted.join(" "))}</blockquote>`; continue;
+      }
+      if (!l.trim()) { flush(); i++; continue; }
+      para.push(l); i++;
+    }
+    flush();
+    return html;
+  }
+
+  // ---- rendering helpers ------------------------------------------------------
+  function addUser(text) {
+    $("#empty")?.remove();
+    const el = document.createElement("div"); el.className = "msg user";
+    el.innerHTML = `<div class="bubble"></div>`; el.firstChild.textContent = text;
+    thread.appendChild(el); scroll();
+  }
+  function addAssistant() {
+    const el = document.createElement("div"); el.className = "msg assistant";
+    el.innerHTML = `<div class="status"><span class="dot"></span><span class="txt">Thinking…</span></div>
+      <div class="bubble">
+        <details class="think" hidden><summary><span class="label">Reasoning</span><span class="ttime"></span></summary><div class="think-body"></div></details>
+        <div class="answer"></div><div class="sources" hidden></div><div class="timing"></div>
+      </div>`;
+    thread.appendChild(el); scroll();
+    return el;
+  }
+  function renderSources(el, citations, used) {
+    const box = el.querySelector(".sources");
+    if (!citations.length) { box.hidden = false; box.innerHTML = `<span class="status">No relevant passages found.</span>`; return; }
+    const usedSet = new Set(used || []);
+    const items = citations.map(c => {
+      const link = c.sourceUrl ? `<a href="${esc(c.sourceUrl)}" target="_blank" rel="noopener">${esc(c.title)}</a>` : esc(c.title);
+      const cls = c.authority === "binding" || c.authority === "normative" ? c.authority : "";
+      return `<div class="src ${used && !usedSet.has(c.n) ? "unused" : ""}" id="src-${c.n}">
+        <div class="n">[${c.n}]</div>
+        <div>
+          <div class="title">${link}<span class="badge">${esc(c.sourceType)}</span><span class="badge ${cls}">${esc(c.authority)}</span></div>
+          <div class="path">${esc(c.headingPath)} · <span class="toggle">show passage</span></div>
+        </div>
+        <div class="excerpt">${esc(c.excerpt)}</div>
+      </div>`;
+    }).join("");
+    box.hidden = false;
+    box.innerHTML = `<details open><summary>${citations.length} sources${used ? ` · ${usedSet.size} cited` : ""}</summary>${items}</details>`;
+    box.querySelectorAll(".toggle").forEach(t => t.onclick = () => {
+      const src = t.closest(".src"); src.classList.toggle("open"); t.textContent = src.classList.contains("open") ? "hide passage" : "show passage";
+    });
+  }
+  const mainEl = document.querySelector("main");
+  let stick = true;   // keep following the stream unless the user scrolls up to read
+  mainEl.addEventListener("scroll", () => {
+    stick = mainEl.scrollHeight - mainEl.scrollTop - mainEl.clientHeight < 80;
+  });
+  function scroll(force) { if (force) stick = true; if (stick) mainEl.scrollTop = mainEl.scrollHeight; }
+
+  thread.addEventListener("click", (e) => {
+    const a = e.target.closest("a.cite"); if (!a) return;
+    e.preventDefault();
+    const src = a.closest(".msg").querySelector(`#src-${a.dataset.n}`);
+    if (src) { src.classList.add("open"); src.querySelector(".toggle").textContent = "hide passage"; src.scrollIntoView({ behavior: "smooth", block: "center" }); }
+  });
+
+  // ---- SSE client -------------------------------------------------------------
+  async function askStream(payload, handlers) {
+    const res = await fetch("/api/ask", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
+    if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j.error || `HTTP ${res.status}`); }
+    const reader = res.body.getReader(), dec = new TextDecoder(); let buf = "";
+    while (true) {
+      const { value, done } = await reader.read(); if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf("\n\n")) >= 0) {
+        const frame = buf.slice(0, idx); buf = buf.slice(idx + 2);
+        let event = "message", data = "";
+        for (const line of frame.split("\n")) {
+          if (line.startsWith("event:")) event = line.slice(6).trim();
+          else if (line.startsWith("data:")) data += line.slice(5).trim();
+        }
+        if (data) handlers[event]?.(JSON.parse(data));
+      }
+    }
+  }
+
+  let busy = false;
+  async function submit() {
+    const q = input.value.trim(); if (!q || busy) return;
+    busy = true; sendBtn.disabled = true; input.value = ""; autosize();
+    addUser(q);
+    messages.push({ role: "user", content: q });
+    const el = addAssistant();
+    const statusTxt = el.querySelector(".status .txt"), answerEl = el.querySelector(".answer");
+    const thinkEl = el.querySelector(".think"), thinkBody = el.querySelector(".think-body");
+    let answer = "", thinking = "", citations = [], thinkStart = 0, frame = 0;
+
+    // Repaint at most once per animation frame: the model can emit tokens faster than we can
+    // re-render markdown, and painting every token makes the answer stutter.
+    const paint = () => {
+      frame = 0;
+      answerEl.innerHTML = renderMarkdown(answer) + (busy ? '<span class="cursor"></span>' : "");
+      if (thinking) { thinkBody.textContent = thinking; thinkBody.scrollTop = thinkBody.scrollHeight; }
+      scroll();
+    };
+    const schedulePaint = () => { if (!frame) frame = requestAnimationFrame(paint); };
+
+    const filters = activeTypes.size ? { sourceTypes: [...activeTypes] } : undefined;
+    try {
+      await askStream({ messages, filters, think }, {
+        status: (ev) => { statusTxt.textContent = ev.message; },
+        sources: (ev) => { citations = ev.citations; renderSources(el, citations); scroll(); },
+        thinking: (ev) => {
+          if (!thinking) {                     // first reasoning token: open the panel
+            thinkStart = Date.now();
+            thinkEl.hidden = false; thinkEl.open = true; thinkEl.classList.add("live");
+            statusTxt.textContent = "Reasoning…";
+          }
+          thinking += ev.text; schedulePaint();
+        },
+        token: (ev) => {
+          if (!answer && thinking) thinkEl.open = false;   // reasoning done: fold it away
+          answer += ev.text; schedulePaint();
+        },
+        done: (ev) => {
+          el.querySelector(".status")?.remove();
+          answer = ev.answer; thinking = ev.thinking || thinking;
+          if (thinking) {
+            thinkEl.hidden = false; thinkEl.classList.remove("live"); thinkBody.textContent = thinking;
+            if (thinkStart) el.querySelector(".ttime").textContent = `${Math.round((Date.now() - thinkStart) / 1000)}s`;
+          }
+          renderSources(el, citations, ev.usedCitations);
+          const t = ev.timings || {};
+          el.querySelector(".timing").textContent = `retrieval ${t.retrieveMs ?? 0} ms · generation ${t.generateMs ?? 0} ms`;
+          messages.push({ role: "assistant", content: ev.answer });
+        },
+        error: (ev) => {
+          el.querySelector(".status")?.remove(); thinkEl.classList.remove("live");
+          answerEl.innerHTML = `<span class="error">${esc(ev.message)}</span>`; answer = ""; messages.pop();
+        },
+      });
+      if (!answer && !el.querySelector(".error")) {
+        answerEl.innerHTML = `<span class="error">The server closed the stream before answering.</span>`;
+        messages.pop();
+      }
+    } catch (err) {
+      el.querySelector(".status")?.remove();
+      answerEl.innerHTML = `<span class="error">${esc(err.message)}</span>`; answer = "";
+      messages.pop();
+    } finally {
+      busy = false; sendBtn.disabled = false;
+      if (frame) { cancelAnimationFrame(frame); frame = 0; }
+      if (answer) answerEl.innerHTML = renderMarkdown(answer);   // final paint, without the cursor
+      input.focus(); scroll();
+    }
+  }
+
+  form.addEventListener("submit", (e) => { e.preventDefault(); submit(); });
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); } });
+  function autosize() { input.style.height = "auto"; input.style.height = Math.min(160, input.scrollHeight) + "px"; }
+  input.addEventListener("input", autosize);
+  document.querySelectorAll(".ex").forEach(ex => ex.onclick = () => { input.value = ex.textContent; submit(); });
+
+  $("#newChat").onclick = () => { messages.length = 0; thread.innerHTML = ""; input.focus(); };
+  $("#reindex").onclick = async () => {
+    const b = $("#reindex"); b.disabled = true; b.textContent = "Indexing…";
+    try {
+      const r = await fetch("/api/ingest", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+      const j = await r.json();
+      b.textContent = r.ok ? `Indexed (+${j.docsAdded} / ~${j.docsUpdated} / -${j.docsRemoved})` : `Error: ${j.error}`;
+    } catch (e) { b.textContent = "Error"; }
+    setTimeout(() => { b.textContent = "Re-index"; b.disabled = false; }, 4000);
+  };
+  input.focus();
+})();
+</script>
+</body>
+</html>
