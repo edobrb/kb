@@ -11,13 +11,17 @@ export interface ManifestEntry {
   contentHash: string;
   chunkCount: number;
   indexedAt: string;
+  /** Model that wrote the chunk contexts of this document ("" when deterministic / disabled). */
+  contextModel?: string;
 }
 
 export interface Manifest {
   version: 1;
   embeddingModel: string;
   embeddingDimensions: number;
-  chunking: { targetTokens: number; maxTokens: number; overlapTokens: number };
+  chunking: { targetTokens: number; maxTokens: number; overlapTokens: number; code?: { targetTokens: number; maxTokens: number } };
+  /** Whether chunk texts carry the contextual-retrieval prefix. Toggling it changes every embedding → rebuild. */
+  contextualized: boolean;
   docs: Record<string, ManifestEntry>;
 }
 
@@ -53,5 +57,9 @@ export function manifestIncompatible(existing: Manifest, wanted: Omit<Manifest, 
   const b = wanted.chunking;
   if (a.targetTokens !== b.targetTokens || a.maxTokens !== b.maxTokens || a.overlapTokens !== b.overlapTokens)
     return "chunking parameters changed";
+  if ((a.code?.targetTokens ?? a.targetTokens) !== (b.code?.targetTokens ?? b.targetTokens) || (a.code?.maxTokens ?? a.maxTokens) !== (b.code?.maxTokens ?? b.maxTokens))
+    return "code chunking parameters changed";
+  if (Boolean(existing.contextualized) !== Boolean(wanted.contextualized))
+    return `contextual retrieval turned ${wanted.contextualized ? "on" : "off"} (CONTEXTUALIZE)`;
   return null;
 }

@@ -76,6 +76,8 @@ export interface ChatOptions {
   signal?: AbortSignal;
   /** Override the configured chat model for this call (e.g. a stronger model as eval judge). */
   model?: string;
+  /** Cap on generated tokens (Ollama `num_predict`). */
+  maxTokens?: number;
 }
 
 interface ChatStreamChunk {
@@ -107,6 +109,7 @@ export async function* ollamaChatStream(messages: ChatMessage[], opts: ChatOptio
         options: {
           temperature: opts.temperature ?? config.chat.temperature,
           num_ctx: opts.numCtx ?? config.chat.numCtx,
+          ...(opts.maxTokens ? { num_predict: opts.maxTokens } : {}),
         },
       }),
       signal: opts.signal,

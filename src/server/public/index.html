@@ -165,6 +165,7 @@
   const thread = $("#thread"), input = $("#input"), sendBtn = $("#send"), form = $("#form");
   const messages = [];            // conversation sent to the API
   const activeTypes = new Set();  // source_type filter
+  const activeKinds = new Set();  // kind filter (doc / code / project / api)
 
   // ---- header info + facets --------------------------------------------------
   fetch("/api/health").then(r => r.json()).then(h => {
@@ -179,12 +180,14 @@
 
   fetch("/api/facets").then(r => r.json()).then(f => {
     const box = $("#filters");
-    Object.entries(f.sourceTypes).sort((a, b) => b[1] - a[1]).forEach(([type, n]) => {
+    const chip = (label, title, set, key) => {
       const c = document.createElement("span");
-      c.className = "chip"; c.textContent = `${type} (${n})`; c.title = "Toggle to restrict retrieval to this source";
-      c.onclick = () => { c.classList.toggle("on"); c.classList.contains("on") ? activeTypes.add(type) : activeTypes.delete(type); };
+      c.className = "chip"; c.textContent = label; c.title = title;
+      c.onclick = () => { c.classList.toggle("on"); c.classList.contains("on") ? set.add(key) : set.delete(key); };
       box.appendChild(c);
-    });
+    };
+    Object.entries(f.sourceTypes).sort((a, b) => b[1] - a[1]).forEach(([type, n]) => chip(`${type} (${n})`, "Toggle to restrict retrieval to this source", activeTypes, type));
+    Object.entries(f.kinds || {}).sort((a, b) => b[1] - a[1]).forEach(([kind, n]) => chip(`${kind === "code" ? "</> " : ""}${kind} (${n})`, "Toggle to restrict retrieval to this kind of document (code = source files)", activeKinds, kind));
   }).catch(() => {});
 
   // ---- tiny markdown renderer (safe: escapes HTML first) ----------------------
@@ -255,10 +258,10 @@
       return `<div class="src ${used && !usedSet.has(c.n) ? "unused" : ""}" id="src-${c.n}">
         <div class="n">[${c.n}]</div>
         <div>
-          <div class="title">${link}<span class="badge">${esc(c.sourceType)}</span><span class="badge ${cls}">${esc(c.authority)}</span></div>
-          <div class="path">${esc(c.headingPath)} · <span class="toggle">show passage</span></div>
+          <div class="title">${link}<span class="badge">${esc(c.sourceType)}</span>${c.kind && c.kind !== "doc" ? `<span class="badge">${esc(c.kind)}</span>` : ""}<span class="badge ${cls}">${esc(c.authority)}</span></div>
+          <div class="path">${esc(c.headingPath)}${c.lineStart ? ` · L${c.lineStart}-${c.lineEnd}` : ""} · <span class="toggle">show passage</span></div>
         </div>
-        <div class="excerpt">${esc(c.excerpt)}</div>
+        <div class="excerpt">${c.context ? `<em>${esc(c.context)}</em>\n\n` : ""}${esc(c.excerpt)}</div>
       </div>`;
     }).join("");
     box.hidden = false;
@@ -323,7 +326,7 @@
     };
     const schedulePaint = () => { if (!frame) frame = requestAnimationFrame(paint); };
 
-    const filters = activeTypes.size ? { sourceTypes: [...activeTypes] } : undefined;
+    const filters = activeTypes.size || activeKinds.size ? { sourceTypes: activeTypes.size ? [...activeTypes] : undefined, kinds: activeKinds.size ? [...activeKinds] : undefined } : undefined;
     try {
       await askStream({ messages, filters, think }, {
         status: (ev) => { statusTxt.textContent = ev.message; },

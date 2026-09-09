@@ -5,10 +5,10 @@ import { afterAll, describe, expect, it } from "vitest";
 import { Bm25Index, tokenize } from "../src/store/bm25.js";
 
 const docs = [
-  { id: "a", text: "ADR0010 client credentials and token management for M2M access", sourceType: "adr", authority: "binding", lang: "en" },
-  { id: "b", text: "Social login in TSID: analysis of Google and Apple providers", sourceType: "confluence", authority: "descriptive", lang: "en" },
-  { id: "c", text: "Gestione dei ruoli legacy e nuove policy nel Policy Manager", sourceType: "confluence", authority: "descriptive", lang: "it" },
-  { id: "d", text: "Data store tiers for OnePlatform data products", sourceType: "adr", authority: "binding", lang: "en" },
+  { id: "a", text: "ADR0010 client credentials and token management for M2M access", sourceType: "adr", kind: "doc", authority: "binding", lang: "en" },
+  { id: "b", text: "Social login in TSID: analysis of Google and Apple providers", sourceType: "confluence", kind: "doc", authority: "descriptive", lang: "en" },
+  { id: "c", text: "Gestione dei ruoli legacy e nuove policy nel Policy Manager", sourceType: "confluence", kind: "doc", authority: "descriptive", lang: "it" },
+  { id: "d", text: "Data store tiers for OnePlatform data products", sourceType: "adr", kind: "doc", authority: "binding", lang: "en" },
 ];
 
 describe("tokenize", () => {

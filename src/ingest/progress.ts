@@ -1,7 +1,8 @@
 /** Progress reporting for long ingest runs: throughput, percentage and ETA. */
 
 export interface IngestProgress {
-  phase: "embedding" | "indexing";
+  /** contextualizing = writing chunk contexts with the chat model; embedding = vectors; indexing = BM25 rebuild. */
+  phase: "contextualizing" | "embedding" | "indexing";
   docsDone: number;
   docsTotal: number;
   chunksDone: number;
@@ -94,6 +95,7 @@ export function createProgressRenderer(opts: RendererOptions) {
   function format(p: IngestProgress): string {
     const pct = p.chunksTotal ? Math.floor((p.chunksDone / p.chunksTotal) * 100) : 100;
     const parts = [
+      p.phase,
       `${String(pct).padStart(3)}%`,
       `${p.chunksDone.toLocaleString("en-US")}/${p.chunksTotal.toLocaleString("en-US")} chunks`,
       `${p.docsDone.toLocaleString("en-US")}/${p.docsTotal.toLocaleString("en-US")} docs`,

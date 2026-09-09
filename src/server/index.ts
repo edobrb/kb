@@ -36,6 +36,7 @@ function parseFilters(body: unknown): RetrievalFilters | undefined {
   const list = (v: unknown) => (Array.isArray(v) ? v.map(String).filter(Boolean) : undefined);
   return {
     sourceTypes: list(f["sourceTypes"]),
+    kinds: list(f["kinds"]),
     authorities: list(f["authorities"]) as Authority[] | undefined,
     langs: list(f["langs"]),
   };

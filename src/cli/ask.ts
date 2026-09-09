@@ -6,7 +6,7 @@ const { flags, positional } = parseArgs();
 const question = positional.join(" ").trim();
 
 if (!question || flags["help"]) {
-  console.log(`Usage: npm run ask -- "your question" [--k 6] [--source-type adr,confluence] [--authority binding] [--lang en] [--json]
+  console.log(`Usage: npm run ask -- "your question" [--k 6] [--source-type adr,gitlab] [--kind code,doc] [--authority binding] [--lang en] [--json]
 
 Runs the full pipeline: hybrid retrieval -> Ollama chat model -> answer with [n] citations.`);
   process.exit(question ? 0 : 1);
@@ -18,6 +18,7 @@ const req = {
   topK: flags["k"] ? Number(flagString(flags, "k")) : undefined,
   filters: {
     sourceTypes: flagList(flags, "source-type"),
+    kinds: flagList(flags, "kind"),
     authorities: flagList(flags, "authority") as Authority[] | undefined,
     langs: flagList(flags, "lang"),
   },

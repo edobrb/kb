@@ -1,12 +1,15 @@
+import type { DocKind } from "../types.js";
 import type { HttpClient } from "./http.js";
 import type { SourcesConfig } from "./sources-config.js";
 
 /** One document produced by a connector, before it is rendered to `kb/<relPath>`. */
 export interface SyncDoc {
-  /** Stable id across runs, e.g. "confluence:CTO:1079836744", "gitlab:oneplatform/adrs:Platform/ADR0001.md". */
+  /** Stable id across runs, e.g. "gitlab:oneplatform/adrs:Platform/ADR0001.md", "devportal:default/component/x/page/". */
   sourceId: string;
   /** Default source type; rules in sources.yaml may override it (e.g. gitlab -> adr). */
   sourceType: string;
+  /** doc (default) | code | project | api. */
+  kind?: DocKind;
   /** Path under kb/ (always inside the connector's own folder). */
   relPath: string;
   title: string;
@@ -18,9 +21,9 @@ export interface SyncDoc {
   lastModified: string | null;
   /** Markdown body. */
   body: string;
-  /** Extra frontmatter fields (space_key, project, owner, ...). */
+  /** Extra frontmatter fields (project, owner, language, ...). */
   extra: Record<string, unknown>;
-  /** Version marker from the source (Confluence version, git blob sha, TechDocs etag...). */
+  /** Version marker from the source (git blob sha, TechDocs etag, content hash...). */
   fingerprint: string;
 }
 
@@ -38,7 +41,7 @@ export interface SyncState {
   source: string;
   lastRunAt: string | null;
   items: Record<string, StateItem>;
-  /** Connector-specific memory (e.g. devportal.coveredRepos, gitlab.projectActivity). */
+  /** Connector-specific memory (e.g. devportal.coveredRepos, gitlab.projectHeads). */
   meta: Record<string, unknown>;
 }
 
@@ -53,17 +56,35 @@ export type SyncEvent =
   /** Non-fatal problem with one item; the run continues. */
   | { type: "error"; sourceId?: string; message: string };
 
+/** A Confluence page found while looking for material about a repository. */
+export interface ConfluenceHit {
+  title: string;
+  url: string;
+  space: string;
+  /** Search snippet, plain text. */
+  excerpt: string;
+  lastModified: string | null;
+}
+
+/** Extra lookups a connector may use to enrich what it produces (today: Confluence pages about a project). */
+export interface ProjectEnricher {
+  /** Pages whose title or text mention one of the terms (a project name and its path slug). */
+  confluencePages(terms: string[]): Promise<ConfluenceHit[]>;
+}
+
 export interface ConnectorContext {
   http: HttpClient;
   baseUrl: string;
   sources: SourcesConfig;
   /** State from the previous run of this connector (empty on --full). */
   previous: Pick<SyncState, "items" | "meta">;
-  /** Read another connector's last state (e.g. gitlab consults devportal.coveredRepos). */
+  /** Read another connector's last state (e.g. gitlab consults devportal.coveredRepos / repoEntities). */
   otherState: (source: string) => Promise<SyncState | null>;
   log: (msg: string) => void;
-  /** Source-specific settings from .env (e.g. confluence cloudId override). */
+  /** Source-specific settings from .env (e.g. the GitLab host the Dev Portal links point to). */
   settings?: Record<string, string | undefined>;
+  /** Optional enrichment lookups (undefined when not configured / no credentials). */
+  enrich?: ProjectEnricher;
   /** Debug: only process items whose id/title contains this substring. */
   only?: string;
   concurrency: number;

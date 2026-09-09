@@ -1,14 +1,14 @@
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { config, paths } from "../config.js";
-import { resolveConfluenceApi, syncConfluence } from "./confluence.js";
+import { createConfluenceLookup, resolveConfluenceApi } from "./confluence.js";
 import { syncDevPortal } from "./devportal.js";
 import { syncGitLab } from "./gitlab.js";
 import { createHttp, type HttpClient } from "./http.js";
 import { renderKbDocument } from "./kb-writer.js";
 import { applyRules, loadSourcesConfig, type SourcesConfig } from "./sources-config.js";
 import { emptyState, readState, writeState } from "./state.js";
-import type { Connector, SyncState } from "./types.js";
+import type { Connector, ProjectEnricher, SyncState } from "./types.js";
 
 export interface SourceDefinition {
   /** Folder under kb/ that this connector owns (everything in it is managed by sync). */
@@ -23,7 +23,40 @@ export interface SourceDefinition {
   settings?: Record<string, string | undefined>;
   /** Cheap authenticated request used by `npm run doctor`; resolves to a short status string. */
   probe: (http: HttpClient) => Promise<string>;
+  /** Optional enrichment lookups handed to the connector as ctx.enrich. */
+  enrich?: () => ProjectEnricher | undefined;
   run: Connector;
+}
+
+/** A system that is consulted during sync without being a source of documents (today: Confluence). */
+export interface EnricherDefinition {
+  baseUrl: string;
+  enabled: boolean;
+  credentialsHint: string;
+  hasCredentials: boolean;
+  http: () => HttpClient;
+  probe: (http: HttpClient) => Promise<string>;
+  create: () => ProjectEnricher;
+}
+
+export function builtinEnrichers(sources: SourcesConfig): Record<string, EnricherDefinition> {
+  const c = config.sync.confluence;
+  const basic = Buffer.from(`${c.email}:${c.token}`).toString("base64");
+  const http = () => createHttp({ headers: { authorization: `Basic ${basic}` } });
+  return {
+    confluence: {
+      baseUrl: c.baseUrl,
+      enabled: sources.confluence.enrich_projects,
+      credentialsHint: "set CONFLUENCE_EMAIL and CONFLUENCE_API_TOKEN (Atlassian API token) or set confluence.enrich_projects: false",
+      hasCredentials: Boolean(c.email && c.token),
+      http,
+      probe: async (h) => {
+        const api = await resolveConfluenceApi(h, c.baseUrl, c.cloudId || undefined);
+        return api.mode === "gateway" ? "reachable via api.atlassian.com gateway (scoped token)" : "reachable via site URL";
+      },
+      create: () => createConfluenceLookup(http(), c.baseUrl, sources.confluence, c.cloudId || undefined),
+    },
+  };
 }
 
 export interface SyncOptions {
@@ -62,7 +95,7 @@ export interface SourceReport {
 
 export function builtinDefinitions(sources: SourcesConfig): Record<string, SourceDefinition> {
   const c = config.sync;
-  const basic = Buffer.from(`${c.confluence.email}:${c.confluence.token}`).toString("base64");
+  const enrichers = builtinEnrichers(sources);
   return {
     devportal: {
       folder: "devportal",
@@ -89,21 +122,11 @@ export function builtinDefinitions(sources: SourcesConfig): Record<string, Sourc
         const u = await http.json<{ username?: string }>(`${c.gitlab.baseUrl}/api/v4/user`);
         return `authenticated as ${u.username ?? "?"}`;
       },
-      run: syncGitLab,
-    },
-    confluence: {
-      folder: "confluence",
-      baseUrl: c.confluence.baseUrl,
-      enabled: sources.confluence.enabled,
-      credentialsHint: "set CONFLUENCE_EMAIL and CONFLUENCE_API_TOKEN (Atlassian API token)",
-      hasCredentials: Boolean(c.confluence.email && c.confluence.token),
-      http: () => createHttp({ headers: { authorization: `Basic ${basic}` } }),
-      settings: { cloudId: c.confluence.cloudId || undefined },
-      probe: async (http) => {
-        const api = await resolveConfluenceApi(http, c.confluence.baseUrl, c.confluence.cloudId || undefined);
-        return api.mode === "gateway" ? "reachable via api.atlassian.com gateway (scoped token)" : "reachable via site URL";
+      enrich: () => {
+        const cf = enrichers["confluence"];
+        return cf && cf.enabled && cf.hasCredentials ? cf.create() : undefined;
       },
-      run: syncConfluence,
+      run: syncGitLab,
     },
   };
 }
@@ -184,6 +207,7 @@ export async function runSync(opts: SyncOptions = {}): Promise<SourceReport[]> {
         otherState: (other) => readState(stateDir, other),
         log,
         settings: def.settings,
+        enrich: def.enrich?.(),
         only: opts.only,
         concurrency,
       });

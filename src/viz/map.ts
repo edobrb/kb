@@ -1,6 +1,6 @@
 /**
- * 2-D "map" of the knowledge base: every chunk vector (4096 dims) is projected to a point with UMAP so
- * semantically close chunks land close together. Purely offline; the result is a JSON file the web UI renders.
+ * 2-D "map" of the knowledge base: every chunk vector is projected to a point with UMAP so semantically
+ * close chunks land close together. Purely offline; the result is a JSON file the web UI renders.
  *
  * The payload is built for growth: metadata that belongs to a document is stored once in `documents` and
  * referenced by index, repeated strings live in `dict`, per-chunk data is held in parallel arrays, and chunk
@@ -88,10 +88,14 @@ export interface MapParams {
 
 export const DEFAULT_MAP_PARAMS: MapParams = { nNeighbors: 15, minDist: 0.1, nEpochs: 400, projectDims: 256, clusters: 8, seed: 42 };
 
-/** "confluence/TPAAS/80577979-x.md" -> "confluence/TPAAS"; "manually-curated/foo.md" -> "manually-curated". */
+/**
+ * "devportal/component/x/page.md" -> "devportal/component"; "manually-curated/foo.md" -> "manually-curated";
+ * GitLab paths keep the sub-group too ("gitlab/oneplatform/islands"), since one group holds hundreds of repos.
+ */
 export function groupOf(relPath: string, sourceType: string): string {
   const parts = relPath.split("/").filter(Boolean);
   if (parts.length <= 2) return parts[0] ?? sourceType;
+  if (parts[0] === "gitlab" && parts.length > 4) return `${parts[0]}/${parts[1]}/${parts[2]}`;
   return `${parts[0]}/${parts[1]}`;
 }
 

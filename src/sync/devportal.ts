@@ -4,6 +4,7 @@ import { htmlToMarkdown } from "./html.js";
 import { HttpError, mapLimit } from "./http.js";
 import { slugify } from "./kb-writer.js";
 import { detectLang } from "./lang.js";
+import type { EntitySummary } from "./project-card.js";
 import { previousIdsWithPrefix, type Connector, type ConnectorContext, type SyncEvent } from "./types.js";
 
 /**
@@ -14,8 +15,9 @@ import { previousIdsWithPrefix, type Connector, type ConnectorContext, type Sync
  * We list catalog entities that carry `backstage.io/techdocs-ref`, read the TechDocs metadata
  * (etag = build id) and download each HTML page only when the etag changed.
  *
- * Also emits `coveredRepos` (GitLab project paths behind those entities) so the GitLab connector
- * can skip repositories already indexed from here.
+ * Also emits `coveredRepos` (GitLab project paths behind those entities) so the GitLab connector can skip
+ * the mkdocs content already rendered here, and `repoEntities` (owner, system, lifecycle, description per
+ * repository) so the GitLab project cards can say who owns what.
  */
 
 interface Entity {
@@ -161,6 +163,7 @@ export const syncDevPortal: Connector = async function* (ctx): AsyncGenerator<Sy
   const coveredRepos = new Set<string>();
   const prevCovered = ctx.previous.meta["coveredRepos"];
   if (Array.isArray(prevCovered)) for (const r of prevCovered) if (typeof r === "string") coveredRepos.add(r);
+  const repoEntities: Record<string, EntitySummary> = { ...((ctx.previous.meta["repoEntities"] ?? {}) as Record<string, EntitySummary>) };
 
   const entities = await listEntities(ctx, "metadata.annotations.backstage.io/techdocs-ref");
   ctx.log(`Dev Portal: ${entities.length} entities with TechDocs`);
@@ -175,7 +178,10 @@ export const syncDevPortal: Connector = async function* (ctx): AsyncGenerator<Sy
 
     for (const key of ["backstage.io/source-location", "backstage.io/managed-by-location", "backstage.io/techdocs-ref"]) {
       const repo = gitlabProjectFromLocation(ann[key], ctx.settings?.["gitlabHost"] || undefined);
-      if (repo) coveredRepos.add(repo);
+      if (!repo) continue;
+      coveredRepos.add(repo);
+      // Prefer the entity whose docs live in the repo (techdocs-ref) over catalog repos that merely register it.
+      if (!repoEntities[repo] || key === "backstage.io/techdocs-ref") repoEntities[repo] = summarizeEntity(e, base);
     }
 
     if (ctx.only && !ref.includes(ctx.only)) {
@@ -247,6 +253,7 @@ export const syncDevPortal: Connector = async function* (ctx): AsyncGenerator<Sy
               entity_kind: kind,
               entity_name: name,
               entity_title: e.metadata.title,
+              entity_description: e.metadata.description,
               site_name: meta.site_name,
               owner: spec["owner"],
               system: spec["system"],
@@ -303,6 +310,7 @@ export const syncDevPortal: Connector = async function* (ctx): AsyncGenerator<Sy
         doc: {
           sourceId,
           sourceType: "devportal",
+          kind: "api",
           relPath: `devportal/api/${slugify(name)}/__definition.md`,
           title,
           sourceUrl: `${base}/catalog/${ns}/api/${name}/definition`,
@@ -317,5 +325,24 @@ export const syncDevPortal: Connector = async function* (ctx): AsyncGenerator<Sy
   }
 
   yield { type: "meta", key: "coveredRepos", value: [...coveredRepos].sort() };
+  yield { type: "meta", key: "repoEntities", value: repoEntities };
   yield { type: "meta", key: "entities", value: entities.length };
 };
+
+function summarizeEntity(e: Entity, base: string): EntitySummary {
+  const { ns, kind, name, ref } = entityRef(e);
+  const spec = e.spec ?? {};
+  const str = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
+  return {
+    ref,
+    kind,
+    title: str(e.metadata.title),
+    description: str(e.metadata.description),
+    owner: str(spec["owner"]),
+    system: str(spec["system"]),
+    lifecycle: str(spec["lifecycle"]),
+    type: str(spec["type"]),
+    tags: Array.isArray(e.metadata.tags) && e.metadata.tags.length ? e.metadata.tags : undefined,
+    url: `${base}/catalog/${ns}/${kind}/${name}`,
+  };
+}

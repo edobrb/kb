@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { buildMessages, extractCitedNumbers, formatContext } from "../src/generation/prompt.js";
+import { buildMessages, deepLink, extractCitedNumbers, formatContext, toCitations } from "../src/generation/prompt.js";
 import type { RetrievedChunk } from "../src/types.js";
 
-const chunk = (id: string, content: string): RetrievedChunk => ({
-  id, sourceId: `s:${id}`, sourceType: "adr", title: "T", sourceUrl: "https://x", authority: "binding", lang: "en",
-  relPath: "adr/x.md", ordinal: 0, headingPath: `T > ${id}`, content, score: 1, vectorRank: 1, bm25Rank: null,
+const chunk = (id: string, content: string, extra: Partial<RetrievedChunk> = {}): RetrievedChunk => ({
+  id, sourceId: `s:${id}`, sourceType: "adr", kind: "doc", title: "T", sourceUrl: "https://x", authority: "binding", lang: "en",
+  relPath: "adr/x.md", ordinal: 0, headingPath: `T > ${id}`, context: "", content, lineStart: null, lineEnd: null, score: 1, vectorRank: 1, bm25Rank: null,
+  ...extra,
 });
 
 describe("prompt", () => {
@@ -20,6 +21,23 @@ describe("prompt", () => {
     expect(msgs[0]?.role).toBe("system");
     expect(msgs.at(-1)).toEqual({ role: "user", content: "new q" });
     expect(msgs).toHaveLength(4);
+  });
+
+  it("puts the contextual prefix and line ranges in the context, and deep-links code citations", () => {
+    const code = chunk("c", "```ts\nexport const x = 1;\n```", {
+      kind: "code",
+      sourceUrl: "https://biosphere.teamsystem.com/oneplatform/x/-/blob/main/src/a.ts",
+      context: "Defines the x constant of the x service.",
+      lineStart: 10,
+      lineEnd: 24,
+    });
+    const ctx = formatContext([code]);
+    expect(ctx).toContain("(lines 10-24)");
+    expect(ctx).toContain("kind=code");
+    expect(ctx).toContain("about: Defines the x constant");
+    expect(deepLink(code)).toBe("https://biosphere.teamsystem.com/oneplatform/x/-/blob/main/src/a.ts#L10-24");
+    expect(deepLink(chunk("a", "x"))).toBe("https://x");
+    expect(toCitations([code])[0]?.sourceUrl).toContain("#L10-24");
   });
 
   it("extracts used citation numbers within range, in first-use order", () => {

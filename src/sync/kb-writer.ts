@@ -35,6 +35,7 @@ export function renderKbDocument(doc: SyncDoc, fetchedAt: string): string {
   const fm: Record<string, unknown> = {
     source_id: doc.sourceId,
     source_type: doc.sourceType,
+    kind: doc.kind ?? "doc",
     title: doc.title,
     source_url: doc.sourceUrl ?? undefined,
     authority: doc.authority ?? "descriptive",

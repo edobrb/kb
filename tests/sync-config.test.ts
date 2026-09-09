@@ -53,8 +53,9 @@ rules:
 
   it("merges over defaults", () => {
     expect(cfg.gitlab.groups).toEqual(["oneplatform"]);
-    expect(cfg.gitlab.include).toEqual(["**/*.md", "**/*.markdown"]);
-    expect(cfg.confluence.enabled).toBe(true);
+    expect(cfg.gitlab.docs.include).toEqual(["**/*.md", "**/*.markdown", "**/*.mdx"]);
+    expect(cfg.gitlab.code.enabled).toBe(true);
+    expect(cfg.confluence.enrich_projects).toBe(true);
     expect(cfg.rules).toHaveLength(3);
   });
 
@@ -68,6 +69,11 @@ rules:
     expect(cto?.sourceType).toBe("confluence");
     const other = applyRules(doc("confluence:MPDD:2", "x", "https://teamsystem.atlassian.net/wiki/spaces/MPDD/pages/2/x"), cfg.rules);
     expect(other?.authority).toBeUndefined();
+  });
+
+  it("rejects the pre-2026-09-09 keys with a pointer to their new home", () => {
+    expect(() => parseSourcesConfig(`gitlab:\n  include: ["**/*.md"]`)).toThrow(/gitlab\.docs\.include/);
+    expect(() => parseSourcesConfig(`confluence:\n  enabled: true`)).toThrow(/enrich_projects/);
   });
 
   it("rejects unknown authority values", () => {

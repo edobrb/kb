@@ -35,6 +35,7 @@ export interface Bm25Doc {
   id: string;
   text: string;
   sourceType: string;
+  kind: string;
   authority: string;
   lang: string;
 }
@@ -45,10 +46,11 @@ export interface Bm25Hit {
 }
 
 interface Serialized {
-  version: 1;
+  version: 2;
   ids: string[];
   lens: number[];
   sourceTypes: string[];
+  kinds: string[];
   authorities: string[];
   langs: string[];
   /** term -> flat [docIdx, tf, docIdx, tf, ...] */
@@ -59,6 +61,7 @@ export class Bm25Index {
   private ids: string[] = [];
   private lens: number[] = [];
   private sourceTypes: string[] = [];
+  private kinds: string[] = [];
   private authorities: string[] = [];
   private langs: string[] = [];
   private postings = new Map<string, number[]>();
@@ -79,6 +82,7 @@ export class Bm25Index {
       idx.ids.push(doc.id);
       idx.lens.push(tokens.length);
       idx.sourceTypes.push(doc.sourceType);
+      idx.kinds.push(doc.kind);
       idx.authorities.push(doc.authority);
       idx.langs.push(doc.lang);
       total += tokens.length;
@@ -126,6 +130,7 @@ export class Bm25Index {
   private passes(di: number, f?: RetrievalFilters): boolean {
     if (!f) return true;
     if (f.sourceTypes?.length && !f.sourceTypes.includes(this.sourceTypes[di] as string)) return false;
+    if (f.kinds?.length && !f.kinds.includes(this.kinds[di] as string)) return false;
     if (f.authorities?.length && !(f.authorities as string[]).includes(this.authorities[di] as string)) return false;
     if (f.langs?.length && !f.langs.includes(this.langs[di] as string)) return false;
     return true;
@@ -133,10 +138,11 @@ export class Bm25Index {
 
   async save(file: string): Promise<void> {
     const data: Serialized = {
-      version: 1,
+      version: 2,
       ids: this.ids,
       lens: this.lens,
       sourceTypes: this.sourceTypes,
+      kinds: this.kinds,
       authorities: this.authorities,
       langs: this.langs,
       postings: Object.fromEntries(this.postings),
@@ -155,11 +161,12 @@ export class Bm25Index {
       return null;
     }
     const data = JSON.parse(gunzipSync(buf).toString("utf8")) as Serialized;
-    if (data.version !== 1) return null;
+    if (data.version !== 2) return null; // older layout: `npm run ingest` rebuilds it from the table
     const idx = new Bm25Index();
     idx.ids = data.ids;
     idx.lens = data.lens;
     idx.sourceTypes = data.sourceTypes;
+    idx.kinds = data.kinds;
     idx.authorities = data.authorities;
     idx.langs = data.langs;
     idx.postings = new Map(Object.entries(data.postings));

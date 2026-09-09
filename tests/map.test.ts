@@ -49,7 +49,8 @@ function twoClusters(n = 40, dims = 32, seed = 11) {
 describe("groupOf", () => {
   it("uses the first two path segments when there are enough", () => {
     expect(groupOf("confluence/TPAAS/80577979-senders.md", "confluence")).toBe("confluence/TPAAS");
-    expect(groupOf("gitlab/paas/platform/apigateway/README.md", "git-md")).toBe("gitlab/paas");
+    expect(groupOf("gitlab/paas/platform/apigateway/README.md", "git-md")).toBe("gitlab/paas/platform");
+    expect(groupOf("gitlab/paas/apigateway/README.md", "git-md")).toBe("gitlab/paas");
   });
   it("falls back to the top folder or the source type", () => {
     expect(groupOf("manually-curated/glossary.md", "manually-curated")).toBe("manually-curated");

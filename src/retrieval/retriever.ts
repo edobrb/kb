@@ -3,7 +3,8 @@ import { getChatProvider } from "../llm/chat.js";
 import { getEmbedder } from "../llm/embeddings.js";
 import { Bm25Index } from "../store/bm25.js";
 import { VectorStore } from "../store/vector-store.js";
-import type { RetrievalFilters, RetrievedChunk, StoredChunk } from "../types.js";
+import type { RetrievalFilters, RetrievedChunk } from "../types.js";
+import type { Row } from "../store/vector-store.js";
 
 /** Reciprocal Rank Fusion constant (Cormack et al. 2009). 60 is the standard choice. */
 const RRF_K = 60;
@@ -30,13 +31,12 @@ export interface RetrieverStats {
   dimensions: number;
 }
 
-type Row = Omit<StoredChunk, "vector">;
-
 function toRetrieved(row: Row, score: number, vectorRank: number | null, bm25Rank: number | null): RetrievedChunk {
   return {
     id: row.id,
     sourceId: row.source_id,
     sourceType: row.source_type,
+    kind: row.kind,
     title: row.title,
     sourceUrl: row.source_url || null,
     authority: row.authority,
@@ -44,7 +44,10 @@ function toRetrieved(row: Row, score: number, vectorRank: number | null, bm25Ran
     relPath: row.rel_path,
     ordinal: row.ordinal,
     headingPath: row.heading_path,
+    context: row.context,
     content: row.content,
+    lineStart: row.line_start >= 0 ? row.line_start : null,
+    lineEnd: row.line_end >= 0 ? row.line_end : null,
     score,
     vectorRank,
     bm25Rank,
@@ -77,13 +80,14 @@ export class Retriever {
     });
   }
 
-  async facets(): Promise<{ sourceTypes: Record<string, number>; authorities: Record<string, number>; langs: Record<string, number> }> {
-    const [sourceTypes, authorities, langs] = await Promise.all([
+  async facets(): Promise<{ sourceTypes: Record<string, number>; kinds: Record<string, number>; authorities: Record<string, number>; langs: Record<string, number> }> {
+    const [sourceTypes, kinds, authorities, langs] = await Promise.all([
       this.store.distinct("source_type"),
+      this.store.distinct("kind"),
       this.store.distinct("authority"),
       this.store.distinct("lang"),
     ]);
-    return { sourceTypes, authorities, langs };
+    return { sourceTypes, kinds, authorities, langs };
   }
 
   /**
@@ -181,7 +185,7 @@ async function llmRerank(query: string, candidates: RetrievedChunk[]): Promise<R
     candidates.map(async (c) => {
       const prompt =
         `Rate how useful the passage is for answering the question. Reply with a single integer 0-10, nothing else.\n\n` +
-        `Question: ${query}\n\nPassage (${c.headingPath}):\n${c.content.slice(0, 2000)}`;
+        `Question: ${query}\n\nPassage (${c.headingPath}):\n${c.context ? `${c.context}\n` : ""}${c.content.slice(0, 2000)}`;
       try {
         const out = await chat.complete([{ role: "user", content: prompt }], { temperature: 0, think: false });
         const m = /\d+/.exec(out);

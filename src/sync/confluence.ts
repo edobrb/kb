@@ -1,22 +1,22 @@
-import { htmlToMarkdown } from "./html.js";
-import { HttpError, mapLimit, type HttpClient } from "./http.js";
-import { slugify } from "./kb-writer.js";
-import { detectLang } from "./lang.js";
-import type { Connector, ConnectorContext, SyncEvent } from "./types.js";
+import { HttpError, type HttpClient } from "./http.js";
+import type { ConfluenceHit, ProjectEnricher } from "./types.js";
 
 /**
- * Confluence Cloud connector (REST API v2, basic auth with an Atlassian API token).
- * Lists every space the token can see (minus include/exclude), lists the pages of each space
- * without bodies, and fetches the rendered body (`export_view`) only for pages whose version changed.
+ * Confluence Cloud lookup (REST API, basic auth with an Atlassian API token).
+ *
+ * Confluence pages are no longer indexed as documents. Instead, while the GitLab connector builds the
+ * card of a repository, it asks here for the few wiki pages whose title or text mention the project, and
+ * puts their titles, links and search snippets on the card — so "what is project X" answers and the chunk
+ * contexts of that repository can point at the functional documentation.
  *
  * Atlassian issues two kinds of API tokens: classic ones work against the site URL
- * (`https://<site>.atlassian.net/wiki/api/v2/...`), *scoped* ones only through the gateway
- * (`https://api.atlassian.com/ex/confluence/<cloudId>/wiki/api/v2/...`). `resolveConfluenceApi`
- * tries the site first and falls back to the gateway, resolving the cloudId from `/_edge/tenant_info`.
+ * (`https://<site>.atlassian.net/wiki/...`), *scoped* ones only through the gateway
+ * (`https://api.atlassian.com/ex/confluence/<cloudId>/wiki/...`). `resolveConfluenceApi` tries the site
+ * first and falls back to the gateway, resolving the cloudId from `/_edge/tenant_info`.
  */
 
 export interface ConfluenceApi {
-  /** Origin to prepend to `/wiki/api/v2/...` paths (site URL or gateway). */
+  /** Origin to prepend to `/wiki/...` paths (site URL or gateway). */
   apiOrigin: string;
   /** Site URL, used for human-facing links. */
   siteUrl: string;
@@ -41,155 +41,99 @@ export async function resolveConfluenceApi(http: HttpClient, siteUrl: string, cl
   return { apiOrigin, siteUrl: site, mode: "gateway" };
 }
 
-interface Paged<T> {
-  results: T[];
-  _links?: { next?: string; base?: string };
+export interface ConfluenceLookupConfig {
+  spaces: { include: string[]; exclude: string[] };
+  max_pages_per_project: number;
+  excerpt_chars: number;
 }
 
-interface V2Space {
-  id: string;
-  key: string;
-  name: string;
-  type: string;
-  status: string;
+interface SearchResult {
+  content?: { id?: string; title?: string; type?: string; _links?: { webui?: string } };
+  title?: string;
+  url?: string;
+  excerpt?: string;
+  lastModified?: string;
+  resultGlobalContainer?: { title?: string; displayUrl?: string };
 }
 
-interface V2Content {
-  id: string;
-  title: string;
-  status: string;
-  parentId?: string | null;
-  spaceId: string;
-  version?: { number: number; createdAt?: string };
-  _links?: { webui?: string };
-  body?: { export_view?: { value?: string } };
-}
+/** Words too generic to identify a repository in a wiki search. */
+const GENERIC_TERMS = new Set(
+  "api apis app apps web core common lib libs library service services frontend backend platform docs doc documentation demo test tests tools utils util sdk cli ui client server infra infrastructure config configuration template templates example examples training playground archive archived deprecated legacy old new main master monorepo repo repository project".split(
+    " ",
+  ),
+);
 
-export const CONFLUENCE_REMOVE = [
-  ".toc-macro", // table-of-contents macro
-  ".plugin_pagetree", // children / page tree macros
-  ".confluence-embedded-file-wrapper",
-  ".expand-control-icon",
-  ".aui-icon",
-  ".confluence-information-macro-icon",
-  ".hidden",
-];
-
-async function listAll<T>(ctx: ConnectorContext, apiOrigin: string, firstUrl: string): Promise<T[]> {
-  const out: T[] = [];
-  let url: string | undefined = firstUrl;
-  let guard = 0;
-  while (url && guard++ < 10_000) {
-    const page: Paged<T> = await ctx.http.json<Paged<T>>(url);
-    out.push(...(page.results ?? []));
-    const next = page._links?.next;
-    url = next ? (next.startsWith("http") ? next : `${apiOrigin}${next}`) : undefined;
+/** Turn a project name / path slug into search terms: dedupe, drop short or generic words, escape quotes. */
+export function searchTerms(candidates: string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of candidates) {
+    const term = raw.replace(/["\\]/g, " ").replace(/\s+/g, " ").trim();
+    const key = term.toLowerCase();
+    if (term.length < 4 || seen.has(key) || GENERIC_TERMS.has(key)) continue;
+    seen.add(key);
+    out.push(term);
   }
   return out;
 }
 
-/**
- * Space types are global | collaboration | knowledge_base | personal. Team spaces (e.g. CTO, TeamCore)
- * are "collaboration", so we never filter by type server-side; only personal spaces are opt-in.
- */
-export function selectSpaces(spaces: V2Space[], include: string[], exclude: string[], includePersonal: boolean): V2Space[] {
-  const inc = new Set(include.map((k) => k.toLowerCase()));
-  const exc = new Set(exclude.map((k) => k.toLowerCase()));
-  return spaces.filter((s) => {
-    if (s.status && s.status !== "current") return false;
-    if (!includePersonal && (s.type === "personal" || s.key.startsWith("~"))) return false;
-    const key = s.key.toLowerCase();
-    if (exc.has(key)) return false;
-    return inc.size === 0 || inc.has(key);
-  });
+/** Strip the `@@@hl@@@` highlight markers and collapse whitespace. */
+export function cleanExcerpt(s: string | undefined, max: number): string {
+  const t = (s ?? "")
+    .replace(/@@@(end)?hl@@@/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return t.length > max ? `${t.slice(0, max - 1)}…` : t;
 }
 
-function breadcrumbOf(page: V2Content, titles: Map<string, V2Content>, spaceName: string): string {
-  const chain: string[] = [];
-  let cur: V2Content | undefined = page.parentId ? titles.get(page.parentId) : undefined;
-  let guard = 0;
-  while (cur && guard++ < 25) {
-    chain.unshift(cur.title);
-    cur = cur.parentId ? titles.get(cur.parentId) : undefined;
-  }
-  return [spaceName, ...chain].join(" > ");
+const cqlString = (s: string) => `"${s.replace(/["\\]/g, "")}"`;
+
+export function buildCql(terms: string[], field: "title" | "text", spaces: ConfluenceLookupConfig["spaces"]): string {
+  const parts = [`type=page`];
+  if (spaces.include.length) parts.push(`space in (${spaces.include.map(cqlString).join(",")})`);
+  if (spaces.exclude.length) parts.push(`space not in (${spaces.exclude.map(cqlString).join(",")})`);
+  parts.push(`(${terms.map((t) => `${field} ~ ${cqlString(t)}`).join(" OR ")})`);
+  return parts.join(" AND ");
 }
 
-export const syncConfluence: Connector = async function* (ctx): AsyncGenerator<SyncEvent> {
-  const cfg = ctx.sources.confluence;
-  const { apiOrigin, siteUrl, mode } = await resolveConfluenceApi(ctx.http, ctx.baseUrl, ctx.settings?.["cloudId"] || undefined);
-  const base = apiOrigin;
-  ctx.log(`Confluence: using ${mode === "gateway" ? `api.atlassian.com gateway (scoped token)` : "site URL"}`);
+export function createConfluenceLookup(http: HttpClient, siteUrl: string, cfg: ConfluenceLookupConfig, cloudId?: string): ProjectEnricher {
+  let api: Promise<ConfluenceApi> | null = null;
+  const resolve = () => (api ??= resolveConfluenceApi(http, siteUrl, cloudId));
 
-  const spaces = await listAll<V2Space>(ctx, apiOrigin, `${base}/wiki/api/v2/spaces?limit=250&status=current`);
-  const selected = selectSpaces(spaces, cfg.spaces.include, cfg.spaces.exclude, cfg.include_personal_spaces);
-  const byType = selected.reduce<Record<string, number>>((acc, s) => ((acc[s.type] = (acc[s.type] ?? 0) + 1), acc), {});
-  ctx.log(`Confluence: ${selected.length}/${spaces.length} spaces selected (${Object.entries(byType).map(([t, n]) => `${t}=${n}`).join(", ")})`);
-
-  const kinds: ("pages" | "blogposts")[] = cfg.include_blogposts ? ["pages", "blogposts"] : ["pages"];
-
-  for (const space of selected) {
-    for (const kind of kinds) {
-      let items: V2Content[];
-      try {
-        items = await listAll<V2Content>(ctx, apiOrigin, `${base}/wiki/api/v2/spaces/${space.id}/${kind}?limit=250&status=current`);
-      } catch (err) {
-        yield { type: "error", message: `space ${space.key} (${kind}): ${(err as Error).message}` };
-        continue;
-      }
-      const byId = new Map(items.map((p) => [p.id, p]));
-      ctx.log(`  ${space.key}: ${items.length} ${kind}`);
-
-      const events = await mapLimit(items, ctx.concurrency, async (p): Promise<SyncEvent | null> => {
-        const sourceId = `confluence:${space.key}:${p.id}`;
-        const prev = ctx.previous.items[sourceId];
-        if (ctx.only && !sourceId.includes(ctx.only) && !p.title.toLowerCase().includes(ctx.only.toLowerCase())) {
-          return prev ? { type: "unchanged", sourceId } : null;
-        }
-        const version = p.version?.number ?? 0;
-        const fingerprint = `v${version}`;
-        if (prev && prev.fingerprint === fingerprint) return { type: "unchanged", sourceId };
-
-        try {
-          const singular = kind === "pages" ? "pages" : "blogposts";
-          const full = await ctx.http.json<V2Content>(`${base}/wiki/api/v2/${singular}/${p.id}?body-format=export_view`);
-          const html = full.body?.export_view?.value ?? "";
-          const md = htmlToMarkdown(html, { baseUrl: `${siteUrl}/wiki/`, removeSelectors: CONFLUENCE_REMOVE });
-          if (md.length < cfg.min_body_chars) return { type: "skip", sourceId, reason: `stub (${md.length} chars)` };
-
-          const webui = full._links?.webui ?? p._links?.webui;
-          const sourceUrl = webui ? `${siteUrl}/wiki${webui}` : `${siteUrl}/wiki/spaces/${space.key}/pages/${p.id}`;
-          const title = (full.title ?? p.title).trim() || `Page ${p.id}`;
-          return {
-            type: "doc",
-            doc: {
-              sourceId,
-              sourceType: "confluence",
-              relPath: `confluence/${space.key}/${p.id}-${slugify(title)}.md`,
-              title,
-              sourceUrl,
-              lang: detectLang(md),
-              lastModified: full.version?.createdAt?.slice(0, 10) ?? p.version?.createdAt?.slice(0, 10) ?? null,
-              body: md,
-              fingerprint: `v${full.version?.number ?? version}`,
-              extra: {
-                space_key: space.key,
-                space_name: space.name,
-                space_type: space.type,
-                page_id: p.id,
-                parent_id: p.parentId ?? undefined,
-                breadcrumb: breadcrumbOf(p, byId, space.name),
-                content_kind: kind === "pages" ? "page" : "blogpost",
-                version: full.version?.number ?? version,
-              },
-            },
-          };
-        } catch (err) {
-          return { type: "error", sourceId, message: (err as Error).message };
-        }
+  async function search(cql: string, limit: number): Promise<ConfluenceHit[]> {
+    const { apiOrigin, siteUrl: site } = await resolve();
+    const res = await http.json<{ results?: SearchResult[] }>(`${apiOrigin}/wiki/rest/api/search?cql=${encodeURIComponent(cql)}&limit=${limit}`);
+    const hits: ConfluenceHit[] = [];
+    for (const r of res.results ?? []) {
+      const webui = r.content?._links?.webui ?? r.url;
+      const title = r.content?.title ?? r.title;
+      if (!webui || !title || webui.startsWith("/spaces/~")) continue; // personal spaces are never used
+      hits.push({
+        title: title.trim(),
+        url: `${site}/wiki${webui}`,
+        space: r.resultGlobalContainer?.title ?? r.resultGlobalContainer?.displayUrl?.replace(/^\/spaces\//, "") ?? "",
+        excerpt: cleanExcerpt(r.excerpt, cfg.excerpt_chars),
+        lastModified: r.lastModified?.slice(0, 10) ?? null,
       });
-
-      for (const ev of events) if (ev) yield ev;
     }
+    return hits;
   }
-};
+
+  return {
+    async confluencePages(candidates: string[]): Promise<ConfluenceHit[]> {
+      const terms = searchTerms(candidates);
+      const max = cfg.max_pages_per_project;
+      if (!terms.length || max <= 0) return [];
+      // Title matches are precise; text matches fill the remaining slots.
+      const out = await search(buildCql(terms, "title", cfg.spaces), max);
+      if (out.length < max) {
+        const seen = new Set(out.map((h) => h.url));
+        for (const h of await search(buildCql(terms, "text", cfg.spaces), max)) {
+          if (out.length >= max) break;
+          if (!seen.has(h.url)) out.push(h);
+        }
+      }
+      return out;
+    },
+  };
+}

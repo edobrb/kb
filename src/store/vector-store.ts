@@ -5,17 +5,40 @@ import type { RetrievalFilters, StoredChunk } from "../types.js";
 
 const TABLE = "chunks";
 
+export type Row = Omit<StoredChunk, "vector">;
+
 export interface VectorHit {
-  row: Omit<StoredChunk, "vector">;
+  row: Row;
   /** Cosine distance in [0, 2]; smaller is closer. */
   distance: number;
 }
+
+const ROW_COLUMNS = [
+  "id",
+  "source_id",
+  "source_type",
+  "kind",
+  "title",
+  "source_url",
+  "authority",
+  "lang",
+  "last_modified",
+  "rel_path",
+  "ordinal",
+  "heading_path",
+  "context",
+  "content",
+  "text",
+  "line_start",
+  "line_end",
+] as const;
 
 function schemaFor(dimensions: number): Schema {
   return new Schema([
     new Field("id", new Utf8(), false),
     new Field("source_id", new Utf8(), false),
     new Field("source_type", new Utf8(), false),
+    new Field("kind", new Utf8(), false),
     new Field("title", new Utf8(), false),
     new Field("source_url", new Utf8(), false),
     new Field("authority", new Utf8(), false),
@@ -24,8 +47,11 @@ function schemaFor(dimensions: number): Schema {
     new Field("rel_path", new Utf8(), false),
     new Field("ordinal", new Int32(), false),
     new Field("heading_path", new Utf8(), false),
+    new Field("context", new Utf8(), false),
     new Field("content", new Utf8(), false),
     new Field("text", new Utf8(), false),
+    new Field("line_start", new Int32(), false),
+    new Field("line_end", new Int32(), false),
     new Field("vector", new FixedSizeList(dimensions, new Field("item", new Float32(), true)), false),
   ]);
 }
@@ -39,9 +65,34 @@ export function buildWhere(filters?: RetrievalFilters): string | undefined {
   if (!filters) return undefined;
   const clauses: string[] = [];
   if (filters.sourceTypes?.length) clauses.push(`source_type IN (${filters.sourceTypes.map(sqlString).join(", ")})`);
+  if (filters.kinds?.length) clauses.push(`kind IN (${filters.kinds.map(sqlString).join(", ")})`);
   if (filters.authorities?.length) clauses.push(`authority IN (${filters.authorities.map(sqlString).join(", ")})`);
   if (filters.langs?.length) clauses.push(`lang IN (${filters.langs.map(sqlString).join(", ")})`);
   return clauses.length ? clauses.join(" AND ") : undefined;
+}
+
+/** Arrow record -> plain row (older tables without the newer columns read back as defaults). */
+export function rowFromRecord(r: Record<string, unknown>): Row {
+  const int = (v: unknown, fallback: number) => (v === null || v === undefined ? fallback : Number(v));
+  return {
+    id: String(r["id"]),
+    source_id: String(r["source_id"]),
+    source_type: String(r["source_type"]),
+    kind: String(r["kind"] ?? "doc"),
+    title: String(r["title"]),
+    source_url: String(r["source_url"] ?? ""),
+    authority: String(r["authority"]),
+    lang: String(r["lang"]),
+    last_modified: String(r["last_modified"] ?? ""),
+    rel_path: String(r["rel_path"]),
+    ordinal: Number(r["ordinal"]),
+    heading_path: String(r["heading_path"]),
+    context: String(r["context"] ?? ""),
+    content: String(r["content"]),
+    text: String(r["text"]),
+    line_start: int(r["line_start"], -1),
+    line_end: int(r["line_end"], -1),
+  };
 }
 
 /**
@@ -124,68 +175,24 @@ export class VectorStore {
     const where = buildWhere(filters);
     if (where) q = q.where(where);
     const rows = (await q.toArray()) as Array<Record<string, unknown>>;
-    return rows.map((r) => ({
-      distance: Number(r["_distance"]),
-      row: {
-        id: String(r["id"]),
-        source_id: String(r["source_id"]),
-        source_type: String(r["source_type"]),
-        title: String(r["title"]),
-        source_url: String(r["source_url"] ?? ""),
-        authority: String(r["authority"]),
-        lang: String(r["lang"]),
-        last_modified: String(r["last_modified"] ?? ""),
-        rel_path: String(r["rel_path"]),
-        ordinal: Number(r["ordinal"]),
-        heading_path: String(r["heading_path"]),
-        content: String(r["content"]),
-        text: String(r["text"]),
-      },
-    }));
+    return rows.map((r) => ({ distance: Number(r["_distance"]), row: rowFromRecord(r) }));
   }
 
   /** Fetch rows by chunk id (used to hydrate BM25 hits that the vector search did not return). */
-  async getByIds(ids: string[]): Promise<Map<string, Omit<StoredChunk, "vector">>> {
-    const out = new Map<string, Omit<StoredChunk, "vector">>();
+  async getByIds(ids: string[]): Promise<Map<string, Row>> {
+    const out = new Map<string, Row>();
     if (!this.table || !ids.length) return out;
     for (let i = 0; i < ids.length; i += 200) {
       const slice = ids.slice(i, i + 200);
       const rows = (await this.table
         .query()
         .where(`id IN (${slice.map(sqlString).join(", ")})`)
-        .select([
-          "id",
-          "source_id",
-          "source_type",
-          "title",
-          "source_url",
-          "authority",
-          "lang",
-          "last_modified",
-          "rel_path",
-          "ordinal",
-          "heading_path",
-          "content",
-          "text",
-        ])
+        .select([...ROW_COLUMNS])
         .limit(slice.length)
         .toArray()) as Array<Record<string, unknown>>;
       for (const r of rows) {
-        out.set(String(r["id"]), {
-          id: String(r["id"]),
-          source_id: String(r["source_id"]),
-          source_type: String(r["source_type"]),
-          title: String(r["title"]),
-          source_url: String(r["source_url"] ?? ""),
-          authority: String(r["authority"]),
-          lang: String(r["lang"]),
-          last_modified: String(r["last_modified"] ?? ""),
-          rel_path: String(r["rel_path"]),
-          ordinal: Number(r["ordinal"]),
-          heading_path: String(r["heading_path"]),
-          content: String(r["content"]),
-          text: String(r["text"]),
-        });
+        const row = rowFromRecord(r);
+        out.set(row.id, row);
       }
     }
     return out;
@@ -196,17 +203,19 @@ export class VectorStore {
     id: string;
     text: string;
     source_type: string;
+    kind: string;
     authority: string;
     lang: string;
   }> {
     if (!this.table) return;
-    const batches = this.table.query().select(["id", "text", "source_type", "authority", "lang"]);
+    const batches = this.table.query().select(["id", "text", "source_type", "kind", "authority", "lang"]);
     for await (const batch of batches) {
       for (const r of batch.toArray() as Array<Record<string, unknown>>) {
         yield {
           id: String(r["id"]),
           text: String(r["text"]),
           source_type: String(r["source_type"]),
+          kind: String(r["kind"] ?? "doc"),
           authority: String(r["authority"]),
           lang: String(r["lang"]),
         };
@@ -219,6 +228,7 @@ export class VectorStore {
     id: string;
     source_id: string;
     source_type: string;
+    kind: string;
     title: string;
     source_url: string;
     authority: string;
@@ -231,7 +241,7 @@ export class VectorStore {
     if (!this.table) return;
     const batches = this.table
       .query()
-      .select(["id", "source_id", "source_type", "title", "source_url", "authority", "lang", "rel_path", "ordinal", "heading_path", "vector"]);
+      .select(["id", "source_id", "source_type", "kind", "title", "source_url", "authority", "lang", "rel_path", "ordinal", "heading_path", "vector"]);
     for await (const batch of batches) {
       for (const r of batch.toArray() as Array<Record<string, unknown>>) {
         const vec = r["vector"] as { toArray?: () => ArrayLike<number> } | ArrayLike<number>;
@@ -240,6 +250,7 @@ export class VectorStore {
           id: String(r["id"]),
           source_id: String(r["source_id"]),
           source_type: String(r["source_type"]),
+          kind: String(r["kind"] ?? "doc"),
           title: String(r["title"]),
           source_url: String(r["source_url"] ?? ""),
           authority: String(r["authority"]),
@@ -254,7 +265,7 @@ export class VectorStore {
   }
 
   /** Distinct values for a column (used by the UI filter dropdowns and `doctor`). */
-  async distinct(column: "source_type" | "authority" | "lang"): Promise<Record<string, number>> {
+  async distinct(column: "source_type" | "kind" | "authority" | "lang"): Promise<Record<string, number>> {
     const counts: Record<string, number> = {};
     if (!this.table) return counts;
     const rows = (await this.table.query().select([column]).toArray()) as Array<Record<string, unknown>>;

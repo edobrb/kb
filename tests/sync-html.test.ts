@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { CONFLUENCE_REMOVE } from "../src/sync/confluence.js";
 import { htmlToMarkdown, tidyMarkdown } from "../src/sync/html.js";
 import { detectLang } from "../src/sync/lang.js";
 import { ensureTitleHeading, renderKbDocument, slugify } from "../src/sync/kb-writer.js";
+
+/** Selectors the old Confluence connector removed; the converter is still exercised on Confluence-shaped HTML. */
+const CONFLUENCE_REMOVE = [".toc-macro", ".plugin_pagetree", ".confluence-embedded-file-wrapper", ".expand-control-icon", ".aui-icon", ".confluence-information-macro-icon", ".hidden"];
 
 const confluenceExportView = `
 <h2><strong>Executive Summary</strong></h2>

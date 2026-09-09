@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import YAML from "yaml";
-import type { Authority, DocMeta, Document } from "../types.js";
+import { DOC_KINDS, type Authority, type DocKind, type DocMeta, type Document } from "../types.js";
 
 const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
 
@@ -43,6 +43,11 @@ function normalizeAuthority(v: unknown): Authority {
   return "unknown";
 }
 
+function normalizeKind(v: unknown): DocKind {
+  const s = asString(v)?.toLowerCase();
+  return (DOC_KINDS as readonly string[]).includes(s ?? "") ? (s as DocKind) : "doc";
+}
+
 /** Derive a title from the first markdown H1, else from the filename. */
 function fallbackTitle(body: string, relPath: string): string {
   const h1 = /^#\s+(.+)$/m.exec(body);
@@ -62,6 +67,7 @@ export function buildDocMeta(fm: Record<string, unknown>, body: string, relPath:
   return {
     sourceId,
     sourceType,
+    kind: normalizeKind(fm["kind"]),
     title: asString(fm["title"]) ?? fallbackTitle(body, relPath),
     sourceUrl: asString(fm["source_url"]),
     authority: normalizeAuthority(fm["authority"]),
@@ -92,14 +98,20 @@ export async function loadDocument(kbDir: string, relPath: string): Promise<Docu
   const raw = await readFile(path.join(kbDir, relPath), "utf8");
   const { frontmatter, body } = parseFrontmatter(raw);
   const meta = buildDocMeta(frontmatter, body, relPath.split(path.sep).join("/"), raw);
-  return { meta, body: cleanBody(body) };
+  return { meta, body: cleanBody(body, meta.kind), frontmatter };
 }
 
-/** Remove noise that hurts embeddings but carries no meaning for readers. */
-export function cleanBody(body: string): string {
-  return body
+/**
+ * Remove noise that hurts embeddings but carries no meaning for readers. Source files are left alone
+ * (an HTML comment or a run of blank lines is content there); prose gets HTML comments stripped and the
+ * `\_` escapes that some exporters put in tables undone, so `subject_token` is one BM25 token everywhere.
+ */
+export function cleanBody(body: string, kind: DocKind = "doc"): string {
+  const unix = body.replace(/\r\n/g, "\n");
+  if (kind === "code") return unix.replace(/\n+$/, "").trim();
+  return unix
     .replace(/<!--[\s\S]*?-->/g, "") // html comments (confluence-page-id etc.)
-    .replace(/\r\n/g, "\n")
+    .replace(/\\_/g, "_")
     .replace(/[ \t]+$/gm, "")
     .replace(/\n{3,}/g, "\n\n")
     .trim();

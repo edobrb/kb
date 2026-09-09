@@ -89,8 +89,9 @@ const seed = num("seed") ?? DEFAULT_MAP_PARAMS.seed;
 const total = await store.count();
 console.log(`Reading ${total.toLocaleString("en-US")} chunks from ${paths.lanceDb}…`);
 
-// Project each vector as it arrives and drop the full-width one: at 4096 dims a large index would not fit
-// in memory (100k chunks = 1.6 GB), while the 256-dim projection is ~100 MB.
+// Project each vector as it arrives and drop the full-width one: a large index would not fit in memory
+// otherwise (100k chunks is 1.6 GB at 4096 dims, 400 MB at 1024), while the 256-dim projection is ~100 MB.
+// Skipped when EMBEDDING_DIMENSIONS is already at or below the projection width.
 const projector = projectDims > 0 && projectDims < config.embedding.dimensions ? new RandomProjector(config.embedding.dimensions, projectDims, seed) : null;
 const rows: MapInputRow[] = [];
 for await (const r of store.scanForMap()) {

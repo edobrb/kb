@@ -6,7 +6,7 @@ const { flags, positional } = parseArgs();
 const query = positional.join(" ").trim();
 
 if (!query || flags["help"]) {
-  console.log(`Usage: npm run search -- "your query" [--k 10] [--source-type adr,confluence] [--authority binding] [--lang en]
+  console.log(`Usage: npm run search -- "your query" [--k 10] [--source-type adr,gitlab] [--kind code,doc] [--authority binding] [--lang en]
 
 Shows the retrieval stage only (no LLM): fused rank, vector rank, BM25 rank, and the chunk text.`);
   process.exit(query ? 0 : 1);
@@ -19,6 +19,7 @@ const results = await retriever.retrieve(query, {
   noRerank: Boolean(flags["no-rerank"]),
   filters: {
     sourceTypes: flagList(flags, "source-type"),
+    kinds: flagList(flags, "kind"),
     authorities: flagList(flags, "authority") as Authority[] | undefined,
     langs: flagList(flags, "lang"),
   },
@@ -30,9 +31,10 @@ if (!results.length) {
 }
 results.forEach((r, i) => {
   console.log(
-    `\n#${i + 1}  score=${r.score.toFixed(4)}  vec=${r.vectorRank ?? "-"}  bm25=${r.bm25Rank ?? "-"}  [${r.sourceType}/${r.authority}]`,
+    `\n#${i + 1}  score=${r.score.toFixed(4)}  vec=${r.vectorRank ?? "-"}  bm25=${r.bm25Rank ?? "-"}  [${r.sourceType}/${r.kind}/${r.authority}]`,
   );
-  console.log(`    ${r.headingPath}`);
+  console.log(`    ${r.headingPath}${r.lineStart ? `  L${r.lineStart}-${r.lineEnd}` : ""}`);
   console.log(`    ${r.sourceUrl ?? r.relPath}`);
+  if (r.context) console.log(`    \x1b[2m${r.context.slice(0, 240)}\x1b[0m`);
   console.log(`    ${r.content.replace(/\s+/g, " ").slice(0, 240)}…`);
 });

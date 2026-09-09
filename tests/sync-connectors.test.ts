@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { resolveConfluenceApi, selectSpaces, syncConfluence } from "../src/sync/confluence.js";
+import { buildCql, cleanExcerpt, createConfluenceLookup, resolveConfluenceApi, searchTerms } from "../src/sync/confluence.js";
+import { codeSkipReason, declaredSymbols, fenceFor, isDeclarationStart, languageOf, renderCodeBody } from "../src/sync/code.js";
 import { buildDate, gitlabProjectFromLocation, pagePathOf, pagesFromSearchIndex, syncDevPortal } from "../src/sync/devportal.js";
-import { selectMarkdownFiles, syncGitLab } from "../src/sync/gitlab.js";
+import { selectFiles, selectMarkdownFiles, syncGitLab } from "../src/sync/gitlab.js";
 import { createHttp } from "../src/sync/http.js";
+import { buildProjectCard } from "../src/sync/project-card.js";
 import { DEFAULT_SOURCES, type SourcesConfig } from "../src/sync/sources-config.js";
 import type { ConnectorContext, SyncEvent, SyncState } from "../src/sync/types.js";
 
@@ -46,90 +48,47 @@ async function collect(gen: AsyncGenerator<SyncEvent>): Promise<SyncEvent[]> {
 
 const docs = (events: SyncEvent[]) => events.flatMap((e) => (e.type === "doc" ? [e.doc] : []));
 
-describe("Confluence connector", () => {
+describe("Confluence lookup (enrichment, not indexing)", () => {
   const base = "https://teamsystem.atlassian.net";
-  const routes = {
-    "/wiki/api/v2/spaces?": {
-      results: [
-        { id: "10", key: "CTO", name: "Group Technology", type: "collaboration", status: "current" },
-        { id: "11", key: "UP", name: "uptime", type: "global", status: "current" },
-        { id: "12", key: "~712020abc", name: "Someone", type: "personal", status: "current" },
-      ],
-    },
-    "/wiki/api/v2/spaces/10/pages": {
-      results: [
-        { id: "100", title: "Parent", status: "current", parentId: null, spaceId: "10", version: { number: 1, createdAt: "2026-01-01T00:00:00Z" }, _links: { webui: "/spaces/CTO/pages/100/Parent" } },
-        { id: "101", title: "Child page", status: "current", parentId: "100", spaceId: "10", version: { number: 4, createdAt: "2026-02-02T00:00:00Z" }, _links: { webui: "/spaces/CTO/pages/101/Child+page" } },
-        { id: "102", title: "Stub", status: "current", parentId: "100", spaceId: "10", version: { number: 1 } },
-      ],
-    },
-    "/wiki/api/v2/pages/100?": { id: "100", title: "Parent", version: { number: 1, createdAt: "2026-01-01T00:00:00Z" }, body: { export_view: { value: "<p>Il documento descrive la piattaforma e le sue componenti principali, con una panoramica del modello di riferimento che viene adottato dai team per la realizzazione delle capability.</p>" } } },
-    "/wiki/api/v2/pages/101?": { id: "101", title: "Child page", version: { number: 4, createdAt: "2026-02-02T00:00:00Z" }, body: { export_view: { value: "<h2>Intro</h2><p>The child page explains the onboarding flow for the platform in detail, and it is the reference for the teams that are joining the platform this year.</p>" } } },
-    "/wiki/api/v2/pages/102?": { id: "102", title: "Stub", version: { number: 1 }, body: { export_view: { value: "<p></p>" } } },
-  };
-
-  it("lists spaces (minus excluded), fetches bodies, builds breadcrumbs and skips stubs", async () => {
-    const cfg = structuredClone(DEFAULT_SOURCES);
-    cfg.confluence.spaces.exclude = ["up"];
-    const { fetchImpl, calls } = fakeFetch(routes);
-    const events = await collect(syncConfluence(ctx(fetchImpl, base, {}, cfg)));
-    const ds = docs(events);
-    expect(ds.map((d) => d.sourceId).sort()).toEqual(["confluence:CTO:100", "confluence:CTO:101"]);
-    const child = ds.find((d) => d.sourceId === "confluence:CTO:101")!;
-    expect(child.relPath).toBe("confluence/CTO/101-child-page.md");
-    expect(child.sourceUrl).toBe(`${base}/wiki/spaces/CTO/pages/101/Child+page`);
-    expect(child.extra["breadcrumb"]).toBe("Group Technology > Parent");
-    expect(child.lastModified).toBe("2026-02-02");
-    expect(child.fingerprint).toBe("v4");
-    expect(child.lang).toBe("en");
-    expect(ds.find((d) => d.sourceId === "confluence:CTO:100")?.lang).toBe("it");
-    expect(events.some((e) => e.type === "skip" && e.sourceId === "confluence:CTO:102")).toBe(true);
-    expect(calls.some((c) => c.includes("/spaces/11/"))).toBe(false);
-    expect(calls.some((c) => c.includes("/spaces/12/"))).toBe(false);
-    expect(child.extra["space_type"]).toBe("collaboration");
+  const hit = (title: string, space: string, webui: string, excerpt: string) => ({
+    content: { id: "1", title, type: "page", _links: { webui } },
+    excerpt,
+    lastModified: "2026-02-05T09:34:55.000Z",
+    resultGlobalContainer: { title: space, displayUrl: `/spaces/${space}` },
   });
 
-  it("falls back to the api.atlassian.com gateway for scoped tokens and keeps site URLs for links", async () => {
+  it("builds CQL with title-first / text-second and space scoping", () => {
+    expect(searchTerms(["Core Registry", "core-registry", "api", "abc", 'we"ird'])).toEqual(["Core Registry", "core-registry", "we ird"]);
+    expect(buildCql(["Hermes"], "title", { include: ["CTO", "TeamCore"], exclude: [] })).toBe('type=page AND space in ("CTO","TeamCore") AND (title ~ "Hermes")');
+    expect(buildCql(["a b", "c"], "text", { include: [], exclude: ["UP"] })).toBe('type=page AND space not in ("UP") AND (text ~ "a b" OR text ~ "c")');
+    expect(cleanExcerpt("The @@@hl@@@Hermes@@@endhl@@@  topic\n naming", 12)).toBe("The Hermes …");
+  });
+
+  it("searches through the gateway for scoped tokens, merges title and text hits, drops personal spaces", async () => {
     const gateway = (u: URL) => u.host === "api.atlassian.com";
     const { fetchImpl, calls } = fakeFetch({
       "/_edge/tenant_info": { cloudId: "cid-123" },
-      "/wiki/api/v2/spaces?": (u: URL) => (gateway(u) ? routes["/wiki/api/v2/spaces?"] : new Response("<html>401</html>", { status: 401 })),
-      "/wiki/api/v2/spaces/10/pages": (u: URL) => (gateway(u) ? routes["/wiki/api/v2/spaces/10/pages"] : new Response("", { status: 401 })),
-      "/wiki/api/v2/pages/100?": (u: URL) => (gateway(u) ? routes["/wiki/api/v2/pages/100?"] : new Response("", { status: 401 })),
-      "/wiki/api/v2/pages/101?": (u: URL) => (gateway(u) ? routes["/wiki/api/v2/pages/101?"] : new Response("", { status: 401 })),
-      "/wiki/api/v2/pages/102?": (u: URL) => (gateway(u) ? routes["/wiki/api/v2/pages/102?"] : new Response("", { status: 401 })),
+      "/wiki/api/v2/spaces?": (u: URL) => (gateway(u) ? { results: [] } : new Response("<html>401</html>", { status: 401 })),
+      "/wiki/rest/api/search?cql=type%3Dpage%20AND%20(title": {
+        results: [hit("Hermes 2.0 onboarding", "TeamCore", "/spaces/TeamCore/pages/1/Hermes+2.0+onboarding", "How to @@@hl@@@onboard@@@endhl@@@ a producer")],
+      },
+      "/wiki/rest/api/search?cql=type%3Dpage%20AND%20(text": {
+        results: [
+          hit("Hermes 2.0 onboarding", "TeamCore", "/spaces/TeamCore/pages/1/Hermes+2.0+onboarding", "dup"),
+          hit("My notes", "Someone", "/spaces/~712020abc/pages/9/My+notes", "personal"),
+          hit("Audit log architecture", "TeamCore", "/spaces/TeamCore/pages/2/Audit+log", "events flow through Hermes"),
+          hit("Release notes", "CTO", "/spaces/CTO/pages/3/Release", "Hermes mentioned"),
+        ],
+      },
     });
     const api = await resolveConfluenceApi(createHttp({ fetchImpl, retries: 0 }), base);
-    expect(api).toEqual({ apiOrigin: "https://api.atlassian.com/ex/confluence/cid-123", siteUrl: base, mode: "gateway" });
-    const events = await collect(syncConfluence(ctx(fetchImpl, base)));
-    const child = docs(events).find((d) => d.sourceId === "confluence:CTO:101")!;
-    expect(child.sourceUrl).toBe(`${base}/wiki/spaces/CTO/pages/101/Child+page`);
-    expect(calls.filter((c) => c.startsWith("/ex/confluence/cid-123/wiki/api/v2/")).length).toBeGreaterThan(3);
-  });
-
-  it("selectSpaces keeps every non-personal type and honours include/exclude", () => {
-    const spaces = [
-      { id: "1", key: "CTO", name: "", type: "collaboration", status: "current" },
-      { id: "2", key: "GP", name: "", type: "knowledge_base", status: "current" },
-      { id: "3", key: "TH", name: "", type: "global", status: "current" },
-      { id: "4", key: "~me", name: "", type: "personal", status: "current" },
-      { id: "5", key: "OLD", name: "", type: "global", status: "archived" },
-    ];
-    expect(selectSpaces(spaces, [], ["th"], false).map((s) => s.key)).toEqual(["CTO", "GP"]);
-    expect(selectSpaces(spaces, ["gp"], [], false).map((s) => s.key)).toEqual(["GP"]);
-    expect(selectSpaces(spaces, [], [], true).map((s) => s.key)).toEqual(["CTO", "GP", "TH", "~me"]);
-  });
-
-  it("does not download pages whose version is unchanged", async () => {
-    const { fetchImpl, calls } = fakeFetch(routes);
-    const previous: Pick<SyncState, "items" | "meta"> = {
-      items: { "confluence:CTO:101": { relPath: "confluence/CTO/101-child-page.md", fingerprint: "v4", title: "Child page", sourceUrl: null, syncedAt: "" } },
-      meta: {},
-    };
-    const events = await collect(syncConfluence(ctx(fetchImpl, base, { previous })));
-    expect(events.some((e) => e.type === "unchanged" && e.sourceId === "confluence:CTO:101")).toBe(true);
-    expect(calls.some((c) => c.startsWith("/wiki/api/v2/pages/101?"))).toBe(false);
-    expect(calls.some((c) => c.startsWith("/wiki/api/v2/pages/100?"))).toBe(true);
+    expect(api.mode).toBe("gateway");
+    const lookup = createConfluenceLookup(createHttp({ fetchImpl, retries: 0 }), base, { spaces: { include: [], exclude: [] }, max_pages_per_project: 3, excerpt_chars: 100 });
+    const hits = await lookup.confluencePages(["hermes-2.0", "Hermes"]);
+    expect(hits.map((h) => h.title)).toEqual(["Hermes 2.0 onboarding", "Audit log architecture", "Release notes"]);
+    expect(hits[0]).toMatchObject({ space: "TeamCore", url: `${base}/wiki/spaces/TeamCore/pages/1/Hermes+2.0+onboarding`, excerpt: "How to onboard a producer", lastModified: "2026-02-05" });
+    expect(calls.filter((c) => c.includes("/wiki/rest/api/search")).every((c) => c.startsWith("/ex/confluence/cid-123/"))).toBe(true);
+    expect(await lookup.confluencePages(["api", "app"])).toEqual([]);
   });
 });
 
@@ -146,6 +105,7 @@ describe("Dev Portal connector", () => {
             name: "hermes",
             namespace: "default",
             title: "Hermes",
+            description: "Event streaming platform.",
             annotations: { "backstage.io/techdocs-ref": "dir:.", "backstage.io/source-location": "url:https://biosphere.teamsystem.com/tsdigital/oneplatform/hermes-2.0/docs/-/tree/main/" },
             tags: ["streaming"],
           },
@@ -163,7 +123,7 @@ describe("Dev Portal connector", () => {
     "/api/techdocs/static/docs/default/module/hermes/consume-records/index.html": page("Consume records", "Bootstrap servers are listed in the table below for each environment of the platform."),
   };
 
-  it("indexes every TechDocs page of every documented entity, plus API definitions, and reports covered repos", async () => {
+  it("indexes every TechDocs page of every documented entity, plus API definitions, and reports covered repos + entities", async () => {
     const { fetchImpl } = fakeFetch(routes);
     const events = await collect(syncDevPortal(ctx(fetchImpl, base)));
     const ds = docs(events);
@@ -175,14 +135,18 @@ describe("Dev Portal connector", () => {
     expect(consume.body).not.toContain("nav");
     expect(consume.body).not.toContain("¶");
     expect(consume.extra["owner"]).toBe("group:platform");
+    expect(consume.extra["entity_description"]).toBe("Event streaming platform.");
     expect(consume.extra["edit_url"]).toContain("/-/edit/main/docs/x.md");
     expect(consume.fingerprint).toBe("abc123");
     expect(consume.lastModified).toBe("2025-08-24");
     const api = ds.find((d) => d.sourceId.includes("#definition"))!;
     expect(api.body).toContain("```yaml\nopenapi: 3.0.0");
+    expect(api.kind).toBe("api");
     expect(api.relPath).toBe("devportal/api/workspace-read/__definition.md");
     const meta = events.find((e) => e.type === "meta" && e.key === "coveredRepos") as { value: string[] };
     expect(meta.value).toEqual(["tsdigital/oneplatform/hermes-2.0/docs"]);
+    const ents = events.find((e) => e.type === "meta" && e.key === "repoEntities") as { value: Record<string, unknown> };
+    expect(ents.value["tsdigital/oneplatform/hermes-2.0/docs"]).toMatchObject({ ref: "default/module/hermes", owner: "group:platform", system: "oneplatform", lifecycle: "production", description: "Event streaming platform.", url: `${base}/catalog/default/module/hermes` });
   });
 
   it("skips an entity entirely when its TechDocs etag is unchanged", async () => {
@@ -220,81 +184,220 @@ describe("Dev Portal connector", () => {
   });
 });
 
+describe("code helpers", () => {
+  it("detects languages, junk files and declarations", () => {
+    expect(languageOf("src/a.ts")).toBe("typescript");
+    expect(languageOf("Dockerfile")).toBe("dockerfile");
+    expect(languageOf("deploy/Dockerfile.prod")).toBe("dockerfile");
+    expect(languageOf("Makefile")).toBe("makefile");
+    expect(languageOf("x.unknownext")).toBe("");
+    expect(codeSkipReason("a b", { maxLines: 10 })).toBe("binary");
+    expect(codeSkipReason("// @generated by protoc\nx", { maxLines: 10 })).toBe("generated file");
+    expect(codeSkipReason(Array.from({ length: 11 }, () => "x").join("\n"), { maxLines: 10 })).toMatch(/too many lines/);
+    expect(codeSkipReason(`${"x".repeat(2000)}\n`, { maxLines: 10 })).toMatch(/minified/);
+    expect(codeSkipReason("function a() {}\n", { maxLines: 10 })).toBeNull();
+    expect(fenceFor("a `b` c")).toBe("```");
+    expect(fenceFor("```md\nx\n```")).toBe("````");
+    expect(renderCodeBody("x = 1\r\n\n", "python")).toBe("```python\nx = 1\n```");
+    expect(declaredSymbols("export async function load(a) {}\nclass Foo {}\ndef bar():\n  pass\nfun baz() = 1\nCREATE TABLE users (id int);\n@Get('/items/:id')\nresource \"aws_s3_bucket\" \"logs\" {}", 10)).toEqual(["load", "Foo", "bar", "baz", "users", "/items/:id", "aws_s3_bucket.logs"]);
+    expect(isDeclarationStart("export function x() {")).toBe(true);
+    expect(isDeclarationStart("  inner = 1")).toBe(false);
+    expect(isDeclarationStart("}")).toBe(false);
+    expect(isDeclarationStart("import x from 'y'")).toBe(false);
+  });
+});
+
+describe("project card", () => {
+  it("puts the essentials first, then README and Confluence pages", () => {
+    const { title, body } = buildProjectCard({
+      path: "oneplatform/islands/registry/core-registry",
+      name: "Core Registry",
+      webUrl: "https://g/oneplatform/islands/registry/core-registry",
+      description: "Registry of items.",
+      defaultBranch: "main",
+      lastActivity: "2026-09-01",
+      topics: ["registry"],
+      languages: { TypeScript: 80.5, Dockerfile: 19.5 },
+      entity: { ref: "default/component/core-registry", kind: "component", title: "Core Registry", owner: "group:team-core", system: "registry", lifecycle: "production", type: "service", description: "The registry." },
+      readme: "# Core Registry\n\nStores items.\n\n## Run\n\nnpm start",
+      confluence: [{ title: "Registry - Documentazione", url: "https://c/x", space: "RPDD", excerpt: "Il mondo Registry", lastModified: "2026-04-11" }],
+      files: { total: 120, code: 90, docs: 5, topDirs: ["src", "docs"] },
+    });
+    expect(title).toBe("Core Registry (oneplatform/islands/registry/core-registry)");
+    expect(body.indexOf("Registry of items.")).toBeLessThan(body.indexOf("## Summary"));
+    expect(body).toContain("- Dev Portal: Core Registry (component `default/component/core-registry`); owner group:team-core; system registry; lifecycle production; type service");
+    expect(body).toContain("- Languages: TypeScript 81%, Dockerfile 20%");
+    expect(body).toContain("- Contents: 90 source files, 5 documentation files; top-level folders: src, docs");
+    expect(body).toContain("## README\n\n## Core Registry\n\nStores items.\n\n### Run");
+    expect(body).toContain("- [Registry - Documentazione](https://c/x) (RPDD, updated 2026-04-11): Il mondo Registry");
+  });
+});
+
 describe("GitLab connector", () => {
   const base = "https://biosphere.teamsystem.com";
   const projects = [
-    { id: 1, path_with_namespace: "oneplatform/adrs", web_url: `${base}/oneplatform/adrs`, default_branch: "main", last_activity_at: "2026-09-01T10:00:00Z", archived: false },
-    { id: 2, path_with_namespace: "oneplatform/hermes-docs", web_url: `${base}/oneplatform/hermes-docs`, default_branch: "main", last_activity_at: "2026-09-01T10:00:00Z", archived: false },
-    { id: 3, path_with_namespace: "oneplatform/empty", web_url: `${base}/oneplatform/empty`, default_branch: null, last_activity_at: "2026-09-01T10:00:00Z", archived: false, empty_repo: true },
+    { id: 1, name: "ADRs", path_with_namespace: "oneplatform/adrs", web_url: `${base}/oneplatform/adrs`, description: "Architecture decisions.", default_branch: "main", last_activity_at: "2026-09-01T10:00:00Z", archived: false, topics: ["architecture"] },
+    { id: 2, name: "hermes-docs", path_with_namespace: "oneplatform/hermes-docs", web_url: `${base}/oneplatform/hermes-docs`, default_branch: "main", last_activity_at: "2026-09-01T10:00:00Z", archived: false },
+    { id: 3, name: "empty", path_with_namespace: "oneplatform/empty", web_url: `${base}/oneplatform/empty`, default_branch: null, last_activity_at: "2026-09-01T10:00:00Z", archived: false, empty_repo: true },
   ];
+  const tree1 = [
+    { id: "sha-readme", name: "README.md", type: "blob", path: "README.md" },
+    { id: "sha-adr1", name: "ADR0001_cqrs.md", type: "blob", path: "Platform/ADR0001_cqrs.md" },
+    { id: "sha-nm", name: "x.md", type: "blob", path: "web/node_modules/x.md" },
+    { id: "sha-dir", name: "Platform", type: "tree", path: "Platform" },
+    { id: "sha-src", name: "src", type: "tree", path: "src" },
+    { id: "sha-ts", name: "index.ts", type: "blob", path: "src/index.ts" },
+    { id: "sha-test", name: "index.test.ts", type: "blob", path: "src/index.test.ts" },
+    { id: "sha-lock", name: "package-lock.json", type: "blob", path: "package-lock.json" },
+    { id: "sha-min", name: "bundle.min.js", type: "blob", path: "dist/bundle.min.js" },
+    { id: "sha-docs", name: "index.md", type: "blob", path: "docs/index.md" },
+  ];
+  const code = "import { x } from './x';\n\nexport function handler(req: Request) {\n  return x(req);\n}\n";
   const routes = {
     "/api/v4/groups/oneplatform/projects": projects,
-    "/api/v4/projects/1/repository/tree": [
-      { id: "sha-readme", name: "README.md", type: "blob", path: "README.md" },
-      { id: "sha-adr1", name: "ADR0001_cqrs.md", type: "blob", path: "Platform/ADR0001_cqrs.md" },
-      { id: "sha-nm", name: "x.md", type: "blob", path: "web/node_modules/x.md" },
-      { id: "sha-dir", name: "Platform", type: "tree", path: "Platform" },
-      { id: "sha-ts", name: "index.ts", type: "blob", path: "src/index.ts" },
+    "/api/v4/projects/1/repository/branches/main": { commit: { id: "head-1", committed_date: "2026-08-30T12:00:00Z" } },
+    "/api/v4/projects/2/repository/branches/main": { commit: { id: "head-2", committed_date: "2026-08-30T12:00:00Z" } },
+    "/api/v4/projects/1/repository/tree": tree1,
+    "/api/v4/projects/2/repository/tree": [
+      { id: "sha-hreadme", name: "README.md", type: "blob", path: "README.md" },
+      { id: "sha-hdocs", name: "index.md", type: "blob", path: "docs/index.md" },
     ],
+    "/api/v4/projects/1/languages": { TypeScript: 70, Markdown: 30 },
+    "/api/v4/projects/2/languages": {},
     "/api/v4/projects/1/repository/files/README.md/raw": () => new Response("# ADRs\n\nArchitecture decision records for the platform, reviewed by the core architects team.", { status: 200 }),
+    "/api/v4/projects/2/repository/files/README.md/raw": () => new Response("# Hermes docs\n\nThe documentation of the Hermes streaming platform for producers and consumers.", { status: 200 }),
+    "/api/v4/projects/2/repository/files/docs%2Findex.md/raw": () => new Response("# Hermes\n\nWelcome to the Hermes documentation site, rendered in the portal.", { status: 200 }),
     "/api/v4/projects/1/repository/files/Platform%2FADR0001_cqrs.md/raw": () =>
       new Response("---\ntitle: ADR0001 CQRS\nstatus: accepted\n---\n\n## Status\n\nAccepted. This record describes the CQRS approach adopted for the platform backend services.", { status: 200 }),
+    "/api/v4/projects/1/repository/files/docs%2Findex.md/raw": () => new Response("# Docs\n\nThe docs folder of the ADR repository, which is not in the portal.", { status: 200 }),
+    "/api/v4/projects/1/repository/files/src%2Findex.ts/raw": () => new Response(code, { status: 200 }),
     "/api/v4/projects/1/repository/commits?path=README.md": [{ committed_date: "2025-05-05T12:00:00Z" }],
     "/api/v4/projects/1/repository/commits?path=Platform%2FADR0001_cqrs.md": [{ committed_date: "2022-05-05T12:00:00Z" }],
+    "/api/v4/projects/1/repository/commits?path=docs%2Findex.md": [{ committed_date: "2023-05-05T12:00:00Z" }],
   };
-
-  it("discovers group projects, filters markdown by globs, skips repos covered by the Dev Portal", async () => {
-    const { fetchImpl, calls } = fakeFetch(routes);
+  const cfgFor = () => {
     const cfg = structuredClone(DEFAULT_SOURCES);
     cfg.gitlab.groups = ["oneplatform"];
-    cfg.gitlab.exclude_projects = ["oneplatform/EMPTY"];
-    const otherState = async (name: string): Promise<SyncState | null> =>
-      name === "devportal" ? { version: 1, source: "devportal", lastRunAt: null, items: {}, meta: { coveredRepos: ["oneplatform/hermes-docs"] } } : null;
-    const events = await collect(syncGitLab(ctx(fetchImpl, base, { otherState }, cfg)));
-    const ds = docs(events);
-    expect(ds.map((d) => d.sourceId).sort()).toEqual(["gitlab:oneplatform/adrs:Platform/ADR0001_cqrs.md", "gitlab:oneplatform/adrs:README.md"]);
-    const adr = ds.find((d) => d.sourceId.endsWith("ADR0001_cqrs.md"))!;
-    expect(adr.title).toBe("ADR0001 CQRS");
-    expect(adr.body.startsWith("## Status")).toBe(true);
-    expect(adr.relPath).toBe("gitlab/oneplatform/adrs/Platform/ADR0001_cqrs.md");
-    expect(adr.sourceUrl).toBe(`${base}/oneplatform/adrs/-/blob/main/Platform/ADR0001_cqrs.md`);
-    expect(adr.lastModified).toBe("2022-05-05");
-    expect(adr.fingerprint).toBe("sha-adr1");
-    expect(calls.some((c) => c.includes("/projects/2/"))).toBe(false);
-    expect(calls.some((c) => c.includes("/projects/3/"))).toBe(false);
-    const meta = events.find((e) => e.type === "meta" && e.key === "projectActivity") as { value: Record<string, string> };
-    expect(meta.value["oneplatform/empty"]).toBeUndefined();
-    expect(meta.value["oneplatform/adrs"]).toBe("2026-09-01T10:00:00Z");
+    return cfg;
+  };
+  const devportalState = async (name: string): Promise<SyncState | null> =>
+    name === "devportal"
+      ? {
+          version: 1,
+          source: "devportal",
+          lastRunAt: null,
+          items: {},
+          meta: { coveredRepos: ["oneplatform/hermes-docs"], repoEntities: { "oneplatform/hermes-docs": { ref: "default/module/hermes", kind: "module", owner: "group:platform", system: "oneplatform" } } },
+        }
+      : null;
+
+  it("selectFiles splits docs and code, applies excludes, tests and the TechDocs rule", () => {
+    const cfg = cfgFor();
+    const sel = selectFiles(tree1 as never, cfg.gitlab, false);
+    expect(sel.docs.map((t) => t.path)).toEqual(["README.md", "Platform/ADR0001_cqrs.md", "docs/index.md"]);
+    expect(sel.code.map((t) => t.path)).toEqual(["src/index.ts"]);
+    expect(selectFiles(tree1 as never, cfg.gitlab, true).docs.map((t) => t.path)).toEqual(["README.md", "Platform/ADR0001_cqrs.md"]);
+    cfg.gitlab.code.skip_tests = false;
+    expect(selectFiles(tree1 as never, cfg.gitlab, false).code.map((t) => t.path)).toEqual(["src/index.ts", "src/index.test.ts"]);
+    expect(selectMarkdownFiles(tree1 as never, ["**/*.md"], ["**/CHANGELOG*", "**/node_modules/**"]).map((t) => t.path)).toEqual(["README.md", "Platform/ADR0001_cqrs.md", "docs/index.md"]);
   });
 
-  it("skips listing a project whose last_activity_at did not change, and unchanged blobs otherwise", async () => {
-    const cfg = structuredClone(DEFAULT_SOURCES);
-    cfg.gitlab.groups = ["oneplatform"];
-    cfg.gitlab.skip_if_in_devportal = false;
+  it("produces docs, code files and a project card per repository, using the portal's entities and Confluence", async () => {
+    const { fetchImpl, calls } = fakeFetch(routes);
+    const cfg = cfgFor();
+    cfg.gitlab.exclude_projects = ["oneplatform/EMPTY"];
+    const enrich = { confluencePages: async (terms: string[]) => (terms.includes("ADRs") ? [{ title: "ADR process", url: "https://c/adr", space: "CTO", excerpt: "How ADRs are written", lastModified: "2026-01-01" }] : []) };
+    const events = await collect(syncGitLab(ctx(fetchImpl, base, { otherState: devportalState, enrich }, cfg)));
+    const ds = docs(events);
+    expect(ds.map((d) => d.sourceId).sort()).toEqual([
+      "gitlab:oneplatform/adrs:Platform/ADR0001_cqrs.md",
+      "gitlab:oneplatform/adrs:README.md",
+      "gitlab:oneplatform/adrs:__project",
+      "gitlab:oneplatform/adrs:docs/index.md",
+      "gitlab:oneplatform/adrs:src/index.ts",
+      "gitlab:oneplatform/hermes-docs:README.md",
+      "gitlab:oneplatform/hermes-docs:__project",
+    ]);
+    const adr = ds.find((d) => d.sourceId.endsWith("ADR0001_cqrs.md"))!;
+    expect(adr).toMatchObject({ kind: "doc", title: "ADR0001 CQRS", relPath: "gitlab/oneplatform/adrs/Platform/ADR0001_cqrs.md", lastModified: "2022-05-05", fingerprint: "sha-adr1" });
+    expect(adr.body.startsWith("## Status")).toBe(true);
+    expect(adr.sourceUrl).toBe(`${base}/oneplatform/adrs/-/blob/main/Platform/ADR0001_cqrs.md`);
+
+    const ts = ds.find((d) => d.sourceId.endsWith("src/index.ts"))!;
+    expect(ts).toMatchObject({ kind: "code", title: "src/index.ts", relPath: "gitlab/oneplatform/adrs/src/index.ts.md", lastModified: "2026-08-30", lang: "und" });
+    expect(ts.body).toBe(`\`\`\`typescript\n${code.trimEnd()}\n\`\`\``);
+    expect(ts.extra).toMatchObject({ project: "oneplatform/adrs", file_path: "src/index.ts", language: "typescript", lines: 5 });
+
+    const card = ds.find((d) => d.sourceId === "gitlab:oneplatform/adrs:__project")!;
+    expect(card).toMatchObject({ kind: "project", relPath: "gitlab/oneplatform/adrs/__project.md", title: "ADRs (oneplatform/adrs)", sourceUrl: `${base}/oneplatform/adrs` });
+    expect(card.body).toContain("Architecture decisions.");
+    expect(card.body).toContain("- Languages: TypeScript 70%, Markdown 30%");
+    expect(card.body).toContain("- Contents: 1 source files, 3 documentation files; top-level folders: Platform, src");
+    expect(card.body).toContain("## README\n\n## ADRs");
+    expect(card.body).toContain("[ADR process](https://c/adr) (CTO, updated 2026-01-01): How ADRs are written");
+    expect(card.extra["confluence_pages"]).toEqual(["https://c/adr"]);
+
+    const hermesCard = ds.find((d) => d.sourceId === "gitlab:oneplatform/hermes-docs:__project")!;
+    expect(hermesCard.body).toContain("- Dev Portal: default/module/hermes (module `default/module/hermes`); owner group:platform; system oneplatform");
+    expect(hermesCard.extra["owner"]).toBe("group:platform");
+    // docs/ of a portal-covered repo is skipped; README kept.
+    expect(calls.some((c) => c.includes("/projects/2/repository/files/docs%2Findex.md"))).toBe(false);
+    expect(calls.some((c) => c.includes("/projects/3/"))).toBe(false);
+    // Excluded/test/lock/min files are never downloaded.
+    expect(calls.some((c) => c.includes("index.test.ts") || c.includes("package-lock") || c.includes("bundle.min"))).toBe(false);
+
+    const heads = events.find((e) => e.type === "meta" && e.key === "projectHeads") as { value: Record<string, string> };
+    expect(Object.keys(heads.value).sort()).toEqual(["oneplatform/adrs", "oneplatform/hermes-docs"]);
+    expect(heads.value["oneplatform/adrs"]).toMatch(/^head-1\|[0-9a-f]{12}$/);
+    // The key changes when the portal's view of the repo changes (here: hermes-docs is covered + has an entity).
+    const plain = await collect(syncGitLab(ctx(fakeFetch(routes).fetchImpl, base, { enrich }, cfg)));
+    const plainHeads = plain.find((e) => e.type === "meta" && e.key === "projectHeads") as { value: Record<string, string> };
+    expect(plainHeads.value["oneplatform/adrs"]).toBe(heads.value["oneplatform/adrs"]);
+    expect(plainHeads.value["oneplatform/hermes-docs"]).not.toBe(heads.value["oneplatform/hermes-docs"]);
+    const enr = events.find((e) => e.type === "meta" && e.key === "projectEnrichment") as { value: Record<string, { hits: unknown[] }> };
+    expect(enr.value["oneplatform/adrs"]?.hits).toHaveLength(1);
+  });
+
+  it("skips the code (not the docs) of a repository with more source files than max_files_per_project", async () => {
+    const cfg = cfgFor();
+    cfg.gitlab.code.max_files_per_project = 0;
+    const events = await collect(syncGitLab(ctx(fakeFetch(routes).fetchImpl, base, {}, cfg)));
+    const ids = docs(events).map((d) => d.sourceId);
+    expect(ids).not.toContain("gitlab:oneplatform/adrs:src/index.ts");
+    expect(ids).toContain("gitlab:oneplatform/adrs:README.md");
+    const err = events.find((e) => e.type === "error" && e.sourceId === "gitlab:oneplatform/adrs:") as { message: string };
+    expect(err.message).toMatch(/1 source files exceed .*src=1/);
+  });
+
+  it("skips a project whose head commit did not change, and unchanged blobs otherwise; reuses fresh Confluence lookups", async () => {
+    const cfg = cfgFor();
+    const first = await collect(syncGitLab(ctx(fakeFetch(routes).fetchImpl, base, {}, cfg)));
+    const firstHeads = (first.find((e) => e.type === "meta" && e.key === "projectHeads") as { value: Record<string, string> }).value;
     const previous: Pick<SyncState, "items" | "meta"> = {
-      items: { "gitlab:oneplatform/adrs:README.md": { relPath: "gitlab/oneplatform/adrs/README.md", fingerprint: "sha-readme", title: "ADRs", sourceUrl: null, syncedAt: "" } },
-      meta: { projectActivity: { "oneplatform/adrs": "2026-09-01T10:00:00Z" } },
+      items: {
+        "gitlab:oneplatform/adrs:README.md": { relPath: "gitlab/oneplatform/adrs/README.md", fingerprint: "sha-readme", title: "ADRs", sourceUrl: null, syncedAt: "" },
+        "gitlab:oneplatform/adrs:__project": { relPath: "gitlab/oneplatform/adrs/__project.md", fingerprint: "old", title: "ADRs", sourceUrl: null, syncedAt: "" },
+        "gitlab:oneplatform/hermes-docs:__project": { relPath: "gitlab/oneplatform/hermes-docs/__project.md", fingerprint: "h", title: "hermes-docs", sourceUrl: null, syncedAt: "" },
+      },
+      meta: { projectHeads: { ...firstHeads }, projectEnrichment: { "oneplatform/adrs": { at: new Date().toISOString(), hits: [] } } },
     };
     let { fetchImpl, calls } = fakeFetch(routes);
     let events = await collect(syncGitLab(ctx(fetchImpl, base, { previous }, cfg)));
-    expect(events.filter((e) => e.type === "unchanged")).toHaveLength(1);
-    expect(calls.some((c) => c.includes("/projects/1/repository/tree"))).toBe(false);
+    expect(events.filter((e) => e.type === "unchanged")).toHaveLength(3);
+    expect(docs(events)).toHaveLength(0);
+    expect(calls.some((c) => c.includes("/repository/tree"))).toBe(false);
 
-    // Activity changed: tree is listed, README blob unchanged, ADR downloaded.
-    previous.meta = { projectActivity: { "oneplatform/adrs": "2026-08-01T10:00:00Z" } };
+    // Head moved: tree is listed, README blob unchanged, the rest downloaded; the card is rebuilt (fingerprint differs).
+    previous.meta = { ...previous.meta, projectHeads: { ...firstHeads, "oneplatform/adrs": "older|000000000000" } };
+    let lookups = 0;
+    const enrich = { confluencePages: async () => (lookups++, []) };
     ({ fetchImpl, calls } = fakeFetch(routes));
-    events = await collect(syncGitLab(ctx(fetchImpl, base, { previous }, cfg)));
+    events = await collect(syncGitLab(ctx(fetchImpl, base, { previous, enrich }, cfg)));
     expect(events.some((e) => e.type === "unchanged" && e.sourceId === "gitlab:oneplatform/adrs:README.md")).toBe(true);
-    expect(docs(events).map((d) => d.sourceId)).toEqual(["gitlab:oneplatform/adrs:Platform/ADR0001_cqrs.md"]);
-    expect(calls.some((c) => c.includes("/files/README.md/raw"))).toBe(false);
-  });
-
-  it("selectMarkdownFiles honours include/exclude globs", () => {
-    const tree = [
-      { id: "1", name: "a.md", type: "blob" as const, path: "docs/a.md" },
-      { id: "2", name: "CHANGELOG.md", type: "blob" as const, path: "CHANGELOG.md" },
-      { id: "3", name: "b.txt", type: "blob" as const, path: "b.txt" },
-    ];
-    expect(selectMarkdownFiles(tree, ["**/*.md"], ["**/CHANGELOG*"]).map((t) => t.path)).toEqual(["docs/a.md"]);
+    expect(docs(events).map((d) => d.sourceId).sort()).toEqual(["gitlab:oneplatform/adrs:Platform/ADR0001_cqrs.md", "gitlab:oneplatform/adrs:__project", "gitlab:oneplatform/adrs:docs/index.md", "gitlab:oneplatform/adrs:src/index.ts"]);
+    // README is still fetched once (for the card) but not re-emitted as a document.
+    expect(calls.filter((c) => c.includes("/files/README.md/raw")).length).toBe(1);
+    expect(calls.some((c) => c.includes("/projects/2/repository/tree"))).toBe(false);
+    expect(lookups).toBe(0); // fresh enrichment reused
   });
 });

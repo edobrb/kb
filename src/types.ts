@@ -1,12 +1,23 @@
 /** Authority level declared in the kb frontmatter. Binding/normative docs get a retrieval boost. */
 export type Authority = "binding" | "normative" | "descriptive" | "unknown";
 
+/**
+ * What a kb document is:
+ *  - doc      prose documentation (TechDocs page, README, ADR, hand-written note)
+ *  - code     a source file, stored as one fenced code block
+ *  - project  the "project card" sync builds for each repository (description, owner, README excerpt, related Confluence pages)
+ *  - api      an OpenAPI/AsyncAPI definition from the Dev Portal catalog
+ */
+export type DocKind = "doc" | "code" | "project" | "api";
+export const DOC_KINDS: readonly DocKind[] = ["doc", "code", "project", "api"];
+
 /** Document-level metadata, parsed from the YAML frontmatter of each kb/*.md file. */
 export interface DocMeta {
-  /** Stable id, e.g. "adr:repo-oneplatform-adrs-platform-adr0010-client-credentials". */
+  /** Stable id, e.g. "gitlab:oneplatform/adrs:Platform/ADR0010.md". */
   sourceId: string;
-  /** Top-level kb folder / frontmatter source_type: confluence | git-md | adr | manually-curated | ... */
+  /** Top-level kb folder / frontmatter source_type: devportal | gitlab | adr | manually-curated | ... */
   sourceType: string;
+  kind: DocKind;
   title: string;
   sourceUrl: string | null;
   authority: Authority;
@@ -22,20 +33,31 @@ export interface Document {
   meta: DocMeta;
   /** Markdown body without frontmatter. */
   body: string;
+  /** Every frontmatter field as written by sync (project, entity, language, ...). */
+  frontmatter: Record<string, unknown>;
 }
 
-/** A chunk ready to be embedded / indexed. `text` is what gets embedded (with breadcrumb header). */
+/** A chunk ready to be embedded / indexed. `text` is what gets embedded (breadcrumb + context + content). */
 export interface Chunk {
   id: string;
   sourceId: string;
   ordinal: number;
-  /** "Title > H2 > H3" style heading path for the chunk. */
+  /** "Title > H2 > H3" style heading path for the chunk ("project > file > symbol" for code). */
   headingPath: string;
   /** Raw chunk body (shown to users). */
   content: string;
-  /** Embedding/index text: breadcrumb + content. */
+  /**
+   * Contextual-retrieval prefix: a few sentences, written by the chat model, that situate the chunk in its
+   * document and project (https://www.anthropic.com/engineering/contextual-retrieval). Empty until the
+   * ingest pipeline fills it in.
+   */
+  context: string;
+  /** Embedding/index text: breadcrumb + context + content. */
   text: string;
   tokenEstimate: number;
+  /** 1-based line range in the source file (code chunks only). */
+  lineStart: number | null;
+  lineEnd: number | null;
 }
 
 /** Row as stored in LanceDB (flattened so it can be filtered with SQL-like predicates). */
@@ -43,6 +65,7 @@ export interface StoredChunk {
   id: string;
   source_id: string;
   source_type: string;
+  kind: string;
   title: string;
   source_url: string;
   authority: string;
@@ -51,13 +74,18 @@ export interface StoredChunk {
   rel_path: string;
   ordinal: number;
   heading_path: string;
+  context: string;
   content: string;
   text: string;
+  /** -1 when not a code chunk. */
+  line_start: number;
+  line_end: number;
   vector: number[];
 }
 
 export interface RetrievalFilters {
   sourceTypes?: string[];
+  kinds?: string[];
   authorities?: Authority[];
   langs?: string[];
 }
@@ -66,6 +94,7 @@ export interface RetrievedChunk {
   id: string;
   sourceId: string;
   sourceType: string;
+  kind: string;
   title: string;
   sourceUrl: string | null;
   authority: string;
@@ -73,7 +102,10 @@ export interface RetrievedChunk {
   relPath: string;
   ordinal: number;
   headingPath: string;
+  context: string;
   content: string;
+  lineStart: number | null;
+  lineEnd: number | null;
   /** Final fused score (higher is better). */
   score: number;
   /** Debug info: rank in each retriever (1-based) or null when not returned by it. */
@@ -101,12 +133,17 @@ export interface Citation {
   chunkId: string;
   sourceId: string;
   title: string;
+  /** Deep link: for code chunks the GitLab blob URL carries a `#L<start>-<end>` anchor. */
   sourceUrl: string | null;
   sourceType: string;
+  kind: string;
   authority: string;
   headingPath: string;
   relPath: string;
+  context: string;
   excerpt: string;
+  lineStart: number | null;
+  lineEnd: number | null;
   score: number;
 }
 

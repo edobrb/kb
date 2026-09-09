@@ -41,5 +41,9 @@ const n = (v: number) => v.toLocaleString("en-US");
 console.log(
   `\nDone in ${formatDuration(report.durationMs)} — files: ${n(report.filesSeen)}, unchanged: ${n(report.docsUnchanged)}, ` +
     `added: ${n(report.docsAdded)}, updated: ${n(report.docsUpdated)}, removed: ${n(report.docsRemoved)}, ` +
-    `chunks written: ${n(report.chunksWritten)}, total chunks in index: ${n(report.totalChunks)}`,
+    `chunks written: ${n(report.chunksWritten)}, total chunks in index: ${n(report.totalChunks)}` +
+    (report.contextsGenerated || report.contextsCached
+      ? `, contexts generated: ${n(report.contextsGenerated)} in ${n(report.contextCalls)} calls, from cache: ${n(report.contextsCached)}` +
+        `${report.contextRetries ? `, retried singly: ${n(report.contextRetries)}` : ""}${report.contextFailures ? `, fallbacks: ${n(report.contextFailures)}` : ""}`
+      : ""),
 );

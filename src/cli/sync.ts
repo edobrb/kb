@@ -6,13 +6,14 @@ import { flagList, flagString, parseArgs } from "./args.js";
 const { flags } = parseArgs();
 
 if (flags["help"]) {
-  console.log(`Usage: npm run sync -- [--source devportal,gitlab,confluence] [--full] [--dry-run] [--only <substring>] [--prune-foreign] [--ingest]
+  console.log(`Usage: npm run sync -- [--source devportal,gitlab] [--full] [--dry-run] [--only <substring>] [--prune-foreign] [--ingest]
 
-Gathers documentation from the configured sources (see sources.yaml, credentials in .env) into ${config.kbDir}
-as markdown files with frontmatter. Incremental: only pages/files whose version changed are downloaded.
+Gathers the Developer Portal docs and the GitLab repositories (docs, source code, one project card per repo,
+enriched with the Dev Portal catalog and Confluence) into ${config.kbDir} as markdown files with frontmatter.
+Incremental: only pages/files whose version changed are downloaded. Scope in sources.yaml, credentials in .env.
 
   --source <list>   comma-separated subset of sources (default: every enabled source, in the order
-                    devportal, gitlab, confluence so GitLab can skip repos already covered by the portal)
+                    devportal, gitlab so GitLab can use the portal's catalog metadata)
   --full            ignore the previous state and re-download everything
   --dry-run         fetch and report, but write nothing
   --only <s>        only items whose id/title/entity/project contains <s> (debugging; never deletes)

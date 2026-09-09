@@ -3,7 +3,7 @@ import { config, paths } from "../config.js";
 import { listModels } from "../llm/ollama.js";
 import { readManifest } from "../ingest/manifest.js";
 import { Retriever } from "../retrieval/retriever.js";
-import { builtinDefinitions } from "../sync/index.js";
+import { builtinDefinitions, builtinEnrichers } from "../sync/index.js";
 import { loadSourcesConfig } from "../sync/sources-config.js";
 import { readState } from "../sync/state.js";
 
@@ -20,7 +20,8 @@ console.log(`  KB_DIR            ${config.kbDir}`);
 console.log(`  DATA_DIR          ${config.dataDir}`);
 console.log(`  OLLAMA_HOST       ${config.ollama.host}`);
 console.log(`  EMBEDDING_MODEL   ${config.embedding.model} (${config.embedding.dimensions} dims, provider=${config.embedding.provider})`);
-console.log(`  CHAT_MODEL        ${config.chat.model} (think=${config.chat.think}, provider=${config.chat.provider})\n`);
+console.log(`  CHAT_MODEL        ${config.chat.model} (think=${config.chat.think}, provider=${config.chat.provider})`);
+console.log(`  CONTEXT_MODEL     ${config.context.enabled ? `${config.context.model} (contextual retrieval on, kinds: ${config.context.kinds.join(",")})` : "contextual retrieval off (CONTEXTUALIZE=false)"}\n`);
 
 console.log(`Knowledge base`);
 try {
@@ -53,6 +54,22 @@ try {
     if (st) console.log(`      last sync ${st.lastRunAt ?? "?"}, ${Object.keys(st.items).length} documents in kb/${def.folder}/`);
     else console.log(`      never synced → npm run sync -- --source ${name}`);
   }
+  for (const [name, def] of Object.entries(builtinEnrichers(sources))) {
+    if (!def.enabled) {
+      warn(`${name} (enrichment): disabled in sources.yaml — project cards will have no related Confluence pages`);
+      continue;
+    }
+    if (!def.hasCredentials) {
+      warn(`${name} (enrichment): ${def.credentialsHint}`);
+      continue;
+    }
+    try {
+      ok(`${name} (enrichment, not indexed): ${await def.probe(def.http())} (${def.baseUrl})`);
+    } catch (err) {
+      bad(`${name} (enrichment): ${(err as Error).message}`);
+      failures++;
+    }
+  }
 } catch (err) {
   bad(`sources.yaml: ${(err as Error).message}`);
   failures++;
@@ -78,6 +95,15 @@ if (config.embedding.provider === "ollama" || config.chat.provider === "ollama")
         bad(`chat model missing → run: ollama pull ${config.chat.model}`);
         failures++;
       }
+      // The contextualizer usually runs a smaller model than the answering one, so check it separately:
+      // a missing one would only surface hours into an ingest, as a fallback context on every chunk.
+      if (config.context.enabled && config.context.model !== config.chat.model) {
+        if (models.includes(config.context.model)) ok(`context model ${config.context.model} is pulled`);
+        else {
+          bad(`context model missing → run: ollama pull ${config.context.model} (or set CONTEXT_MODEL)`);
+          failures++;
+        }
+      }
     }
   } catch (err) {
     bad((err as Error).message);
@@ -100,8 +126,18 @@ if (!manifest) {
     const s = await r.stats();
     ok(`LanceDB: ${s.chunks} chunks · BM25: ${s.bm25Docs} chunks`);
     if (s.chunks !== s.bm25Docs) warn(`vector and keyword index sizes differ; re-run npm run ingest`);
+    // The map is derived from the vectors but survives a rebuild, so it can outlive the index it describes
+    // (its chunk ids then point at rows that no longer exist). Compare timestamps rather than open it: the
+    // payload is tens of megabytes once the whole KB is indexed.
+    try {
+      const [mapStat, manifestStat] = await Promise.all([stat(paths.kbMap), stat(paths.manifest)]);
+      if (mapStat.mtimeMs < manifestStat.mtimeMs) warn(`map at ${paths.kbMap} predates the last ingest → re-run: npm run map`);
+    } catch {
+      /* no map yet: /map.html says so itself */
+    }
     const f = await r.facets();
     console.log(`  source types      ${Object.entries(f.sourceTypes).map(([k, v]) => `${k}=${v}`).join(", ")}`);
+    console.log(`  kinds             ${Object.entries(f.kinds).map(([k, v]) => `${k}=${v}`).join(", ")}`);
     console.log(`  authorities       ${Object.entries(f.authorities).map(([k, v]) => `${k}=${v}`).join(", ")}`);
     console.log(`  languages         ${Object.entries(f.langs).map(([k, v]) => `${k}=${v}`).join(", ")}`);
   } catch (err) {

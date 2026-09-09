@@ -15,13 +15,6 @@ export interface Rule {
 }
 
 export interface SourcesConfig {
-  confluence: {
-    enabled: boolean;
-    spaces: { include: string[]; exclude: string[] };
-    include_personal_spaces: boolean;
-    include_blogposts: boolean;
-    min_body_chars: number;
-  };
   devportal: {
     enabled: boolean;
     include_api_definitions: boolean;
@@ -35,24 +28,49 @@ export interface SourcesConfig {
     projects: string[];
     /** Project paths (wildcards allowed, case-insensitive) never indexed, e.g. the repo that held the old KB. */
     exclude_projects: string[];
-    skip_if_in_devportal: boolean;
-    include: string[];
-    exclude: string[];
-    max_file_kb: number;
     include_archived: boolean;
     min_body_chars: number;
+    /** One "project card" per repository (description, owner, README excerpt, related Confluence pages). */
+    project_cards: boolean;
+    /** Markdown documentation inside the repositories. */
+    docs: {
+      enabled: boolean;
+      include: string[];
+      exclude: string[];
+      max_file_kb: number;
+      /** For repositories the Dev Portal already renders, skip the mkdocs content (docs/**) but keep READMEs etc. */
+      skip_techdocs_if_in_devportal: boolean;
+    };
+    /** Source code, stored one fenced block per file and chunked at declaration boundaries. */
+    code: {
+      enabled: boolean;
+      include: string[];
+      exclude: string[];
+      max_file_kb: number;
+      /** Files longer than this are almost always generated. */
+      max_lines: number;
+      /** A repository with more source files than this is vendored/generated: its code is skipped and the folders are logged. */
+      max_files_per_project: number;
+      skip_tests: boolean;
+      test_patterns: string[];
+    };
+  };
+  /**
+   * Confluence pages are NOT indexed. The wiki is only searched for pages about each repository, whose
+   * titles and snippets go into the project card (and from there into the chunk contexts).
+   */
+  confluence: {
+    enrich_projects: boolean;
+    spaces: { include: string[]; exclude: string[] };
+    max_pages_per_project: number;
+    excerpt_chars: number;
+    /** Re-run the lookup for a project only after this many days. */
+    refresh_days: number;
   };
   rules: Rule[];
 }
 
 export const DEFAULT_SOURCES: SourcesConfig = {
-  confluence: {
-    enabled: true,
-    spaces: { include: [], exclude: [] },
-    include_personal_spaces: false,
-    include_blogposts: false,
-    min_body_chars: 40,
-  },
   devportal: {
     enabled: true,
     include_api_definitions: true,
@@ -65,12 +83,48 @@ export const DEFAULT_SOURCES: SourcesConfig = {
     groups: [],
     projects: [],
     exclude_projects: [],
-    skip_if_in_devportal: true,
-    include: ["**/*.md", "**/*.markdown"],
-    exclude: ["**/node_modules/**", "**/vendor/**", "**/CHANGELOG*", "**/LICENSE*", "**/.gitlab/**", "**/.github/**"],
-    max_file_kb: 512,
     include_archived: false,
     min_body_chars: 40,
+    project_cards: true,
+    docs: {
+      enabled: true,
+      include: ["**/*.md", "**/*.markdown", "**/*.mdx"],
+      exclude: ["**/node_modules/**", "**/vendor/**", "**/CHANGELOG*", "**/LICENSE*", "**/.gitlab/**", "**/.github/**"],
+      max_file_kb: 512,
+      skip_techdocs_if_in_devportal: true,
+    },
+    code: {
+      enabled: true,
+      include: [
+        "**/*.ts", "**/*.tsx", "**/*.js", "**/*.jsx", "**/*.mjs", "**/*.cjs",
+        "**/*.py", "**/*.kt", "**/*.kts", "**/*.java", "**/*.go", "**/*.cs", "**/*.rs", "**/*.rb", "**/*.php", "**/*.scala",
+        "**/*.sql", "**/*.sh", "**/*.bash", "**/*.ps1",
+        "**/*.tf", "**/*.hcl", "**/*.yaml", "**/*.yml", "**/*.toml", "**/*.proto", "**/*.graphql", "**/*.gql", "**/*.prisma",
+        "**/Dockerfile", "**/Dockerfile.*", "**/*.dockerfile", "**/Makefile", "**/Jenkinsfile",
+        "**/*.gradle", "**/*.gradle.kts", "**/pom.xml", "**/*.csproj", "**/package.json",
+        "**/openapi*.json", "**/swagger*.json", "**/*.schema.json",
+      ],
+      exclude: [
+        "**/node_modules/**", "**/vendor/**", "**/dist/**", "**/build/**", "**/target/**", "**/out/**", "**/bin/**", "**/obj/**",
+        "**/coverage/**", "**/__pycache__/**", "**/.next/**", "**/.nuxt/**", "**/.terraform/**", "**/.git/**", "**/.idea/**", "**/.vscode/**",
+        "**/.venv/**", "**/venv/**", "**/site-packages/**", "**/Pods/**", "**/bower_components/**", "**/jspm_packages/**", "**/.yarn/**", "**/.pnpm/**",
+        "**/third_party/**", "**/third-party/**", "**/externals/**", "**/*.bundle.js", "**/*.chunk.js", "**/*-lock.*",
+        "**/*.min.*", "**/*.map", "**/*.d.ts", "**/*.snap", "**/*.lock", "**/package-lock.json", "**/yarn.lock", "**/pnpm-lock.yaml",
+        "**/fixtures/**", "**/__snapshots__/**", "**/*.generated.*", "**/generated/**", "**/__generated__/**",
+      ],
+      max_file_kb: 256,
+      max_lines: 4000,
+      max_files_per_project: 5000,
+      skip_tests: true,
+      test_patterns: ["**/test/**", "**/tests/**", "**/__tests__/**", "**/e2e/**", "**/cypress/**", "**/*.test.*", "**/*.spec.*", "**/*_test.go", "**/test_*.py", "**/*Test.java", "**/*Test.kt", "**/*Tests.cs"],
+    },
+  },
+  confluence: {
+    enrich_projects: true,
+    spaces: { include: [], exclude: [] },
+    max_pages_per_project: 3,
+    excerpt_chars: 400,
+    refresh_days: 30,
   },
   rules: [],
 };
@@ -90,9 +144,23 @@ function merge<T>(base: T, patch: unknown): T {
   return out as T;
 }
 
+/** Keys of the pre-2026-09-09 layout, with the new home of each setting. */
+const LEGACY: [path: string[], hint: string][] = [
+  [["gitlab", "include"], "gitlab.docs.include (markdown) / gitlab.code.include (source files)"],
+  [["gitlab", "exclude"], "gitlab.docs.exclude / gitlab.code.exclude"],
+  [["gitlab", "max_file_kb"], "gitlab.docs.max_file_kb / gitlab.code.max_file_kb"],
+  [["gitlab", "skip_if_in_devportal"], "gitlab.docs.skip_techdocs_if_in_devportal"],
+  [["confluence", "enabled"], "confluence pages are no longer indexed; use confluence.enrich_projects to enrich the GitLab project cards"],
+];
+
 export function parseSourcesConfig(yamlText: string): SourcesConfig {
   const parsed = YAML.parse(yamlText) ?? {};
   if (!isObj(parsed)) throw new Error("sources.yaml must be a mapping");
+  for (const [path, hint] of LEGACY) {
+    let cur: unknown = parsed;
+    for (const k of path) cur = isObj(cur) ? cur[k] : undefined;
+    if (cur !== undefined) throw new Error(`sources.yaml: "${path.join(".")}" is no longer supported — ${hint}`);
+  }
   const cfg = merge(DEFAULT_SOURCES, parsed);
   cfg.rules = Array.isArray(cfg.rules) ? cfg.rules : [];
   for (const r of cfg.rules) {
