@@ -69,8 +69,11 @@ on top of this — the two approaches compose.
                                                     └───────────────────────────────────────────────┘
 ```
 
-Two pipelines share one codebase:
+Three pipelines share one codebase:
 
+* **Sync** (offline, incremental): gathers the sources — the **Developer Portal** (Backstage/TechDocs, the
+  source of truth), **GitLab** repositories not covered by the portal, and **Confluence** — into `kb/` as
+  markdown with frontmatter. See [7.0 Gathering](#70-gathering-the-sources-srcsync-npm-run-sync).
 * **Ingest** (offline, idempotent, incremental): reads `kb/`, chunks, embeds, writes the index.
 * **Ask** (online): retrieves the best chunks with *hybrid* search and streams an answer.
   It is exposed three ways — CLI, HTTP/SSE API, and a small web chat UI — all using the same
@@ -97,15 +100,37 @@ ollama pull qwen3:8b
 npm run doctor                # checks Ollama, models, kb/ folder, index state
 ```
 
+### Gather the knowledge base
+
+```bash
+# .env: DEVPORTAL_TOKEN, GITLAB_TOKEN, CONFLUENCE_EMAIL + CONFLUENCE_API_TOKEN (see .env.example)
+npm run doctor                # "Sync sources" block: each source must be ✓
+npm run sync -- --dry-run     # what would be fetched, nothing written
+npm run sync                  # writes kb/devportal, kb/gitlab, kb/confluence (+ data/sync/*.json state)
+```
+
+Scope (Confluence spaces, GitLab groups, authority rules) lives in [`sources.yaml`](sources.yaml). The first run
+downloads everything the tokens can see; later runs only touch pages/files whose version changed and delete
+what disappeared at the source. `kb/manually-curated/` is hand-written and never touched by sync.
+
 ### Index the knowledge base
 
 ```bash
-npm run ingest
+npm run ingest                # or: npm run sync -- --ingest
 ```
 
-The first run embeds every chunk (~15 000 chunks for the current `kb/`; expect **15–30 minutes** on an
-M-series Mac with the 8B embedding model — see [Tuning](#10-tuning-guide) for a faster model while
-iterating). Subsequent runs only touch files whose bytes changed and take seconds.
+The first run embeds every chunk. A live status line reports progress and a moving ETA:
+
+```
+  37% · 118,204/315,900 chunks · 11,402/31,038 docs · 42.6 chunk/s · elapsed 46m 12s · ETA 1h 17m (~18:42)
+```
+
+The rate is measured over the last minute, so the ETA settles after the first minute and reacts if the
+machine speeds up or slows down. In a terminal the line is rewritten in place; when the output is piped to
+a file it is appended every 15 s instead, so logs stay readable. `--quiet` prints phase messages only.
+
+Subsequent runs only touch files whose bytes changed and take seconds. The run is resumable: the manifest is
+flushed every few seconds, so an interrupted ingest only re-embeds the documents written since the last flush.
 
 ### Ask
 
@@ -119,12 +144,13 @@ npm run serve                 # then open http://127.0.0.1:8787
 
 | Command | What it does |
 |---|---|
-| `npm run ingest` | Incremental index of `KB_DIR`. Flags: `--reset` (rebuild all), `--dry-run` (chunk stats + samples, no embedding), `--only <substring>` (subset of files), `--kb <dir>` |
+| `npm run sync` | Gather the sources into `KB_DIR` (Dev Portal → GitLab → Confluence). Flags: `--source devportal,gitlab,confluence`, `--full` (ignore state), `--dry-run`, `--only <substring>`, `--prune-foreign` (delete files in `kb/<source>/` that sync did not produce, e.g. old imports), `--ingest` (run ingest afterwards) |
+| `npm run ingest` | Incremental index of `KB_DIR`. Shows a live progress line (percentage, chunks/s, elapsed, ETA); `--quiet` disables it. Flags: `--reset` (rebuild all), `--dry-run` (chunk stats + samples, no embedding), `--only <substring>` (subset of files), `--kb <dir>` |
 | `npm run ask -- "question"` | Full pipeline, streams the answer to the terminal, prints cited sources and timings. Flags: `--k 8`, `--source-type adr,confluence`, `--authority binding`, `--lang en`, `--json` |
 | `npm run search -- "query"` | **Retrieval only** (no LLM): shows fused rank, vector rank, BM25 rank and text of each chunk. The main debugging tool — most RAG problems are retrieval problems. |
 | `npm run serve` | Starts the HTTP API + web UI on `HOST:PORT` (default `127.0.0.1:8787`) |
 | `npm run eval` | Retrieval metrics (hit@k, MRR) over `evals/questions.jsonl`; `--answers` also grades answers by expected keywords |
-| `npm run doctor` | Environment check: Ollama reachable, models pulled, kb/ present, index consistency, facets |
+| `npm run doctor` | Environment check: Ollama reachable, models pulled, kb/ present, index consistency, facets, sync sources reachable with the configured tokens |
 | `npm test` / `npm run typecheck` | Unit tests (vitest) / `tsc --noEmit` |
 
 ## 5. HTTP API
@@ -182,6 +208,61 @@ filter chips, multi-turn conversation, and a **Re-index** button. Auto-scroll fo
 as soon as you scroll up to read.
 
 ## 7. How each stage works
+
+### 7.0 Gathering the sources (`src/sync/`, `npm run sync`)
+
+```
+ Developer Portal (Backstage)          GitLab (biosphere)                 Confluence Cloud
+ /api/catalog/entities  ─┐             /api/v4/groups/*/projects          /wiki/api/v2/spaces
+ /api/techdocs/metadata  │ etag        /repository/tree (blob sha)        /spaces/{id}/pages (version)
+ /api/techdocs/static/…  │ HTML        /repository/files/…/raw            /pages/{id}?body-format=export_view
+          │              ▼                      │                                   │ HTML
+          │   coveredRepos ─────────► skip repos already in the portal             │
+          ▼                                     ▼                                   ▼
+   html → markdown (cheerio + turndown)   markdown as-is (frontmatter stripped)   html → markdown
+          └──────────────────────► rules (sources.yaml) → kb/<source>/… + data/sync/<source>.json
+```
+
+| Source | What is indexed | Id / file | Incremental key |
+|---|---|---|---|
+| **devportal** | every TechDocs page of every catalog entity with `backstage.io/techdocs-ref`, plus the OpenAPI/AsyncAPI definition of `API` entities | `devportal:<ns>/<kind>/<name>/<page/>` → `kb/devportal/<kind>/<name>/<page>.md` | TechDocs `etag` (whole entity skipped when unchanged) |
+| **gitlab** | `*.md` in every project of `gitlab.groups` (recursive) and `gitlab.projects`, minus `exclude_projects` (e.g. `oneplatform/PET/llm-wiki`, the old KB export), minus `exclude` globs, minus repositories the portal already covers (`skip_if_in_devportal`) | `gitlab:<group/project>:<path>` → `kb/gitlab/<group>/<project>/<path>` | project `last_activity_at`, then blob sha per file |
+| **confluence** | current pages (optionally blog posts) of every non-personal space the token can see (global, collaboration, knowledge_base), minus `spaces.exclude` | `confluence:<SPACE>:<pageId>` → `kb/confluence/<SPACE>/<pageId>-<slug>.md` | page `version.number` |
+
+Scale seen on 2026-09-08 with one user's tokens: 266 portal entities with TechDocs plus 131 API entities;
+1 400 GitLab projects across the four groups (project discovery alone takes ~1 min); 60 non-personal
+Confluence spaces with ~17 000 pages, so the first Confluence run takes a couple of hours and
+`confluence.spaces.include` in `sources.yaml` is the knob to start smaller. Later runs are fast: unchanged
+entities, repositories and pages cost one metadata request each.
+
+Why the portal first: it is populated from GitLab by CI, so it renders documentation from repositories you
+have no access to, and its TechDocs HTML is already the "published" view. The GitLab connector then only adds
+what the portal does not show (READMEs, ADR repositories, docs never wired into Backstage). Both keep a
+`source_url` pointing where people actually read the document, so citations stay clickable.
+
+Every document gets the frontmatter the ingest expects (`source_id`, `source_type`, `title`, `source_url`,
+`authority`, `lang`, `last_modified`, `fetched_at`) plus source-specific fields (`breadcrumb`, `space_key`,
+`owner`, `system`, `project`, `blob_sha`…). `authority` and `source_type` are decided by the **rules** in
+`sources.yaml` (first match wins; e.g. `gitlab:oneplatform/adrs:*` → `source_type: adr, authority: binding`);
+`lang` is detected from function words (it/en/und, the embedding model is multilingual so nothing is translated).
+Markdown identifiers are **not** escaped (`subject_token` stays one BM25 token) and images become `[image: alt]`.
+
+Safety rails: a source that aborts (network, expired token) never deletes anything; `--only` never deletes;
+files in `kb/<source>/` that sync does not know about are reported but only removed with `--prune-foreign`;
+files are rewritten only when their content changed, so `npm run ingest` stays incremental.
+
+**Credentials** (all read-only, all in `.env`):
+
+* `DEVPORTAL_TOKEN` — Backstage identity token. Log in to the portal, open DevTools → Network, click any
+  `/api/…` request and copy the `Authorization: Bearer …` value. User tokens expire after about an hour, enough
+  for a full run; for unattended runs ask the portal team for a static token (`backend.auth.externalAccess`).
+* `GITLAB_TOKEN` — personal access token with the `read_api` scope (GitLab → Preferences → Access Tokens).
+* `CONFLUENCE_EMAIL` + `CONFLUENCE_API_TOKEN` — Atlassian API token from
+  <https://id.atlassian.com/manage-profile/security/api-tokens>. It sees exactly the pages you can see. Scoped
+  tokens (the default kind since 2025) are rejected by the site URL and only work through
+  `api.atlassian.com/ex/confluence/<cloudId>`; the connector detects this and switches automatically
+  (`CONFLUENCE_CLOUD_ID` forces it). Team spaces such as CTO or TeamCore are of type `collaboration`, GP is a
+  `knowledge_base`: every type is listed, only personal spaces are opt-in (`include_personal_spaces`).
 
 ### 7.1 Loading & metadata (`src/ingest/loader.ts`)
 
@@ -289,6 +370,12 @@ Everything is an environment variable (`.env`, see `.env.example` for the full a
 | `QUERY_REWRITE` | `true` | Rewrite follow-ups into standalone queries |
 | `PORT` / `HOST` | `8787` / `127.0.0.1` | Set `HOST=0.0.0.0` to reach the UI from other machines on the LAN |
 | `EMBEDDING_PROVIDER` / `CHAT_PROVIDER` | `ollama` | `mock` runs the whole pipeline without Ollama (tests/CI) |
+| `SOURCES_FILE` | `./sources.yaml` | Scope and rules for `npm run sync` |
+| `DEVPORTAL_BASE_URL` / `DEVPORTAL_TOKEN` | `https://development.teamsystem.com` / — | Backstage bearer token (see 7.0) |
+| `GITLAB_BASE_URL` / `GITLAB_TOKEN` | `https://biosphere.teamsystem.com` / — | PAT with `read_api` |
+| `CONFLUENCE_BASE_URL` / `CONFLUENCE_EMAIL` / `CONFLUENCE_API_TOKEN` | `https://teamsystem.atlassian.net` / — / — | Atlassian API token (classic or scoped) |
+| `CONFLUENCE_CLOUD_ID` | auto | Forces the `api.atlassian.com` gateway used by scoped tokens |
+| `SYNC_CONCURRENCY` | `4` | Parallel requests per source |
 
 ## 9. Evaluation
 
@@ -408,8 +495,10 @@ identity to allowed `sourceTypes` (or add a column, e.g. Confluence space) in th
 
 ```
 ai-wiki/
-├── kb/                          the knowledge base (markdown + frontmatter) — input, never modified
-├── data/                        generated index (LanceDB, BM25, manifest) — safe to delete, git-ignored
+├── kb/                          the knowledge base (markdown + frontmatter): kb/{devportal,gitlab,confluence}
+│                                are written by `npm run sync`, kb/manually-curated/ by hand
+├── sources.yaml                 what sync gathers (spaces, groups, globs) and authority/source_type rules
+├── data/                        generated index (LanceDB, BM25, manifest) + data/sync/ state — git-ignored
 ├── evals/questions.jsonl        evaluation set
 ├── scripts/setup-ollama.sh      pulls the two models
 ├── src/
@@ -419,6 +508,16 @@ ai-wiki/
 │   │   ├── ollama.ts            /api/embed + streaming /api/chat client (no SDK)
 │   │   ├── embeddings.ts        Qwen3 query instruction, Matryoshka truncation, mock embedder
 │   │   └── chat.ts              chat provider (Ollama | mock)
+│   ├── sync/
+│   │   ├── index.ts             orchestrator: run connectors, write kb/, prune, persist state
+│   │   ├── devportal.ts         Backstage catalog + TechDocs connector (emits coveredRepos)
+│   │   ├── gitlab.ts            GitLab groups/projects/tree/raw connector
+│   │   ├── confluence.ts        Confluence REST v2 connector
+│   │   ├── html.ts              cheerio + turndown HTML → markdown (code panels, tables, admonitions)
+│   │   ├── sources-config.ts    sources.yaml parsing, globs, rules
+│   │   ├── kb-writer.ts         frontmatter rendering, slugs
+│   │   ├── http.ts              fetch with retries/backoff, concurrency limiter
+│   │   └── lang.ts, state.ts, types.ts
 │   ├── ingest/
 │   │   ├── loader.ts            file walk, frontmatter parsing, metadata, cleaning
 │   │   ├── chunker.ts           markdown block parser + heading-aware packing
@@ -431,11 +530,11 @@ ai-wiki/
 │   ├── generation/
 │   │   ├── prompt.ts            system prompt, context formatting, citation extraction
 │   │   └── ask.ts               the streaming RAG loop shared by CLI and API
-│   ├── cli/                     ingest · ask · search · eval · doctor
+│   ├── cli/                     sync · ingest · ask · search · eval · doctor
 │   └── server/
 │       ├── index.ts             Fastify: /api/ask (SSE), /api/ask/sync, /api/search, /api/ingest, …
 │       └── public/index.html    chat UI
-└── tests/                       vitest unit tests (chunker, loader, BM25, prompt)
+└── tests/                       vitest unit tests (chunker, loader, BM25, prompt, sync connectors with fake fetch)
 ```
 
 Design choices worth knowing: no LangChain/LlamaIndex (the whole pipeline is ~1 500 lines you can read in an
@@ -450,6 +549,10 @@ ingest, storage, retrieval, API, UI — runs in tests and CI without models.
 | `model "qwen3-embedding:8b" not found` | `ollama pull qwen3-embedding:8b` (same for the chat model) |
 | `The index is empty. Run npm run ingest first.` | Exactly that |
 | `Existing index is incompatible (...) rebuilding` | Expected after changing embedding model/dims or chunk sizes |
+| `[devportal] ... HTTP 401 ... Missing credentials` | `DEVPORTAL_TOKEN` missing or expired (user tokens last ~1 h): copy a fresh one from the browser, or use a static token |
+| `confluence: HTTP 401 ... <title>HTTP Status 401` on the site URL | Scoped API token; the connector falls back to the `api.atlassian.com` gateway by itself. If the gateway also fails, check `CONFLUENCE_EMAIL` and the token's Confluence read scopes |
+| `[gitlab] group X: HTTP 404` | The token cannot see that group; remove it from `sources.yaml` or list the projects you can see under `gitlab.projects` |
+| `N file(s) in confluence/ were not produced by sync` | Old imports in `kb/<source>/`; check them, then `npm run sync -- --prune-foreign` |
 | Ingest interrupted (Ctrl-C, sleep) | Just run `npm run ingest` again; it resumes from the manifest |
 | Answers in the wrong language | The prompt mirrors the question's language; ask in the language you want |
 | `vector and keyword index sizes differ` in doctor | `npm run ingest` (rebuilds BM25 from the table) |

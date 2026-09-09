@@ -3,6 +3,9 @@ import { config, paths } from "../config.js";
 import { listModels } from "../llm/ollama.js";
 import { readManifest } from "../ingest/manifest.js";
 import { Retriever } from "../retrieval/retriever.js";
+import { builtinDefinitions } from "../sync/index.js";
+import { loadSourcesConfig } from "../sync/sources-config.js";
+import { readState } from "../sync/state.js";
 
 /** Checks the environment: Ollama reachable, models pulled, kb folder present, index state. */
 
@@ -25,6 +28,33 @@ try {
   ok(`folder exists`);
 } catch {
   bad(`folder not found: ${config.kbDir}`);
+  failures++;
+}
+
+console.log(`\nSync sources (npm run sync; scope in ${config.sync.sourcesFile})`);
+try {
+  const sources = await loadSourcesConfig(config.sync.sourcesFile);
+  for (const [name, def] of Object.entries(builtinDefinitions(sources))) {
+    if (!def.enabled) {
+      warn(`${name}: disabled in sources.yaml`);
+      continue;
+    }
+    if (!def.hasCredentials) {
+      warn(`${name}: ${def.credentialsHint}`);
+    } else {
+      try {
+        ok(`${name}: ${await def.probe(def.http())} (${def.baseUrl})`);
+      } catch (err) {
+        bad(`${name}: ${(err as Error).message}`);
+        failures++;
+      }
+    }
+    const st = await readState(paths.syncState, name);
+    if (st) console.log(`      last sync ${st.lastRunAt ?? "?"}, ${Object.keys(st.items).length} documents in kb/${def.folder}/`);
+    else console.log(`      never synced → npm run sync -- --source ${name}`);
+  }
+} catch (err) {
+  bad(`sources.yaml: ${(err as Error).message}`);
   failures++;
 }
 

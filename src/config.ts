@@ -85,6 +85,27 @@ export const config = {
     /** Model used by `npm run eval -- --judge`. Defaults to the chat model; a bigger one grades more reliably. */
     judgeModel: str("JUDGE_MODEL", str("CHAT_MODEL", "qwen3:8b")),
   },
+
+  /** `npm run sync`: where the knowledge base is gathered from. Scope lives in sources.yaml. */
+  sync: {
+    sourcesFile: path.resolve(root, str("SOURCES_FILE", "./sources.yaml")),
+    concurrency: num("SYNC_CONCURRENCY", 4),
+    devportal: {
+      baseUrl: str("DEVPORTAL_BASE_URL", "https://development.teamsystem.com").replace(/\/$/, ""),
+      token: str("DEVPORTAL_TOKEN", ""),
+    },
+    gitlab: {
+      baseUrl: str("GITLAB_BASE_URL", "https://biosphere.teamsystem.com").replace(/\/$/, ""),
+      token: str("GITLAB_TOKEN", ""),
+    },
+    confluence: {
+      baseUrl: str("CONFLUENCE_BASE_URL", "https://teamsystem.atlassian.net").replace(/\/$/, ""),
+      email: str("CONFLUENCE_EMAIL", ""),
+      token: str("CONFLUENCE_API_TOKEN", ""),
+      /** Optional: forces the api.atlassian.com gateway (needed by scoped tokens; auto-detected when empty). */
+      cloudId: str("CONFLUENCE_CLOUD_ID", ""),
+    },
+  },
 } as const;
 
 export type Config = typeof config;
@@ -93,4 +114,6 @@ export const paths = {
   lanceDb: path.join(config.dataDir, "lancedb"),
   bm25Index: path.join(config.dataDir, "bm25.json.gz"),
   manifest: path.join(config.dataDir, "manifest.json"),
+  /** Per-source sync state (data/sync/<source>.json). */
+  syncState: path.join(config.dataDir, "sync"),
 };

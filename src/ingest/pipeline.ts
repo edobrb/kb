@@ -7,6 +7,7 @@ import type { Chunk, Document, StoredChunk } from "../types.js";
 import { chunkDocument } from "./chunker.js";
 import { listMarkdownFiles, loadDocument } from "./loader.js";
 import { emptyManifest, manifestIncompatible, readManifest, writeManifest, type Manifest } from "./manifest.js";
+import { RateTracker, type IngestProgress } from "./progress.js";
 
 export interface IngestOptions {
   kbDir?: string;
@@ -17,6 +18,8 @@ export interface IngestOptions {
   /** Restrict to files whose relative path contains this substring (handy for debugging). */
   only?: string;
   log?: (msg: string) => void;
+  /** Called after each document is embedded, and once per phase change. Used to render progress/ETA. */
+  onProgress?: (p: IngestProgress) => void;
 }
 
 export interface IngestReport {
@@ -120,8 +123,9 @@ export async function ingest(opts: IngestOptions = {}): Promise<IngestReport> {
   const chunkTotal = work.reduce((n, w) => n + w.chunks.length, 0);
   if (work.length) {
     const sizes = work.flatMap((w) => w.chunks.map((c) => c.tokenEstimate));
-    const avg = sizes.length ? Math.round(sizes.reduce((a, b) => a + b, 0) / sizes.length) : 0;
-    log(`Chunked ${work.length} docs into ${chunkTotal} chunks (avg ~${avg} tokens, max ${Math.max(0, ...sizes)})`);
+    const { sum, max } = sizes.reduce((acc, n) => ({ sum: acc.sum + n, max: n > acc.max ? n : acc.max }), { sum: 0, max: 0 });
+    const avg = sizes.length ? Math.round(sum / sizes.length) : 0;
+    log(`Chunked ${work.length} docs into ${chunkTotal} chunks (avg ~${avg} tokens, max ${max})`);
   }
 
   if (opts.dryRun) {
@@ -148,13 +152,35 @@ export async function ingest(opts: IngestOptions = {}): Promise<IngestReport> {
     for (const id of removedIds) delete manifest.docs[id];
   }
 
-  // 4. Embed + write, document by document (so a crash mid-way leaves a consistent manifest).
+  // 4. Embed + write, document by document.
+  //
+  // The manifest records what is already indexed, so it must reach disk regularly: a crash then only
+  // costs the documents written since the last flush (they are simply re-embedded next run). Writing it
+  // after *every* document is O(n²) though — at 31k docs the file is ~10 MB, so that would serialise
+  // ~160 GB over a run — hence the time-based flush.
+  const MANIFEST_FLUSH_MS = 5_000;
+  let lastManifestWrite = Date.now();
+  const flushManifest = async (force = false) => {
+    if (!force && Date.now() - lastManifestWrite < MANIFEST_FLUSH_MS) return;
+    await writeManifest(paths.manifest, manifest);
+    lastManifestWrite = Date.now();
+  };
+
   let written = 0;
   let embedded = 0;
+  let docsDone = 0;
+  const embedStarted = Date.now();
+  const rate = new RateTracker();
+  rate.add(0, embedStarted);
   const now = new Date().toISOString();
+
+  if (chunkTotal) {
+    const model = config.embedding.provider === "ollama" ? config.embedding.model : `${config.embedding.provider}:${config.embedding.model}`;
+    log(`Embedding ${chunkTotal.toLocaleString("en-US")} chunks from ${work.length.toLocaleString("en-US")} documents with ${model}`);
+  }
+
   for (const { doc, chunks } of work) {
     if (!chunks.length) {
-      log(`  - ${doc.meta.relPath}: empty body, skipped`);
       manifest.docs[doc.meta.sourceId] = {
         sourceId: doc.meta.sourceId,
         relPath: doc.meta.relPath,
@@ -162,6 +188,7 @@ export async function ingest(opts: IngestOptions = {}): Promise<IngestReport> {
         chunkCount: 0,
         indexedAt: now,
       };
+      docsDone++;
       continue;
     }
     const vectors = await embedder.embedDocuments(chunks.map((c) => c.text));
@@ -169,6 +196,7 @@ export async function ingest(opts: IngestOptions = {}): Promise<IngestReport> {
     await store.add(rows);
     written += rows.length;
     embedded += chunks.length;
+    docsDone++;
     manifest.docs[doc.meta.sourceId] = {
       sourceId: doc.meta.sourceId,
       relPath: doc.meta.relPath,
@@ -176,11 +204,24 @@ export async function ingest(opts: IngestOptions = {}): Promise<IngestReport> {
       chunkCount: chunks.length,
       indexedAt: now,
     };
-    if (embedded % 200 < chunks.length || embedded === chunkTotal) {
-      log(`  embedded ${embedded}/${chunkTotal} chunks (${Math.round((embedded / chunkTotal) * 100)}%)`);
-    }
-    await writeManifest(paths.manifest, manifest);
+
+    const t = Date.now();
+    rate.add(embedded, t);
+    opts.onProgress?.({
+      phase: "embedding",
+      docsDone,
+      docsTotal: work.length,
+      chunksDone: embedded,
+      chunksTotal: chunkTotal,
+      elapsedMs: t - embedStarted,
+      chunksPerSec: rate.perSecond(),
+      etaMs: rate.etaMs(chunkTotal - embedded),
+      currentPath: doc.meta.relPath,
+    });
+
+    await flushManifest();
   }
+  await flushManifest(true);
 
   if (!written && !staleIds.length) {
     log("Nothing to do; index is up to date.");
@@ -189,9 +230,25 @@ export async function ingest(opts: IngestOptions = {}): Promise<IngestReport> {
   }
 
   // 5. Rebuild the keyword index from the table (single source of truth).
+  const bm25Started = Date.now();
+  const totalInStore = await store.count();
+  log(`Rebuilding the keyword index over ${totalInStore.toLocaleString("en-US")} chunks`);
   const bm25Docs = [];
   for await (const r of store.scanForKeywordIndex()) {
     bm25Docs.push({ id: r.id, text: r.text, sourceType: r.source_type, authority: r.authority, lang: r.lang });
+    if (bm25Docs.length % 5000 === 0) {
+      opts.onProgress?.({
+        phase: "indexing",
+        docsDone: work.length,
+        docsTotal: work.length,
+        chunksDone: bm25Docs.length,
+        chunksTotal: totalInStore,
+        elapsedMs: Date.now() - bm25Started,
+        chunksPerSec: 0,
+        etaMs: null,
+        currentPath: "",
+      });
+    }
   }
   const bm25 = Bm25Index.build(bm25Docs);
   await bm25.save(paths.bm25Index);

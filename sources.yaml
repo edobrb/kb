@@ -1,0 +1,73 @@
+# What `npm run sync` gathers into kb/. Credentials live in .env (see .env.example).
+# Everything the tokens can see is fetched; narrow it here. Unknown keys fall back to defaults
+# (src/sync/sources-config.ts).
+
+# ---- Developer Portal (Backstage + TechDocs) — source of truth --------------------------------
+# Every catalog entity with TechDocs is indexed from the portal's rendered docs, so repositories
+# you cannot read on GitLab are still covered. OpenAPI/AsyncAPI definitions of API entities too.
+devportal:
+  enabled: true
+  include_api_definitions: true
+  max_definition_chars: 200000
+  exclude_entities: [] # "component/some-name"
+  min_body_chars: 40
+
+# ---- GitLab (biosphere.teamsystem.com) ---------------------------------------------------------
+# Markdown from repositories NOT already covered by the Dev Portal: READMEs, docs/ folders, ADRs...
+gitlab:
+  enabled: true
+  groups: # searched recursively (sub-groups included); only what the token can see
+    - oneplatform
+    - tsdigital
+    - paas
+    - madbit
+  projects: [] # extra "group/subgroup/project" paths outside the groups above
+  exclude_projects: # never indexed (wildcards allowed)
+    - oneplatform/PET/llm-wiki* # the repo that held the previous, hand-assembled kb export
+  skip_if_in_devportal: false
+  include: ["**/*.md", "**/*.markdown"]
+  exclude:
+    - "**/node_modules/**"
+    - "**/vendor/**"
+    - "**/CHANGELOG*"
+    - "**/LICENSE*"
+    - "**/.gitlab/**"
+    - "**/.github/**"
+    - "**/PULL_REQUEST_TEMPLATE*"
+    - "**/*.template.md"
+    - "**/test/**"
+    - "**/tests/**"
+  max_file_kb: 2048
+  include_archived: false
+  min_body_chars: 40
+
+# ---- Confluence (teamsystem.atlassian.net) -----------------------------------------------------
+confluence:
+  enabled: true
+  # Space types global, collaboration and knowledge_base are all listed; personal spaces are opt-in.
+  # On 2026-09-08 the token saw 60 non-personal spaces / ~17k pages (TE alone 5.8k, TPROF 2.8k): the first
+  # full run takes a couple of hours. To start with the R&D/platform core only, use e.g.
+  #   include: [CTO, TeamCore, TONEPLAT, TPAAS, TSDIGITAL, GP, OBO, TeamWorksp, TeamMeteri, DShub, RPDD]
+  spaces:
+    include: [] # empty = every space the token can see
+    exclude: [DRAWIOCONFIG, JAAI, UP, BC1SP, Test]
+  include_personal_spaces: false
+  include_blogposts: false
+  min_body_chars: 40
+
+# ---- Rules: authority / source_type / skip by id, url or title (first match wins) -------------
+# `*` matches anything. Ids look like:
+#   confluence:<SPACE>:<pageId>      devportal:<ns>/<kind>/<name>/<page/path/>      gitlab:<group>/<project>:<file path>
+rules:
+  - match: "gitlab:oneplatform/adrs:template.md"
+    skip: true
+  - match: "gitlab:oneplatform/adrs:*"
+    source_type: adr
+    authority: binding
+  - match: "devportal:*/adr*"
+    authority: binding
+  - title: "*ADR[0-9]*"
+    authority: binding
+  # Example: everything in the Group Technology space is normative
+  # - match: "confluence:CTO:*"
+  #   authority: normative
