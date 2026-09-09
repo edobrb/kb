@@ -149,6 +149,7 @@ npm run serve                 # then open http://127.0.0.1:8787
 | `npm run ask -- "question"` | Full pipeline, streams the answer to the terminal, prints cited sources and timings. Flags: `--k 8`, `--source-type adr,confluence`, `--authority binding`, `--lang en`, `--json` |
 | `npm run search -- "query"` | **Retrieval only** (no LLM): shows fused rank, vector rank, BM25 rank and text of each chunk. The main debugging tool — most RAG problems are retrieval problems. |
 | `npm run serve` | Starts the HTTP API + web UI on `HOST:PORT` (default `127.0.0.1:8787`) |
+| `npm run map` | Projects every chunk vector to 2-D with UMAP, groups the chunks into semantic clusters, and writes `data/kb-map.json.gz`, rendered by the web UI at `/map.html`. Re-run after `ingest`. Flags: `--clusters 8`, `--neighbors 15`, `--min-dist 0.1`, `--epochs 400`, `--project 256`, `--seed 42`, `--out <file>`, `--relabel` (recompute names only, ~1 s) |
 | `npm run eval` | Retrieval metrics (hit@k, MRR) over `evals/questions.jsonl`; `--answers` also grades answers by expected keywords |
 | `npm run doctor` | Environment check: Ollama reachable, models pulled, kb/ present, index consistency, facets, sync sources reachable with the configured tokens |
 | `npm test` / `npm run typecheck` | Unit tests (vitest) / `tsc --noEmit` |
@@ -198,6 +199,30 @@ an ingest is already running.
 
 Index size, models in use; distinct `source_type` / `authority` / `lang` values with counts.
 
+### `GET /api/map`
+
+The 2-D projection built by `npm run map`, served gzipped straight from disk. 404 with a hint when it has not
+been built yet. Consumed by `/map.html` (see [6.1](#61-knowledge-base-map-maphtml)). Shape:
+
+```jsonc
+{
+  "version": 2, "chunks": 60633, "docs": 7101, "generatedAt": "…", "params": { … },
+  "dict":      { "groups": ["confluence/EC", …], "sourceTypes": […], "langs": […], "authorities": […] },
+  "documents": [{ "id": "<sourceId>", "title": "…", "url": "…", "path": "…", "g": 0, "s": 0, "l": 1, "a": 2 }],
+  "clusters":  [{ "id": 0, "name": "TSC OpenTelemetry Legacy", "n": 1007, "x": 1.2, "y": -3.4 }],
+  "points":    { "x": [], "y": [], "doc": [], "ord": [], "cl": [], "head": [] },
+  "labels":    [{ "x": 1.2, "y": -3.4, "text": "…", "n": 1007, "level": 0 }]
+}
+```
+
+Document metadata is stored once and referenced by index from `points.doc`, repeated strings live in `dict`,
+and per-chunk data sits in parallel arrays. Chunk ids are not shipped: a chunk id is `` `${documents[doc].id}::${ord}` ``.
+
+### `POST /api/chunk`
+
+`{"id":"<chunkId>"}` or `{"ids":[…]}` (max 50) → `{ chunks: RetrievedChunk[] }`. Chunk text is deliberately
+absent from the map payload, so the map UI loads a passage only when you select its dot.
+
 ## 6. Web UI
 
 `npm run serve` and open <http://127.0.0.1:8787>. Single static file (`src/server/public/index.html`, no build
@@ -206,6 +231,60 @@ thinking into a collapsible panel above the answer, clickable `[n]` citations th
 source cards with title → original URL, source-type and authority badges, expandable passage, source-type
 filter chips, multi-turn conversation, and a **Re-index** button. Auto-scroll follows the stream but stops
 as soon as you scroll up to read.
+
+### 6.1 Knowledge base map (`/map.html`)
+
+A second static page draws the **whole vector index as a 2-D map**: every chunk (or every document, as the
+centroid of its chunks) is a dot, and dots that are close in embedding space are close on screen. It is the
+quickest way to *see* the shape of the knowledge base — which spaces overlap, where the hand-written glossary
+sits relative to the technical docs, isolated clusters that only add noise to retrieval, near-duplicate pages,
+and documents whose chunks scatter instead of forming a tight group.
+
+```bash
+npm run ingest         # as usual
+npm run map            # ~25 s for 10k chunks; writes data/kb-map.json.gz
+npm run serve          # → http://127.0.0.1:8787/map.html
+```
+
+Cluster names are recomputed in about a second with `npm run map -- --relabel`, which rewrites the names and
+labels on the existing projection instead of redoing it — worth knowing, because naming is the part you will
+want to iterate on.
+
+**Colours mean meaning, not provenance.** Before UMAP runs, the vectors are grouped with spherical k-means
+(`--clusters`, 8 by default) and each cluster is named after the words that are frequent inside it and rare
+elsewhere (TF-IDF over titles and heading paths, counting each term once per document so one verbose page cannot name a
+whole cluster, and discarding terms that appear in every cluster, which is what stops corpus boilerplate such
+as "Analisi Funzionale" from becoming every label). So a colour is a *topic* — "TSC OpenTelemetry Legacy",
+"Analisi Funzionale Finanza" — and the same names are drawn on the map as labels. The clustering runs on the
+embedding vectors, not on the 2-D coordinates, so it is not distorted by the projection. Colour by space,
+source type, language or authority is still one dropdown away.
+
+**Reading a source.** Hovering a dot shows its title, heading path, cluster and space. Clicking it fills the
+**Selected** panel at the top of the sidebar, which loads the chunk's full text from `POST /api/chunk` and
+offers an **Open source ↗** button. Double-clicking a dot opens its Confluence page or repository file
+straight away, and cmd/ctrl-click does the same.
+
+**Retrieval probe.** Type a question and the page calls `POST /api/search`, then rings the chunks the real
+hybrid retriever returned, numbered by rank. One tight ringed group means the query landed in a coherent
+region; rings scattered across unrelated clusters mean the query needs rewriting or the BM25 weight is too
+high. Clicking a result zooms to its dot.
+
+#### Built to grow
+
+The index went from 9.5k to 60k chunks in a day, so the map is built for a knowledge base several times
+larger again:
+
+| Concern | How it is handled |
+|---|---|
+| **Payload size** | Document metadata is stored once and referenced by index, repeated strings are interned in `dict`, per-chunk data is held in parallel arrays, chunk ids are derived rather than shipped, and chunk text is fetched on demand. The file is gzipped on disk and passed through with `content-encoding: gzip`. 9,541 chunks went from 7 MB of JSON to **0.2 MB over the wire**. |
+| **Build memory** | Vectors are random-projected row by row as they stream out of LanceDB, so the full-width copy is never held. 100k chunks at 4096 dims would be 1.6 GB; at 256 dims it is ~100 MB. |
+| **Hover and drawing** | Points are bucketed into a uniform grid (counting sort, typed arrays). Hit-testing touches only the cells under the cursor and drawing only the cells in the viewport, instead of scanning every point on every mouse move. |
+| **Overdraw** | Above ~25k points in view, or with **density** ticked, points are blended straight into a pixel buffer in one pass rather than stroked as arcs. Overlapping points darken, so structure stays readable where dots would pile into a solid blob. Zooming in returns to crisp dots automatically. |
+| **Legibility** | Cluster names are drawn on the map, coarse ones when zoomed out and finer per-region labels once zoomed in, each skipped if it would collide with a label already placed. |
+
+Caveats: UMAP distances are only meaningful *locally* — cluster membership and neighbourhoods are reliable,
+distances between far-apart clusters are not. The map is a snapshot: after `npm run ingest` the probe will
+report chunks that are "not on the map" until you run `npm run map` again.
 
 ## 7. How each stage works
 
@@ -498,7 +577,7 @@ ai-wiki/
 ├── kb/                          the knowledge base (markdown + frontmatter): kb/{devportal,gitlab,confluence}
 │                                are written by `npm run sync`, kb/manually-curated/ by hand
 ├── sources.yaml                 what sync gathers (spaces, groups, globs) and authority/source_type rules
-├── data/                        generated index (LanceDB, BM25, manifest) + data/sync/ state — git-ignored
+├── data/                        generated index (LanceDB, BM25, manifest, kb-map.json.gz) + data/sync/ state — git-ignored
 ├── evals/questions.jsonl        evaluation set
 ├── scripts/setup-ollama.sh      pulls the two models
 ├── src/
@@ -527,13 +606,15 @@ ai-wiki/
 │   │   ├── vector-store.ts      LanceDB table (schema, add/delete/search/filters)
 │   │   └── bm25.ts              tokenizer + Okapi BM25 + gzip persistence
 │   ├── retrieval/retriever.ts   hybrid search, RRF, boosts, diversity cap, LLM rerank
+│   ├── viz/map.ts               random projection, k-means clusters, UMAP → 2-D map (npm run map)
 │   ├── generation/
 │   │   ├── prompt.ts            system prompt, context formatting, citation extraction
 │   │   └── ask.ts               the streaming RAG loop shared by CLI and API
-│   ├── cli/                     sync · ingest · ask · search · eval · doctor
+│   ├── cli/                     sync · ingest · ask · search · eval · doctor · map
 │   └── server/
-│       ├── index.ts             Fastify: /api/ask (SSE), /api/ask/sync, /api/search, /api/ingest, …
-│       └── public/index.html    chat UI
+│       ├── index.ts             Fastify: /api/ask (SSE), /api/ask/sync, /api/search, /api/map, /api/ingest, …
+│       ├── public/index.html    chat UI
+│       └── public/map.html      2-D map: clusters, labels, density LOD (canvas, no build step)
 └── tests/                       vitest unit tests (chunker, loader, BM25, prompt, sync connectors with fake fetch)
 ```
 

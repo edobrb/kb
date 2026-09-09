@@ -114,6 +114,8 @@ export const paths = {
   lanceDb: path.join(config.dataDir, "lancedb"),
   bm25Index: path.join(config.dataDir, "bm25.json.gz"),
   manifest: path.join(config.dataDir, "manifest.json"),
+  /** 2-D UMAP projection of the vector index, built by `npm run map`, rendered at /map.html. */
+  kbMap: path.join(config.dataDir, "kb-map.json.gz"),
   /** Per-source sync state (data/sync/<source>.json). */
   syncState: path.join(config.dataDir, "sync"),
 };

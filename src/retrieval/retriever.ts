@@ -68,6 +68,15 @@ export class Retriever {
     return { chunks: await this.store.count(), bm25Docs: this.bm25?.size ?? 0, dimensions: this.store.dimensions };
   }
 
+  /** Fetch single chunks by id, e.g. to show a passage the map UI just selected. */
+  async chunksByIds(ids: string[]): Promise<RetrievedChunk[]> {
+    const rows = await this.store.getByIds(ids);
+    return ids.flatMap((id) => {
+      const row = rows.get(id);
+      return row ? [toRetrieved(row, 0, null, null)] : [];
+    });
+  }
+
   async facets(): Promise<{ sourceTypes: Record<string, number>; authorities: Record<string, number>; langs: Record<string, number> }> {
     const [sourceTypes, authorities, langs] = await Promise.all([
       this.store.distinct("source_type"),

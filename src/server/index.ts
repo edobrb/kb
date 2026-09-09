@@ -1,9 +1,10 @@
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import Fastify from "fastify";
-import { config } from "../config.js";
+import { config, paths } from "../config.js";
 import { ask, askOnce, getRetriever, resetRetriever } from "../generation/ask.js";
 import { ingest } from "../ingest/pipeline.js";
 import type { AskRequest, Authority, ChatMessage, RetrievalFilters } from "../types.js";
@@ -63,6 +64,37 @@ app.get("/api/health", async () => {
 });
 
 app.get("/api/facets", async () => (await getRetriever()).facets());
+
+/**
+ * 2-D UMAP projection of the whole index, built offline by `npm run map`; rendered by /map.html.
+ * Stored gzipped and passed through as-is, so the browser decompresses it instead of the payload
+ * growing unbounded with the knowledge base.
+ */
+app.get("/api/map", async (_req, reply) => {
+  try {
+    const gz = await readFile(paths.kbMap);
+    return reply.header("content-encoding", "gzip").header("cache-control", "no-cache").type("application/json; charset=utf-8").send(gz);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return reply.code(404).send({ error: `No map yet at ${paths.kbMap} — run \`npm run map\` after ingest.` });
+    }
+    return reply.code(500).send({ error: (err as Error).message });
+  }
+});
+
+/** Chunk text by id, so the map payload can stay metadata-only and load passages on demand. */
+app.post("/api/chunk", async (req, reply) => {
+  try {
+    const body = req.body as { id?: unknown; ids?: unknown };
+    const ids = Array.isArray(body?.ids) ? body.ids.map(String) : typeof body?.id === "string" ? [body.id] : [];
+    if (!ids.length) return reply.code(400).send({ error: "`id` (string) or `ids` (array) is required" });
+    if (ids.length > 50) return reply.code(400).send({ error: "at most 50 ids per request" });
+    const chunks = await (await getRetriever()).chunksByIds(ids);
+    return { chunks };
+  } catch (err) {
+    return reply.code(500).send({ error: (err as Error).message });
+  }
+});
 
 /** Retrieval only — useful for debugging and for other tools that bring their own LLM. */
 app.post("/api/search", async (req, reply) => {
@@ -155,7 +187,8 @@ app.post("/api/ingest", async (req, reply) => {
 try {
   await app.listen({ port: config.server.port, host: config.server.host });
   app.log.info(`Chat UI:  http://${config.server.host}:${config.server.port}/`);
-  app.log.info(`API:      POST /api/ask (SSE) · POST /api/ask/sync · POST /api/search · GET /api/health`);
+  app.log.info(`Map:      http://${config.server.host}:${config.server.port}/map.html (after \`npm run map\`)`);
+  app.log.info(`API:      POST /api/ask (SSE) · POST /api/ask/sync · POST /api/search · GET /api/map · POST /api/chunk · GET /api/health`);
 } catch (err) {
   app.log.error(err);
   process.exit(1);

@@ -1,0 +1,748 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ai-wiki · knowledge base map</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1c1f26; --muted: #6b7280; --border: #e3e6eb;
+    --accent: #2f5bea; --accent-soft: #e8eefc; --code: #f1f3f6; --other: #9a9a94;
+    --c1: #2a78d6; --c2: #eb6834; --c3: #1baf7a; --c4: #eda100; --c5: #e87ba4; --c6: #008300; --c7: #4a3aa7; --c8: #e34948;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --panel: #171a21; --text: #e6e8ee; --muted: #9aa1ad; --border: #262b35;
+      --accent: #7c9cff; --accent-soft: #1d2540; --code: #1c2029; --other: #6f6f6a;
+      --c1: #3987e5; --c2: #d95926; --c3: #199e70; --c4: #c98500; --c5: #d55181; --c6: #008300; --c7: #9085e9; --c8: #e66767;
+    }
+  }
+  * { box-sizing: border-box; }
+  /* Author `display` rules outrank the UA rule for [hidden]; without this, an overlay such as `.empty`
+     (display:flex, inset:0) stays laid out over the canvas while invisible and eats every mouse event. */
+  [hidden] { display: none !important; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+    background: var(--bg); color: var(--text); display: flex; flex-direction: column; overflow: hidden;
+  }
+  header {
+    display: flex; align-items: center; gap: 14px; padding: 12px 20px; border-bottom: 1px solid var(--border);
+    background: var(--panel); z-index: 2;
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 650; }
+  header .meta { color: var(--muted); font-size: 12.5px; }
+  header .spacer { flex: 1; }
+  header a.nav { border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; font-size: 13px; color: var(--text); text-decoration: none; }
+  header a.nav:hover { border-color: var(--accent); color: var(--accent); }
+  .layout { flex: 1; display: flex; min-height: 0; }
+  .stage { flex: 1; position: relative; overflow: hidden; background: var(--bg); min-width: 0; }
+  canvas { display: block; width: 100%; height: 100%; cursor: grab; }
+  canvas.dragging { cursor: grabbing; }
+  canvas.onpoint { cursor: pointer; }
+  .hint { position: absolute; left: 12px; bottom: 10px; color: var(--muted); font-size: 12px; pointer-events: none; }
+  .empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center; color: var(--muted); padding: 40px; }
+  .empty code { background: var(--code); padding: 1px 6px; border-radius: 5px; }
+  .tip {
+    position: absolute; pointer-events: none; background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 8px 11px; max-width: 330px; font-size: 12.5px; box-shadow: 0 6px 24px rgba(0,0,0,.12); display: none; z-index: 3;
+  }
+  .tip b { display: block; font-weight: 600; margin-bottom: 2px; }
+  .tip .path { color: var(--muted); font-size: 12px; }
+  .tip .cta { color: var(--accent); font-size: 11.5px; margin-top: 6px; }
+  .zoom { position: absolute; right: 10px; bottom: 10px; display: flex; gap: 4px; }
+  .zoom button { width: 28px; height: 28px; border: 1px solid var(--border); background: var(--panel); color: var(--text); border-radius: 7px; cursor: pointer; font-size: 15px; line-height: 1; }
+  .zoom button:hover { border-color: var(--accent); color: var(--accent); }
+  aside {
+    width: 330px; flex: none; border-left: 1px solid var(--border); background: var(--panel);
+    /* overflow-y alone computes overflow-x to auto, and one long unbreakable path (or heading) then lets the
+       whole sidebar scroll sideways, clipping every label. Pin the horizontal axis and break long strings. */
+    overflow-y: auto; overflow-x: hidden;
+    padding: 14px 16px 28px; display: flex; flex-direction: column; gap: 15px;
+  }
+  aside .h, aside .p, aside .name, aside .badge, .detail, .hit { overflow-wrap: anywhere; }
+  aside h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 7px; font-weight: 600; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  select, input[type=text], button { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 6px 9px; font-size: 13px; }
+  input[type=text] { flex: 1; min-width: 0; }
+  button { cursor: pointer; background: var(--panel); }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  a.primary { background: var(--accent); color: #fff; border: 1px solid var(--accent); border-radius: 8px; padding: 6px 10px; font-size: 13px; text-decoration: none; display: inline-block; }
+  .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .seg button { border: 0; border-radius: 0; padding: 5px 10px; }
+  .seg button.on { background: var(--accent-soft); color: var(--accent); }
+  .check { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12.5px; user-select: none; cursor: pointer; }
+  .legend { display: flex; flex-direction: column; gap: 2px; }
+  .legend .item { display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 3px 4px; border-radius: 6px; font-size: 13px; user-select: none; }
+  .legend .item:hover { background: var(--bg); }
+  .legend .item.off { opacity: .38; }
+  .legend .sw { width: 11px; height: 11px; border-radius: 50%; flex: none; }
+  .legend .n { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px; }
+  .legend .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; }
+  .small { color: var(--muted); font-size: 12px; }
+  .hits { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+  .hit { border: 1px solid var(--border); border-radius: 8px; padding: 6px 9px; cursor: pointer; font-size: 12.5px; }
+  .hit:hover, .hit.sel { border-color: var(--accent); }
+  .hit .t { font-weight: 600; display: flex; gap: 6px; align-items: baseline; }
+  .hit .rank { color: var(--accent); font-variant-numeric: tabular-nums; }
+  .hit .p { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; }
+  .detail { border: 1px solid var(--border); border-radius: 10px; padding: 11px 12px; font-size: 13px; background: var(--bg); }
+  .detail .h { font-weight: 650; margin-bottom: 2px; }
+  .detail .p { color: var(--muted); font-size: 12px; }
+  .detail .body { margin: 9px 0; white-space: pre-wrap; max-height: 220px; overflow: auto; font-size: 12.5px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+  .detail .actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .badge { display: inline-block; border-radius: 999px; padding: 0 7px; font-size: 11px; background: var(--code); color: var(--muted); margin: 0 4px 3px 0; }
+  .placeholder { color: var(--muted); font-size: 12.5px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>ai-wiki map</h1>
+  <span class="meta" id="meta">loading…</span>
+  <span class="spacer"></span>
+  <a class="nav" href="/">Chat</a>
+</header>
+<div class="layout">
+  <div class="stage" id="stage">
+    <canvas id="c"></canvas>
+    <div class="tip" id="tip"></div>
+    <div class="hint" id="hint">drag to pan · wheel to zoom · click a dot for details · double-click a dot to open the source</div>
+    <div class="zoom"><button id="zoomIn" title="Zoom in">+</button><button id="zoomOut" title="Zoom out">−</button><button id="zoomFit" title="Fit the whole map">⤢</button></div>
+    <div class="empty" id="empty" hidden></div>
+  </div>
+  <aside>
+    <section>
+      <h2>Selected</h2>
+      <div id="detail" class="detail"><span class="placeholder">Click a dot on the map. Double-click it to open the source page directly.</span></div>
+    </section>
+    <section>
+      <h2>Show</h2>
+      <div class="row">
+        <div class="seg" id="viewSeg">
+          <button data-v="chunks" class="on" title="One dot per chunk, which is what retrieval actually scores">Chunks</button>
+          <button data-v="docs" title="One dot per document at the centre of its chunks, sized by chunk count">Documents</button>
+        </div>
+      </div>
+      <div class="row" style="margin-top:7px">
+        <select id="colorBy" title="What the colours mean">
+          <option value="cluster">colour: meaning (semantic cluster)</option>
+          <option value="group">colour: space / folder</option>
+          <option value="sourceType">colour: source type</option>
+          <option value="lang">colour: language</option>
+          <option value="authority">colour: authority</option>
+        </select>
+      </div>
+      <div class="row" style="margin-top:7px">
+        <label class="check"><input type="checkbox" id="showLabels" checked /> cluster labels</label>
+        <label class="check"><input type="checkbox" id="forceDensity" /> density</label>
+      </div>
+    </section>
+    <section>
+      <h2>Legend <span class="small" id="legendNote"></span></h2>
+      <div class="legend" id="legend"></div>
+    </section>
+    <section>
+      <h2>Find</h2>
+      <div class="row"><input type="text" id="q" placeholder="filter by title or heading…" /></div>
+      <div class="small" id="qNote" style="margin-top:5px"></div>
+    </section>
+    <section>
+      <h2>Retrieval probe</h2>
+      <form class="row" id="probeForm">
+        <input type="text" id="probe" placeholder="ask a question" />
+        <button class="primary" type="submit">Go</button>
+      </form>
+      <div class="small" id="probeNote" style="margin-top:5px">Runs the real hybrid search and rings what it returns, numbered by rank.</div>
+      <div class="hits" id="hits"></div>
+    </section>
+  </aside>
+</div>
+
+<script>
+(() => {
+  const $ = (s) => document.querySelector(s);
+  const canvas = $("#c"), ctx = canvas.getContext("2d"), stage = $("#stage"), tip = $("#tip");
+  const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+  const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const fmt = (n) => n.toLocaleString("en-US");
+
+  // Above this many candidate points in view, draw into a pixel buffer instead of stroking arcs.
+  // Arcs stay crisp for normal zoom levels; the buffer keeps a very large map interactive.
+  const SPLAT_MIN = 25000;
+
+  let D = null;        // payload, expanded into typed arrays
+  let V = null;        // current view: chunks or document centroids
+  let view = "chunks", colorBy = "cluster";
+  let catNames = [], catCount = [], catColor = [];
+  const hidden = new Set();   // hidden category indices, per colorBy
+  let query = "", queryHits = null;
+  let probe = null, probeByPoint = null;
+  let selected = null, focusDoc = null, hover = null;
+  let showLabels = true, forceDensity = false;
+  const T = { k: 1, tx: 0, ty: 0 };
+  let W = 0, H = 0, dpr = 1, baseK = null, splatBuf = null;
+
+  // ---- load ------------------------------------------------------------------
+  async function load() {
+    const r = await fetch("/api/map");
+    if (!r.ok) {
+      const e = await r.json().catch(() => ({}));
+      $("#empty").hidden = false;
+      $("#empty").innerHTML = `<div><b>No map yet.</b><br/>${esc(e.error || "")}<br/><br/>Run <code>npm run map</code> after <code>npm run ingest</code>, then reload.</div>`;
+      $("#meta").textContent = "no map";
+      return false;
+    }
+    const m = await r.json();
+    if (m.version !== 2) {
+      $("#empty").hidden = false;
+      $("#empty").innerHTML = `<div><b>Map format v${esc(m.version)} is too old.</b><br/><br/>Re-run <code>npm run map</code>.</div>`;
+      return false;
+    }
+    const p = m.points, n = m.chunks;
+    D = {
+      n, dict: m.dict, documents: m.documents, clusters: m.clusters, labels: m.labels, params: m.params,
+      x: Float32Array.from(p.x), y: Float32Array.from(p.y),
+      doc: Int32Array.from(p.doc), ord: Int32Array.from(p.ord), cl: Int32Array.from(p.cl),
+      head: p.head, docs: m.docs, embeddingModel: m.embeddingModel, generatedAt: m.generatedAt,
+    };
+    // Point indices grouped by document (counting sort), used by the probe and the document view.
+    const nd = D.documents.length, start = new Int32Array(nd + 1);
+    for (let i = 0; i < n; i++) start[D.doc[i] + 1]++;
+    for (let d = 0; d < nd; d++) start[d + 1] += start[d];
+    const items = new Int32Array(n), cursor = start.slice();
+    for (let i = 0; i < n; i++) items[cursor[D.doc[i]]++] = i;
+    D.docStart = start; D.docItems = items;
+    D.bySourceId = new Map(D.documents.map((d, i) => [d.id, i]));
+
+    const when = new Date(m.generatedAt);
+    $("#meta").textContent = `${fmt(n)} chunks · ${fmt(m.docs)} documents · ${m.clusters.length} clusters · ${m.embeddingModel} → UMAP · ${when.toLocaleDateString()} ${when.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+    return true;
+  }
+
+  // ---- view model ------------------------------------------------------------
+  function rebuildView() {
+    if (view === "chunks") {
+      V = { n: D.n, x: D.x, y: D.y, size: null, point: null };
+    } else {
+      const nd = D.documents.length;
+      const x = new Float32Array(nd), y = new Float32Array(nd), size = new Float32Array(nd), point = new Int32Array(nd);
+      for (let d = 0; d < nd; d++) {
+        const a = D.docStart[d], b = D.docStart[d + 1];
+        let sx = 0, sy = 0, first = -1, bestOrd = Infinity;
+        for (let j = a; j < b; j++) {
+          const i = D.docItems[j];
+          sx += D.x[i]; sy += D.y[i];
+          if (D.ord[i] < bestOrd) { bestOrd = D.ord[i]; first = i; }
+        }
+        const cnt = Math.max(1, b - a);
+        x[d] = sx / cnt; y[d] = sy / cnt; size[d] = b - a; point[d] = first;
+      }
+      V = { n: nd, x, y, size, point };
+    }
+    buildGrid();
+    assignCategories();
+    recomputeQuery();
+    remapProbe();
+  }
+
+  /** The document a view item belongs to, and a representative chunk index. */
+  const docOf = (i) => (view === "chunks" ? D.doc[i] : i);
+  const chunkOf = (i) => (view === "chunks" ? i : V.point[i]);
+  const chunkId = (i) => `${D.documents[D.doc[i]].id}::${D.ord[i]}`;
+  const weightOf = (i) => (view === "chunks" ? 1 : V.size[i]);
+
+  function categoryOf(i) {
+    if (colorBy === "cluster") return view === "chunks" ? D.cl[i] : D.cl[chunkOf(i)];
+    const d = D.documents[docOf(i)];
+    return colorBy === "group" ? d.g : colorBy === "sourceType" ? d.s : colorBy === "lang" ? d.l : d.a;
+  }
+
+  function assignCategories() {
+    const names = colorBy === "cluster" ? D.clusters.map((c) => c.name || `cluster ${c.id + 1}`) : D.dict[{ group: "groups", sourceType: "sourceTypes", lang: "langs", authority: "authorities" }[colorBy]];
+    catNames = names.slice();
+    V.cat = new Int32Array(V.n);
+    catCount = new Array(catNames.length).fill(0);
+    for (let i = 0; i < V.n; i++) {
+      const c = categoryOf(i);
+      V.cat[i] = c;
+      catCount[c] += weightOf(i);
+    }
+    // Fixed order by size: the eight largest take the palette, the rest share grey (never a cycled hue).
+    const order = catNames.map((_, i) => i).filter((i) => catCount[i] > 0).sort((a, b) => catCount[b] - catCount[a]);
+    catColor = new Array(catNames.length).fill(css("--other"));
+    order.forEach((ci, rank) => { if (rank < 8) catColor[ci] = css(`--c${rank + 1}`); });
+    D.catRgb = catColor.map(hexToRgb);
+    renderLegend(order);
+  }
+
+  function hexToRgb(h) {
+    const s = h.replace("#", "");
+    const v = parseInt(s.length === 3 ? s.split("").map((c) => c + c).join("") : s, 16);
+    return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
+  }
+
+  function renderLegend(order) {
+    const box = $("#legend");
+    box.innerHTML = "";
+    const greyed = order.slice(8);
+    $("#legendNote").textContent = greyed.length ? `· ${greyed.length} smaller share grey` : "";
+    for (const ci of order) {
+      const el = document.createElement("div");
+      el.className = "item" + (hidden.has(ci) ? " off" : "");
+      el.title = (hidden.has(ci) ? "Click to show" : "Click to hide") + " · alt-click for only this one";
+      el.innerHTML = `<span class="sw" style="background:${catColor[ci]}"></span><span class="name">${esc(catNames[ci])}</span><span class="n">${fmt(catCount[ci])}</span>`;
+      el.onclick = (ev) => {
+        if (ev.altKey) {
+          const soloed = hidden.size === order.length - 1 && !hidden.has(ci);
+          hidden.clear();
+          if (!soloed) order.forEach((o) => o !== ci && hidden.add(o));
+        } else hidden.has(ci) ? hidden.delete(ci) : hidden.add(ci);
+        renderLegend(order); recomputeQuery(); draw();
+      };
+      box.appendChild(el);
+    }
+    const note = document.createElement("div");
+    note.className = "small"; note.style.marginTop = "4px";
+    note.textContent = "click: toggle · alt-click: only this one";
+    box.appendChild(note);
+  }
+
+  // ---- spatial index (counting-sort uniform grid) -----------------------------
+  // Hover and drawing both need "the points near here"; a linear scan over every point would make a
+  // large map unusable, so bucket once per view and only ever touch the cells in play.
+  let G = null;
+  function buildGrid() {
+    const n = V.n;
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (let i = 0; i < n; i++) {
+      if (V.x[i] < x0) x0 = V.x[i]; if (V.x[i] > x1) x1 = V.x[i];
+      if (V.y[i] < y0) y0 = V.y[i]; if (V.y[i] > y1) y1 = V.y[i];
+    }
+    const cells = Math.max(8, Math.min(256, Math.round(Math.sqrt(n / 2))));
+    const cw = (x1 - x0 || 1) / cells, ch = (y1 - y0 || 1) / cells;
+    const start = new Int32Array(cells * cells + 1);
+    const cellOf = (i) => {
+      const cx = Math.min(cells - 1, Math.max(0, Math.floor((V.x[i] - x0) / cw)));
+      const cy = Math.min(cells - 1, Math.max(0, Math.floor((V.y[i] - y0) / ch)));
+      return cy * cells + cx;
+    };
+    for (let i = 0; i < n; i++) start[cellOf(i) + 1]++;
+    for (let c = 0; c < cells * cells; c++) start[c + 1] += start[c];
+    const items = new Int32Array(n), cursor = start.slice();
+    for (let i = 0; i < n; i++) items[cursor[cellOf(i)]++] = i;
+    G = { x0, y0, x1, y1, cw, ch, cells, start, items };
+  }
+
+  /** Call `fn(i)` for every point in the world rectangle, cell by cell. */
+  function forEachInRect(wx0, wy0, wx1, wy1, fn) {
+    const cx0 = Math.max(0, Math.floor((wx0 - G.x0) / G.cw)), cx1 = Math.min(G.cells - 1, Math.floor((wx1 - G.x0) / G.cw));
+    const cy0 = Math.max(0, Math.floor((wy0 - G.y0) / G.ch)), cy1 = Math.min(G.cells - 1, Math.floor((wy1 - G.y0) / G.ch));
+    for (let cy = cy0; cy <= cy1; cy++) {
+      const row = cy * G.cells;
+      for (let cx = cx0; cx <= cx1; cx++) {
+        const c = row + cx;
+        for (let j = G.start[c]; j < G.start[c + 1]; j++) fn(G.items[j]);
+      }
+    }
+  }
+
+  function countInRect(wx0, wy0, wx1, wy1) {
+    const cx0 = Math.max(0, Math.floor((wx0 - G.x0) / G.cw)), cx1 = Math.min(G.cells - 1, Math.floor((wx1 - G.x0) / G.cw));
+    const cy0 = Math.max(0, Math.floor((wy0 - G.y0) / G.ch)), cy1 = Math.min(G.cells - 1, Math.floor((wy1 - G.y0) / G.ch));
+    let total = 0;
+    for (let cy = cy0; cy <= cy1; cy++) {
+      const row = cy * G.cells;
+      for (let cx = cx0; cx <= cx1; cx++) total += G.start[row + cx + 1] - G.start[row + cx];
+    }
+    return total;
+  }
+
+  // ---- geometry --------------------------------------------------------------
+  function resize() {
+    dpr = window.devicePixelRatio || 1;
+    W = stage.clientWidth; H = stage.clientHeight;
+    canvas.width = Math.max(1, Math.round(W * dpr)); canvas.height = Math.max(1, Math.round(H * dpr));
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    splatBuf = null;
+    draw();
+  }
+  function fitView() {
+    if (!V || !V.n || !W || !H) return;
+    const pad = 46;
+    T.k = Math.min((W - 2 * pad) / (G.x1 - G.x0 || 1), (H - 2 * pad) / (G.y1 - G.y0 || 1));
+    T.tx = (W - (G.x0 + G.x1) * T.k) / 2;
+    T.ty = (H - (G.y0 + G.y1) * T.k) / 2;
+    baseK = T.k;
+  }
+  const sx = (i) => V.x[i] * T.k + T.tx, sy = (i) => V.y[i] * T.k + T.ty;
+  const worldX = (px) => (px - T.tx) / T.k, worldY = (py) => (py - T.ty) / T.k;
+  const zoomLevel = () => (baseK ? T.k / baseK : 1);
+  function radius(i) {
+    const z = Math.max(0, Math.log2(zoomLevel()));
+    if (view === "docs") return Math.min(17, 3 + 1.7 * Math.sqrt(V.size[i])) * (1 + z * 0.14);
+    return Math.min(6.5, 2.3 + z * 0.5);
+  }
+  function zoomBy(f, px = W / 2, py = H / 2) {
+    const k2 = Math.min(Math.max(T.k * f, baseK * 0.25), baseK * 300);
+    T.tx = px - (px - T.tx) * (k2 / T.k); T.ty = py - (py - T.ty) * (k2 / T.k); T.k = k2;
+    draw();
+  }
+
+  // ---- filters ---------------------------------------------------------------
+  const isVisible = (i) => !hidden.has(V.cat[i]);
+  function recomputeQuery() {
+    if (!query) { queryHits = null; $("#qNote").textContent = ""; return; }
+    if (!D.lcTitle) {
+      D.lcTitle = D.documents.map((d) => `${d.title} ${d.path}`.toLowerCase());
+      D.lcHead = D.head.map((h) => h.toLowerCase());
+    }
+    queryHits = new Uint8Array(V.n);
+    let n = 0;
+    for (let i = 0; i < V.n; i++) {
+      let hit = D.lcTitle[docOf(i)].includes(query);
+      if (!hit && view === "chunks") hit = D.lcHead[i].includes(query);
+      if (!hit && view === "docs") {
+        for (let j = D.docStart[i]; j < D.docStart[i + 1] && !hit; j++) hit = D.lcHead[D.docItems[j]].includes(query);
+      }
+      if (hit) { queryHits[i] = 1; n++; }
+    }
+    $("#qNote").textContent = `${fmt(n)} ${view} match`;
+  }
+  const matches = (i) => !queryHits || queryHits[i] === 1;
+  const emphasised = (i) => (focusDoc === null || docOf(i) === focusDoc) && matches(i) && (!probe || probeByPoint.has(i));
+
+  // ---- drawing ---------------------------------------------------------------
+  function draw() {
+    if (!D || !W || !H) return;
+    const surface = css("--bg");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+
+    const wx0 = worldX(0), wy0 = worldY(0), wx1 = worldX(W), wy1 = worldY(H);
+    const inView = countInRect(wx0, wy0, wx1, wy1);
+    const dimming = Boolean(query) || Boolean(probe) || focusDoc !== null;
+    if (forceDensity || inView > SPLAT_MIN) drawSplat(wx0, wy0, wx1, wy1, surface, dimming);
+    else drawArcs(wx0, wy0, wx1, wy1, surface, dimming);
+
+    if (showLabels) drawLabels();
+    drawRings(surface);
+    $("#hint").textContent = inView > SPLAT_MIN || forceDensity
+      ? `${fmt(inView)} points in view · density shading · zoom in for individual dots`
+      : "drag to pan · wheel to zoom · click a dot for details · double-click a dot to open the source";
+  }
+
+  function drawArcs(wx0, wy0, wx1, wy1, surface, dimming) {
+    const pad = 20 / T.k;
+    forEachInRect(wx0 - pad, wy0 - pad, wx1 + pad, wy1 + pad, (i) => {
+      if (!isVisible(i)) return;
+      const r = radius(i);
+      ctx.globalAlpha = dimming ? (emphasised(i) ? 0.95 : 0.08) : 0.85;
+      ctx.fillStyle = catColor[V.cat[i]];
+      ctx.beginPath(); ctx.arc(sx(i), sy(i), r, 0, Math.PI * 2); ctx.fill();
+      if (view === "docs") { ctx.globalAlpha = 1; ctx.strokeStyle = surface; ctx.lineWidth = 1; ctx.stroke(); }
+    });
+    ctx.globalAlpha = 1;
+  }
+
+  /**
+   * Density path for very large point counts: blend each point straight into a pixel buffer.
+   * One pass over the visible points with no per-point canvas call, and overlapping points darken,
+   * which is what makes structure readable when dots would otherwise pile up.
+   */
+  function drawSplat(wx0, wy0, wx1, wy1, surface, dimming) {
+    const cw = canvas.width, chh = canvas.height;
+    if (!splatBuf || splatBuf.width !== cw || splatBuf.height !== chh) splatBuf = ctx.createImageData(cw, chh);
+    const d = splatBuf.data;
+    const [br, bg, bb] = hexToRgb(surface);
+    for (let o = 0; o < d.length; o += 4) { d[o] = br; d[o + 1] = bg; d[o + 2] = bb; d[o + 3] = 255; }
+    const side = Math.max(1, Math.min(4, Math.round(radius(0) * dpr * 0.9)));
+    const pad = 20 / T.k;
+    forEachInRect(wx0 - pad, wy0 - pad, wx1 + pad, wy1 + pad, (i) => {
+      if (!isVisible(i)) return;
+      const a = dimming ? (emphasised(i) ? 0.75 : 0.05) : 0.55;
+      const rgb = D.catRgb[V.cat[i]];
+      const px = Math.round(sx(i) * dpr), py = Math.round(sy(i) * dpr);
+      for (let ddy = 0; ddy < side; ddy++) {
+        const yy = py + ddy;
+        if (yy < 0 || yy >= chh) continue;
+        for (let ddx = 0; ddx < side; ddx++) {
+          const xx = px + ddx;
+          if (xx < 0 || xx >= cw) continue;
+          const o = (yy * cw + xx) * 4;
+          d[o] += (rgb[0] - d[o]) * a;
+          d[o + 1] += (rgb[1] - d[o + 1]) * a;
+          d[o + 2] += (rgb[2] - d[o + 2]) * a;
+        }
+      }
+    });
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.putImageData(splatBuf, 0, 0);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  /** Cluster names on the map, biggest first, skipping any that would collide with one already drawn. */
+  function drawLabels() {
+    const z = zoomLevel();
+    const level = z < 2.2 ? 0 : 1;
+    const boxes = [];
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "center";
+    for (const L of D.labels) {
+      if (L.level !== level && !(level === 1 && L.level === 0)) continue;
+      const px = L.x * T.k + T.tx, py = L.y * T.k + T.ty;
+      if (px < 0 || py < 0 || px > W || py > H) continue;
+      const big = L.level === 0;
+      ctx.font = `${big ? 600 : 500} ${big ? 13 : 11.5}px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
+      const w = ctx.measureText(L.text).width, h = big ? 16 : 14;
+      const box = [px - w / 2 - 3, py - h / 2, px + w / 2 + 3, py + h / 2];
+      if (boxes.some((b) => box[0] < b[2] && box[2] > b[0] && box[1] < b[3] && box[3] > b[1])) continue;
+      boxes.push(box);
+      ctx.lineWidth = 3.5;
+      ctx.strokeStyle = css("--bg");
+      ctx.strokeText(L.text, px, py);          // halo, so the text stays legible over dots
+      ctx.fillStyle = big ? css("--text") : css("--muted");
+      ctx.fillText(L.text, px, py);
+    }
+    ctx.textAlign = "start";
+  }
+
+  function drawRings(surface) {
+    const ring = (i, color, width, label) => {
+      const r = radius(i) + 3.5, x = sx(i), y = sy(i);
+      ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.lineWidth = 2; ctx.strokeStyle = surface; ctx.stroke();
+      ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.lineWidth = width; ctx.strokeStyle = color; ctx.stroke();
+      if (label) {
+        ctx.font = "600 11px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+        const tw = ctx.measureText(label).width;
+        ctx.fillStyle = surface; ctx.fillRect(x + r + 2, y - r - 13, tw + 6, 14);
+        ctx.fillStyle = css("--accent"); ctx.fillText(label, x + r + 5, y - r - 2);
+      }
+    };
+    if (probe) for (const [i, hit] of probeByPoint) ring(i, css("--accent"), 1.6, String(hit.rank));
+    if (hover !== null) ring(hover, css("--text"), 1.5, null);
+    if (selected !== null) ring(selected, css("--text"), 2.5, null);
+  }
+
+  // ---- hit testing -----------------------------------------------------------
+  function nodeAt(px, py) {
+    if (!G) return null;
+    const pick = Math.max(8, view === "docs" ? 20 : 9) / T.k;   // search radius in world units
+    let best = null, bd = Infinity;
+    forEachInRect(worldX(px) - pick, worldY(py) - pick, worldX(px) + pick, worldY(py) + pick, (i) => {
+      if (!isVisible(i)) return;
+      const dx = sx(i) - px, dy = sy(i) - py, d2 = dx * dx + dy * dy;
+      const lim = Math.max(7, radius(i) + 3);
+      if (d2 < lim * lim && d2 < bd) { bd = d2; best = i; }
+    });
+    return best;
+  }
+
+  // ---- details & opening the source -------------------------------------------
+  const urlOf = (i) => D.documents[docOf(i)].url || "";
+  function openSource(i) {
+    const u = urlOf(i);
+    if (u) window.open(u, "_blank", "noopener");
+    return Boolean(u);
+  }
+
+  let detailToken = 0;
+  function select(i, opts = {}) {
+    selected = i;
+    const box = $("#detail");
+    if (i === null) {
+      focusDoc = null;
+      box.innerHTML = `<span class="placeholder">Click a dot on the map. Double-click it to open the source page directly.</span>`;
+      draw();
+      return;
+    }
+    const d = D.documents[docOf(i)], dict = D.dict;
+    const cluster = D.clusters[D.cl[chunkOf(i)]];
+    const hit = probe && probeByPoint.has(i) ? probeByPoint.get(i) : null;
+    const link = d.url ? `<a class="primary" href="${esc(d.url)}" target="_blank" rel="noopener">Open source ↗</a>` : `<span class="small">no source URL (local file)</span>`;
+    box.innerHTML = `
+      <div class="h">${esc(d.title)}</div>
+      ${view === "chunks" && D.head[i] ? `<div class="p">${esc(D.head[i])}</div>` : ""}
+      <div class="p" style="margin-top:5px">
+        <span class="badge">${esc(cluster ? cluster.name : "?")}</span>
+        <span class="badge">${esc(dict.groups[d.g])}</span>
+        <span class="badge">${esc(dict.langs[d.l])}</span>
+        <span class="badge">${esc(dict.authorities[d.a])}</span>
+        ${view === "docs" ? `<span class="badge">${fmt(V.size[i])} chunks</span>` : `<span class="badge">chunk #${D.ord[i]}</span>`}
+      </div>
+      <div class="p">${esc(d.path)}</div>
+      ${hit ? `<div class="p" style="margin-top:4px">retrieval rank <b>${hit.rank}</b> · score ${hit.score.toFixed(3)} · vector #${hit.vectorRank ?? "–"} · bm25 #${hit.bm25Rank ?? "–"}</div>` : ""}
+      <div class="body" id="detailBody">loading passage…</div>
+      <div class="actions">${link}<button id="focusBtn">${focusDoc === docOf(i) ? "Show all" : "Highlight this document"}</button></div>`;
+    $("#focusBtn").onclick = () => { focusDoc = focusDoc === docOf(i) ? null : docOf(i); select(i); };
+
+    // Chunk text is not in the map payload (it dominated the file size); fetch just this one.
+    const token = ++detailToken;
+    const id = chunkId(chunkOf(i));
+    fetch("/api/chunk", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id }) })
+      .then((r) => r.json())
+      .then((j) => {
+        if (token !== detailToken) return;
+        const el = $("#detailBody");
+        if (!el) return;
+        const c = j.chunks && j.chunks[0];
+        el.textContent = c ? c.content : "passage not found in the index (re-run npm run map after ingest)";
+      })
+      .catch((e) => { if (token === detailToken && $("#detailBody")) $("#detailBody").textContent = `could not load passage: ${e.message}`; });
+
+    if (opts.center) { T.tx = W / 2 - V.x[i] * T.k; T.ty = H / 2 - V.y[i] * T.k; }
+    draw();
+  }
+
+  // ---- interaction -----------------------------------------------------------
+  let drag = null;
+  canvas.addEventListener("mousedown", (e) => { drag = { x: e.clientX, y: e.clientY, tx: T.tx, ty: T.ty, moved: false }; canvas.classList.add("dragging"); });
+  window.addEventListener("mouseup", () => { drag = null; canvas.classList.remove("dragging"); });
+  // On window, not on the canvas: a fast drag that runs past the canvas edge must keep panning.
+  window.addEventListener("mousemove", (e) => {
+    if (!D) return;
+    const rect = canvas.getBoundingClientRect(), px = e.clientX - rect.left, py = e.clientY - rect.top;
+    if (drag) {
+      const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+      if (Math.abs(dx) + Math.abs(dy) > 2) drag.moved = true;
+      T.tx = drag.tx + dx; T.ty = drag.ty + dy; draw(); return;
+    }
+    if (px < 0 || py < 0 || px > rect.width || py > rect.height) {
+      tip.style.display = "none";
+      if (hover !== null) { hover = null; draw(); }
+      return;
+    }
+    const i = nodeAt(px, py);
+    if (i !== hover) { hover = i; draw(); }
+    canvas.classList.toggle("onpoint", i !== null);
+    if (i === null) { tip.style.display = "none"; return; }
+    const d = D.documents[docOf(i)];
+    const cluster = D.clusters[D.cl[chunkOf(i)]];
+    tip.innerHTML = `<b>${esc(d.title)}</b>`
+      + (view === "chunks" && D.head[i] ? `<div class="path">${esc(D.head[i])}</div>` : "")
+      + `<div class="path">${esc(cluster ? cluster.name : "")} · ${esc(D.dict.groups[d.g])} · ${esc(D.dict.langs[d.l])}${view === "docs" ? ` · ${fmt(V.size[i])} chunks` : ""}</div>`
+      + `<div class="cta">${d.url ? "click for details · double-click to open the source" : "click for details"}</div>`;
+    tip.style.display = "block";
+    const tw = tip.offsetWidth, th = tip.offsetHeight;
+    tip.style.left = `${Math.max(4, Math.min(px + 14, rect.width - tw - 8))}px`;
+    tip.style.top = `${py + 14 + th > rect.height ? Math.max(4, py - th - 10) : py + 14}px`;
+  });
+  canvas.addEventListener("mouseleave", () => { tip.style.display = "none"; if (hover !== null) { hover = null; draw(); } });
+  canvas.addEventListener("click", (e) => {
+    if (drag && drag.moved) return;
+    const rect = canvas.getBoundingClientRect();
+    const i = nodeAt(e.clientX - rect.left, e.clientY - rect.top);
+    // Cmd/Ctrl-click is the browser's "open in a new tab" gesture, so honour it here too.
+    if (i !== null && (e.metaKey || e.ctrlKey)) { openSource(i); return; }
+    select(i);
+  });
+  canvas.addEventListener("dblclick", (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const i = nodeAt(e.clientX - rect.left, e.clientY - rect.top);
+    if (i !== null) { openSource(i); return; }
+    fitView(); draw();                       // double-click on empty space resets the view
+  });
+  canvas.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    const rect = canvas.getBoundingClientRect();
+    zoomBy(Math.exp(-e.deltaY * 0.0015), e.clientX - rect.left, e.clientY - rect.top);
+  }, { passive: false });
+  $("#zoomIn").onclick = () => zoomBy(1.6);
+  $("#zoomOut").onclick = () => zoomBy(1 / 1.6);
+  $("#zoomFit").onclick = () => { fitView(); draw(); };
+  window.addEventListener("keydown", (e) => { if (e.key === "Escape") select(null); });
+
+  // ---- controls --------------------------------------------------------------
+  $("#viewSeg").addEventListener("click", (e) => {
+    const b = e.target.closest("button"); if (!b || b.dataset.v === view) return;
+    view = b.dataset.v;
+    $("#viewSeg").querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
+    selected = null; focusDoc = null; select(null);
+    rebuildView(); fitView(); draw();
+  });
+  $("#colorBy").addEventListener("change", (e) => { colorBy = e.target.value; hidden.clear(); assignCategories(); draw(); });
+  $("#showLabels").addEventListener("change", (e) => { showLabels = e.target.checked; draw(); });
+  $("#forceDensity").addEventListener("change", (e) => { forceDensity = e.target.checked; draw(); });
+  let qTimer = null;
+  $("#q").addEventListener("input", (e) => {
+    clearTimeout(qTimer);
+    qTimer = setTimeout(() => { query = e.target.value.trim().toLowerCase(); recomputeQuery(); draw(); }, 120);
+  });
+
+  /** Map retrieval hits (chunk ids) onto view items, so they can be ringed. */
+  function remapProbe() {
+    probeByPoint = new Map();
+    if (!probe) return;
+    for (const [id, hit] of probe) {
+      const sep = id.lastIndexOf("::");
+      const sourceId = id.slice(0, sep), ord = Number(id.slice(sep + 2));
+      const d = D.bySourceId.get(sourceId);
+      if (d === undefined) continue;
+      if (view === "docs") {
+        const prev = probeByPoint.get(d);
+        if (!prev || hit.rank < prev.rank) probeByPoint.set(d, hit);
+        continue;
+      }
+      for (let j = D.docStart[d]; j < D.docStart[d + 1]; j++) {
+        const i = D.docItems[j];
+        if (D.ord[i] === ord) { probeByPoint.set(i, hit); break; }
+      }
+    }
+  }
+
+  // Enter submits explicitly rather than relying on the browser's implicit form submission.
+  $("#probe").addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    $("#probeForm").requestSubmit();
+  });
+  $("#probeForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const q = $("#probe").value.trim();
+    const hitsBox = $("#hits"), note = $("#probeNote");
+    if (!q) { probe = null; remapProbe(); hitsBox.innerHTML = ""; note.textContent = "Runs the real hybrid search and rings what it returns, numbered by rank."; draw(); return; }
+    note.textContent = "searching…";
+    try {
+      const r = await fetch("/api/search", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ query: q, topK: 12 }) });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || r.statusText);
+      probe = new Map();
+      data.results.forEach((res, n) => probe.set(res.id, { rank: n + 1, score: res.score, vectorRank: res.vectorRank, bm25Rank: res.bm25Rank }));
+      remapProbe();
+      hitsBox.innerHTML = "";
+      data.results.forEach((res, n) => {
+        const el = document.createElement("div");
+        el.className = "hit";
+        el.innerHTML = `<div class="t"><span class="rank">${n + 1}</span><span>${esc(res.title)}</span></div><div class="p">${esc(res.headingPath || res.relPath)} · v#${res.vectorRank ?? "–"} b#${res.bm25Rank ?? "–"}</div>`;
+        el.onclick = () => {
+          hitsBox.querySelectorAll(".hit").forEach((h) => h.classList.toggle("sel", h === el));
+          let target = null;
+          for (const [i, hit] of probeByPoint) if (hit.rank === n + 1) { target = i; break; }
+          if (target === null) return;
+          if (zoomLevel() < 5) T.k = baseK * 5;
+          select(target, { center: true });
+        };
+        hitsBox.appendChild(el);
+      });
+      note.textContent = `${data.results.length} chunks returned, ${probeByPoint.size} on the map` + (probeByPoint.size < data.results.length ? " (re-run npm run map after ingest)" : "") + ".";
+    } catch (err) {
+      note.textContent = `Search failed: ${err.message}`;
+      probe = null; remapProbe();
+    }
+    draw();
+  });
+
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { if (V) assignCategories(); draw(); });
+  new ResizeObserver(() => {
+    const wasZero = W === 0;
+    resize();
+    if (wasZero && V && V.n) { fitView(); draw(); }
+  }).observe(stage);
+
+  resize();
+  load().then((ok) => { if (!ok) return; rebuildView(); fitView(); draw(); })
+    .catch((err) => { $("#meta").textContent = `failed: ${err.message}`; });
+})();
+</script>
+</body>
+</html>

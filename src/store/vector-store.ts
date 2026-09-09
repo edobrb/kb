@@ -214,6 +214,45 @@ export class VectorStore {
     }
   }
 
+  /** Stream every row with its vector and display metadata (used by `npm run map`). */
+  async *scanForMap(): AsyncGenerator<{
+    id: string;
+    source_id: string;
+    source_type: string;
+    title: string;
+    source_url: string;
+    authority: string;
+    lang: string;
+    rel_path: string;
+    ordinal: number;
+    heading_path: string;
+    vector: Float32Array;
+  }> {
+    if (!this.table) return;
+    const batches = this.table
+      .query()
+      .select(["id", "source_id", "source_type", "title", "source_url", "authority", "lang", "rel_path", "ordinal", "heading_path", "vector"]);
+    for await (const batch of batches) {
+      for (const r of batch.toArray() as Array<Record<string, unknown>>) {
+        const vec = r["vector"] as { toArray?: () => ArrayLike<number> } | ArrayLike<number>;
+        const arr = typeof (vec as { toArray?: unknown }).toArray === "function" ? (vec as { toArray: () => ArrayLike<number> }).toArray() : (vec as ArrayLike<number>);
+        yield {
+          id: String(r["id"]),
+          source_id: String(r["source_id"]),
+          source_type: String(r["source_type"]),
+          title: String(r["title"]),
+          source_url: String(r["source_url"] ?? ""),
+          authority: String(r["authority"]),
+          lang: String(r["lang"]),
+          rel_path: String(r["rel_path"]),
+          ordinal: Number(r["ordinal"]),
+          heading_path: String(r["heading_path"]),
+          vector: arr instanceof Float32Array ? arr : Float32Array.from(arr as ArrayLike<number>),
+        };
+      }
+    }
+  }
+
   /** Distinct values for a column (used by the UI filter dropdowns and `doctor`). */
   async distinct(column: "source_type" | "authority" | "lang"): Promise<Record<string, number>> {
     const counts: Record<string, number> = {};

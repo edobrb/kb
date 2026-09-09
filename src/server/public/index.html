@@ -35,6 +35,8 @@
     padding: 6px 10px; cursor: pointer; font-size: 13px;
   }
   header button:hover { border-color: var(--accent); }
+  header .navlink { border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; font-size: 13px; color: var(--text); text-decoration: none; }
+  header .navlink:hover { border-color: var(--accent); color: var(--accent); }
   main { flex: 1; overflow-y: auto; }
   .wrap { max-width: 900px; margin: 0 auto; padding: 20px 20px 120px; }
   .filters { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 18px; align-items: center; }
@@ -128,6 +130,7 @@
   <h1>ai-wiki assistant</h1>
   <span class="meta" id="meta">connecting…</span>
   <span class="spacer"></span>
+  <a href="/map.html" class="navlink" title="2-D map of every chunk in the index">Map</a>
   <button id="thinkToggle" title="Ask the model to reason step by step and stream its reasoning">Reasoning</button>
   <button id="newChat" title="Start a new conversation">New chat</button>
   <button id="reindex" title="Incrementally re-index kb/">Re-index</button>

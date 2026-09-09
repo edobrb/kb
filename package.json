@@ -10,6 +10,7 @@
   "scripts": {
     "sync": "tsx src/cli/sync.ts",
     "ingest": "tsx src/cli/ingest.ts",
+    "map": "tsx src/cli/map.ts",
     "ask": "tsx src/cli/ask.ts",
     "search": "tsx src/cli/search.ts",
     "serve": "tsx src/server/index.ts",
@@ -29,6 +30,7 @@
     "dotenv": "^17.2.0",
     "fastify": "^5.12.0",
     "turndown": "^7.2.4",
+    "umap-js": "^1.4.0",
     "yaml": "^2.9.0"
   },
   "devDependencies": {
