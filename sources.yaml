@@ -1,38 +1,67 @@
 # What `npm run sync` gathers into kb/. Credentials live in .env (see .env.example).
-# Two sources are indexed: the Developer Portal and the GitLab repositories (docs AND source code).
-# Confluence is not indexed any more: it is only searched for pages about each repository (see below).
+# Goal of the knowledge base: answer TECHNICAL questions about OnePlatform and TeamSystem. Three sources are
+# indexed — the Developer Portal (curated, source of truth), the GitLab repositories (documentation only, no
+# source code) and a selection of Confluence spaces (noisy, so filtered hard) — plus kb/manually-curated/.
 # Unknown keys fall back to defaults (src/sync/sources-config.ts).
 
 # ---- Developer Portal (Backstage + TechDocs) — source of truth for documentation -----------------
-# Every catalog entity with TechDocs is indexed from the portal's rendered docs, so repositories
-# you cannot read on GitLab are still covered. OpenAPI/AsyncAPI definitions of API entities too.
-# The catalog metadata (owner, system, lifecycle) also feeds the GitLab project cards.
+# Every catalog entity with TechDocs is indexed from the portal's rendered docs, so repositories you cannot
+# read on GitLab are still covered. OpenAPI/AsyncAPI definitions of API entities too. The catalog metadata
+# (owner, system, lifecycle) also feeds the GitLab project cards.
 devportal:
   enabled: true
   include_api_definitions: true
   max_definition_chars: 200000
-  exclude_entities: [] # "component/some-name"
+  exclude_entities: [] # "component/some-name" or "*/module/learning-*" (wildcards, case-insensitive)
+  # Page globs on "<kind>/<name>/<page path>" that are generated API reference, not documentation:
+  # thousands of Swagger model pages and Sphinx module dumps would otherwise be 70 % of the portal corpus.
+  exclude_pages:
+    - "component/tse-webapi-doc/reference/**" # TeamSystem Enterprise WebAPI: IO.Swagger.Model.* and generated method pages
+    - "component/tse-webapi-doc/products/**"  # same generator, per-product trees (the hand-written guides stay)
+    - "component/ai-services/code/**"         # Sphinx autodoc of the Python packages
   min_body_chars: 40
+  min_prose_words: 15  # pages with less prose (outside code/tables/headings/link lists) are stubs
+  skip_generated: true # title/body heuristics for generated pages (quality.ts) wherever they hide
 
-# ---- GitLab (biosphere.teamsystem.com) ---------------------------------------------------------
-# For every repository: markdown docs, source files (one document per file, `kind: code`) and a
-# project card (`kind: project`: description, Dev Portal owner/system, README, languages, related
-# Confluence pages). Scope is the oneplatform group only for now — 348 repositories, ~40k source files
-# — because the contextual-retrieval step costs one LLM generation per chunk (see README §7.3).
+# ---- GitLab (biosphere.teamsystem.com) — documentation, contracts and project cards -------------
+# For every repository: the markdown documentation, the OpenAPI/AsyncAPI contracts kept in the repo
+# (`kind: api`) and a project card (`kind: project`: description, Dev Portal owner/system, README, languages,
+# related Confluence pages). Source code is NOT indexed (gitlab.code.enabled: false): it was ~90 % of the
+# files and pure noise for a technical Q&A corpus.
 gitlab:
   enabled: true
   groups: # searched recursively (sub-groups included); only what the token can see
     - oneplatform
-    # - tsdigital   # 1049 projects: enable once oneplatform is indexed and the throughput is known
-    # - paas
-    # - madbit
-  projects: [] # extra "group/subgroup/project" paths outside the groups above
+  projects: [] # extra "group/subgroup/project" paths
+  # The Dev Portal catalog points at ~260 repositories outside the oneplatform group (tsdigital, paas,
+  # analytics-bi...). Their docs/ is already rendered by the portal; this adds their README and a project card
+  # (owner, system, lifecycle) so "which repository / team owns X" is answerable. Unreadable repos are skipped.
+  include_devportal_repos: true
   exclude_projects: # never indexed (wildcards allowed, case-insensitive)
     - oneplatform/PET/llm-wiki* # the repo that held the previous, hand-assembled kb export
     - "*/archived/*"
     - "*/deprecated/*"
+    # Training, courses, demos, hackathon and PoC repositories: not platform documentation.
+    - oneplatform/training/*
+    - oneplatform/onefront/courses/*
+    - oneplatform/onefront/demo/*
+    - oneplatform/onefront/playground/*
+    - oneplatform/practice-ai/grow-intelligence-*
+    - oneplatform/islands/cybersecurity-trust/grow-intelligence-*
+    - oneplatform/islands/spain/training/*
+    - oneplatform/architecture/labs/upskilling
+    - "*/upskills-*"
+    - "*/pocs/*"
+    - "*/poc/*"
+    - oneplatform/islands/devtools/forrestjs # mirror of an open-source framework's own docs (200+ pages)
+    - oneplatform/platform-data/registry-data/* # environment data dumps
+    # Portal-referenced repositories that are not documentation: dismissed products, personal sample projects.
+    - "*/dismissed/*"
+    - "g.colasurdo/*"
   include_archived: false
   min_body_chars: 40
+  min_prose_words: 15
+  skip_boilerplate_readmes: true # Create React App / Vite / Angular CLI / Nest starter READMEs
   project_cards: true
   docs:
     enabled: true
@@ -41,44 +70,142 @@ gitlab:
       - "**/node_modules/**"
       - "**/vendor/**"
       - "**/CHANGELOG*"
+      - "**/CHANGES*"
+      - "**/HISTORY*"
       - "**/LICENSE*"
+      - "**/LICENCE*"
+      - "**/CODE_OF_CONDUCT*"
+      - "**/SECURITY.md"
+      - "**/CLAUDE.md"          # AI-assistant instructions, not documentation
+      - "**/AGENTS.md"
+      - "**/.claude/**"
+      - "**/.cursor/**"
       - "**/.gitlab/**"
       - "**/.github/**"
       - "**/PULL_REQUEST_TEMPLATE*"
+      - "**/ISSUE_TEMPLATE*"
       - "**/*.template.md"
       - "**/test/**"
       - "**/tests/**"
+      - "**/__tests__/**"
+      - "**/fixtures/**"
+      - "**/docsOld/**"
+      - "**/deprecated/**"
     max_file_kb: 2048
     # Repositories the portal already renders: skip their mkdocs content (docs/**), keep README & co.
     skip_techdocs_if_in_devportal: true
-  code:
+  api_specs:
     enabled: true
-    # Defaults (src/sync/sources-config.ts) cover TypeScript/JavaScript, Python, Kotlin/Java, Go, C#, Rust,
-    # SQL, shell, Terraform, YAML/TOML, Dockerfiles, build files, package.json and OpenAPI/JSON schemas,
-    # and exclude node_modules/dist/build/vendor, lockfiles, minified files, *.d.ts, fixtures, generated code.
-    # Override `include` / `exclude` here to change the file set.
+    include:
+      - "**/openapi*.yaml"
+      - "**/openapi*.yml"
+      - "**/openapi*.json"
+      - "**/swagger*.yaml"
+      - "**/swagger*.yml"
+      - "**/swagger*.json"
+      - "**/asyncapi*.yaml"
+      - "**/asyncapi*.yml"
+      - "**/asyncapi*.json"
+    max_file_kb: 1024
+  code:
+    enabled: false # flip to true to index source files again (kind: code, declaration-aware chunks)
     max_file_kb: 256
     max_lines: 4000
-    max_files_per_project: 5000 # more than this = vendored/generated content: code skipped, folders logged
-    skip_tests: true # test files are ~12 % of the source files; flip to false to index them too
+    max_files_per_project: 5000
+    skip_tests: true
 
-# ---- Confluence (teamsystem.atlassian.net) — enrichment only -------------------------------------
-# For each repository the wiki is searched (title first, then full text) for the project name; the top
-# pages (title, link, snippet) go on the project card. Restrict `spaces.include` to the R&D/platform
-# spaces to keep the hits relevant; empty = every space the token can see (personal spaces are never used).
+# ---- Confluence (teamsystem.atlassian.net) — selected technical spaces -------------------------
+# Whole spaces are indexed, minus the subtrees that are ceremonies, drafts, archives and org material, minus
+# pages without prose. Page ids in `exclude_trees` are folder/page ids from the URL; titles are wildcards
+# matched against the page and every ancestor. The Dev Portal and GitLab stay canonical where they overlap
+# (the CTO copies of the ADRs are excluded: the GitLab `oneplatform/adrs` repository is the source).
 confluence:
-  enrich_projects: true
+  enabled: true
   spaces:
-    include: [CTO, TeamCore, TONEPLAT, TPAAS, TSDIGITAL, GP, OBO, TeamWorksp, TeamMeteri, DShub, RPDD]
+    include:
+      - TeamCore   # IAM team: TS ID, Policy Manager, Contracts, GDPR log, Hermes integration, guides
+      - CTO        # Group Technology: architecture, platform, City Map, ICE, quality, practices
+      - TONEPLAT   # TS OnePlatform: core services (Foundation/Experience/Monetization), Workspace analysis, API governance
+      - TeamMeteri # Monetization / Metering: documentation, FAQ, glossary, analysis
+      - TeamWorksp # Registry team: analysis, documentation, design
+      - RPDD       # Registry – Product Documentation & Delivery
+      - OBO        # One Back Office
     exclude: []
+  # Legacy PaaS-era spaces are deliberately out (TPAAS: a static 2024 import of 2019-2023 docs; TSDIGITAL).
+  roots: {} # e.g. TONEPLAT: ["113147908"] to index only the "Core services" tree of that space
+  exclude_trees:
+    - id: "804880489" # CTO › Architecture Decision Records: copies of the GitLab oneplatform/adrs repository
+    - title: "Sprint Review*"
+    - title: "Sprint Retrospective*"
+    - title: "*Retrospective*"
+    - title: "Meetups"
+    - title: "*Meeting*"
+    - title: "*meetings*"
+    - title: "Draft"
+    - title: "Archivio"
+    - title: "Archive"
+    - title: "Untitled*"
+    - title: "Onboarding new people in R&D"
+    - title: "Welcome to the team!"
+    - title: "Hackathons"
+    - title: "Tirana"
+    - title: "España"
+    - title: "Team Map"
+    - title: "Road from SWE to Engineering Manager"
+    - title: "Contratto One Platform"
+    - title: "Segnalazioni e richieste"
+    - title: "Registry - Raccolta evolutive e disallinamenti"
+    - title: "Knowledge Base Dichiarativi" # end-user manual of the tax declarations module
+    - id: "830964491"  # TONEPLAT › Orchestratore Fiscale › Requisiti e Analisi Funzionale: fiscal-form mapping analyses, not platform docs
+    - id: "897089628"  # TONEPLAT › Orchestratore Fiscale › Test Strategy
+    - id: "531563002"  # TONEPLAT › Orchestratore Fiscale › Gestione Notifiche: end-user notification texts
+    - id: "501322197"  # TeamWorksp › 🎨 Design: UX framework, personas, design metrics
+    - title: "*Team space*"
+    - title: "Enterprise meetings*"
+    - title: "*Roadmap*"        # roadmaps and their quarterly dashboards are planning, not documentation
+    - title: "Milano *"         # workshop notes
+  exclude_titles:
+    - "Untitled*"
+    - "*meeting notes*"
+    - "*Meeting Minutes*"
+    - "*Sprint Planning*"
+    - "*Daily*"
+    - "*Weekly*"
+    - "*Stand-up*"
+    - "*Standup*"
+    - "*Priorità*"
+    - "*priorities*"
+    - "*Avanzamenti*"
+    - "*Template*"
+    - "ADRXXXX*"
+    - "Copia d*"
+    - "Copy of*"
+    - "Backlog*"
+    - "Corsi *"
+    - "*Product Dashboard*"
+    - "*Annual Overview*"
+    - "*Manual test*"
+    - "*Test manuale*"
+    - "*Ferie*"
+    - "*1:1*"
+    - "Test Alberto"
+    - "New Page"
+  modified_since: "" # e.g. "2024-01-01" to drop pages nobody touched since then
+  min_body_chars: 120
+  min_prose_words: 25
+  max_body_chars: 400000
+  # Project-card enrichment: for each GitLab repository the wiki is searched (title first, then full text)
+  # for the project name; the top pages (title, link, snippet) go on the card.
+  enrich_projects: true
   max_pages_per_project: 3
   excerpt_chars: 400
-  refresh_days: 30 # a project's lookup is repeated only after this many days
+  refresh_days: 30
 
 # ---- Rules: authority / source_type / skip by id, url or title (first match wins) -------------
-# `*` matches anything. Ids look like:
+# `*` matches anything, `?` one character. Ids look like:
 #   devportal:<ns>/<kind>/<name>/<page/path/>   devportal:<ns>/api/<name>#definition
 #   gitlab:<group>/<project>:<file path>          gitlab:<group>/<project>:__project
+#   confluence:<SPACE>:<pageId>
 rules:
   - match: "gitlab:oneplatform/adrs:template.md"
     skip: true
@@ -89,3 +216,18 @@ rules:
     authority: binding
   - title: "*ADR[0-9]*"
     authority: binding
+  # Files that are never documentation, whatever the folder.
+  - title: "LICEN?E*"
+    skip: true
+  - match: "gitlab:*CLAUDE.md"
+    skip: true
+  - match: "gitlab:*AGENTS.md"
+    skip: true
+  - match: "gitlab:*.cursorrules"
+    skip: true
+  - match: "gitlab:*copilot-instructions.md"
+    skip: true
+  - title: "Getting Started with Create React App"
+    skip: true
+  - title: "React + TypeScript + Vite"
+    skip: true

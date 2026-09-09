@@ -20,8 +20,7 @@ console.log(`  KB_DIR            ${config.kbDir}`);
 console.log(`  DATA_DIR          ${config.dataDir}`);
 console.log(`  OLLAMA_HOST       ${config.ollama.host}`);
 console.log(`  EMBEDDING_MODEL   ${config.embedding.model} (${config.embedding.dimensions} dims, provider=${config.embedding.provider})`);
-console.log(`  CHAT_MODEL        ${config.chat.model} (think=${config.chat.think}, provider=${config.chat.provider})`);
-console.log(`  CONTEXT_MODEL     ${config.context.enabled ? `${config.context.model} (contextual retrieval on, kinds: ${config.context.kinds.join(",")})` : "contextual retrieval off (CONTEXTUALIZE=false)"}\n`);
+console.log(`  CHAT_MODEL        ${config.chat.model} (think=${config.chat.think}, provider=${config.chat.provider})\n`);
 
 console.log(`Knowledge base`);
 try {
@@ -56,17 +55,17 @@ try {
   }
   for (const [name, def] of Object.entries(builtinEnrichers(sources))) {
     if (!def.enabled) {
-      warn(`${name} (enrichment): disabled in sources.yaml — project cards will have no related Confluence pages`);
+      warn(`${name} (project-card enrichment): disabled in sources.yaml — project cards will have no related Confluence pages`);
       continue;
     }
     if (!def.hasCredentials) {
-      warn(`${name} (enrichment): ${def.credentialsHint}`);
+      warn(`${name} (project-card enrichment): ${def.credentialsHint}`);
       continue;
     }
     try {
-      ok(`${name} (enrichment, not indexed): ${await def.probe(def.http())} (${def.baseUrl})`);
+      ok(`${name} (project-card enrichment): ${await def.probe(def.http())} (${def.baseUrl})`);
     } catch (err) {
-      bad(`${name} (enrichment): ${(err as Error).message}`);
+      bad(`${name} (project-card enrichment): ${(err as Error).message}`);
       failures++;
     }
   }
@@ -94,15 +93,6 @@ if (config.embedding.provider === "ollama" || config.chat.provider === "ollama")
       else {
         bad(`chat model missing → run: ollama pull ${config.chat.model}`);
         failures++;
-      }
-      // The contextualizer usually runs a smaller model than the answering one, so check it separately:
-      // a missing one would only surface hours into an ingest, as a fallback context on every chunk.
-      if (config.context.enabled && config.context.model !== config.chat.model) {
-        if (models.includes(config.context.model)) ok(`context model ${config.context.model} is pulled`);
-        else {
-          bad(`context model missing → run: ollama pull ${config.context.model} (or set CONTEXT_MODEL)`);
-          failures++;
-        }
       }
     }
   } catch (err) {

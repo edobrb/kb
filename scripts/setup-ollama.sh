@@ -3,7 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 if [ -f .env ]; then set -a; . ./.env; set +a; fi
-EMBEDDING_MODEL="${EMBEDDING_MODEL:-qwen3-embedding:8b}"
+EMBEDDING_MODEL="${EMBEDDING_MODEL:-qwen3-embedding:0.6b}"
 CHAT_MODEL="${CHAT_MODEL:-qwen3:8b}"
 
 if ! command -v ollama >/dev/null 2>&1; then

@@ -1,18 +1,15 @@
 # ai-wiki RAG
 
-A fully local **Retrieval-Augmented Generation** system over the TeamSystem OnePlatform knowledge base in `kb/`:
-the Developer Portal documentation and the GitLab repositories — their docs **and their source code**.
-Ask a question in Italian or English, get an answer generated **only** from the documents and code, with numbered
-citations linking back to the portal page, ADR or repository file (down to the line range) the answer came from.
-Every chunk is indexed with a short model-written context that says where it belongs
-([contextual retrieval](https://www.anthropic.com/engineering/contextual-retrieval)), so "what does this do"
-questions about code land on the right file.
+A fully local **Retrieval-Augmented Generation** system that answers **technical questions about TeamSystem
+OnePlatform** from the knowledge base in `kb/`: the Developer Portal documentation, the documentation and API
+contracts kept in the GitLab repositories, and a curated selection of Confluence spaces. Ask a question in
+Italian or English, get an answer generated **only** from those documents, with numbered citations linking back
+to the portal page, ADR, repository file or wiki page the answer came from.
 
 Everything runs on one Mac (24 GB unified memory is plenty): **Node.js/TypeScript** for the pipeline,
-**Ollama** for the models (`Qwen3-Embedding-0.6B` for embeddings, `qwen3:1.7b` for the ingest-time
-chunk contexts, `qwen3:8b` for answers),
-**LanceDB** as an embedded vector database, and an in-process **BM25** index for keyword search.
-No cloud services, no Docker, no database server — the index is just a folder (`data/`).
+**Ollama** for the models (`Qwen3-Embedding-0.6B` for embeddings, `qwen3:8b` for answers), **LanceDB** as an
+embedded vector database, and an in-process **BM25** index for keyword search. No cloud services, no Docker,
+no database server — the index is just a folder (`data/`).
 
 ---
 
@@ -55,20 +52,17 @@ on top of this — the two approaches compose.
 ## 2. Architecture
 
 ```
-                OFFLINE (npm run ingest)                          ONLINE (npm run ask / serve)
+                OFFLINE (npm run sync → npm run ingest)                ONLINE (npm run ask / serve)
  ┌──────────────────────────────────────────────┐   ┌───────────────────────────────────────────────┐
- │ kb/**/*.md                                   │   │ question (+ chat history)                     │
- │   │  parse YAML frontmatter                  │   │   │  optional: rewrite follow-up into a       │
- │   ▼  (source_id, title, url, authority…)     │   │   ▼  standalone query (chat model)            │
- │ Document (kind: doc | code | project | api)  │   │ search query                                  │
- │   │  heading-aware chunking (~450 tok) or    │   │   ├──► embed query (Qwen3-Embedding)          │
- │   ▼  declaration-aware code chunking         │   │   │      └► LanceDB cosine search  ─┐         │
- │ Chunks + "Title > H2" / "repo > file > fn"   │   │   └──► BM25 keyword search  ────────┤         │
- │   │  contextual retrieval: chat model writes │   │                                     ▼         │
- │   │  1-3 sentences per chunk (doc + project  │   │        Reciprocal Rank Fusion + authority     │
- │   │  card in the prompt), cached in data/    │   │                                               │
- │   │  embed (Ollama /api/embed, batched)      │   │                                               │
- │   ▼                                          │   │                                               │
+ │ Dev Portal · GitLab docs · Confluence spaces │   │ question (+ chat history)                     │
+ │   │  sync: fetch, html → md, filter noise,   │   │   │  optional: rewrite follow-up into a       │
+ │   ▼  write kb/**/*.md with frontmatter       │   │   ▼  standalone query (chat model)            │
+ │ Document (kind: doc | api | project [| code])│   │ search query                                  │
+ │   │  heading-aware chunking (~450 tok)       │   │   ├──► embed query (Qwen3-Embedding)          │
+ │   ▼  "Breadcrumb > Title > H2" prefix        │   │   │      └► LanceDB cosine search  ─┐         │
+ │ Chunks                                       │   │   └──► BM25 keyword search  ────────┤         │
+ │   │  embed (Ollama /api/embed, batched)      │   │                                     ▼         │
+ │   ▼                                          │   │        Reciprocal Rank Fusion + authority     │
  │ LanceDB table  data/lancedb/  (vectors+text) │   │        boost + per-document cap → top-k       │
  │ BM25 index     data/bm25.json.gz             │   │                                     │         │
  │ Manifest       data/manifest.json (hashes)   │   │   prompt = rules + numbered context + history  │
@@ -77,18 +71,17 @@ on top of this — the two approaches compose.
                                                     └───────────────────────────────────────────────┘
 ```
 
-A fuller picture of the knowledge base — sources, document kinds, what triggers re-work, the storage schema
-and where each stage lives — is in [ARCHITECTURE.md](ARCHITECTURE.md).
+A fuller picture of the knowledge base — sources, what each one filters out, document kinds, what triggers
+re-work, the storage schema and where each stage lives — is in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 Three pipelines share one codebase:
 
-* **Sync** (offline, incremental): gathers the sources — the **Developer Portal** (Backstage/TechDocs, the
-  source of truth for documentation) and the **GitLab** repositories of the `oneplatform` group (markdown docs,
-  every source file, and one *project card* per repository enriched with the portal's catalog and the
-  Confluence pages that mention the project) — into `kb/` as markdown with frontmatter.
-  Confluence itself is no longer indexed. See [7.0 Gathering](#70-gathering-the-sources-srcsync-npm-run-sync).
-* **Ingest** (offline, idempotent, incremental): reads `kb/`, chunks (prose and code differently), writes a
-  context for every chunk with the chat model, embeds, writes the index.
+* **Sync** (offline, incremental): gathers the sources into `kb/` as markdown with frontmatter — the
+  **Developer Portal** (Backstage/TechDocs, the source of truth for documentation, minus its generated API
+  reference), the **GitLab** repositories (markdown documentation, OpenAPI/AsyncAPI contracts and one
+  *project card* per repository; no source code), and the technical **Confluence** spaces (whole spaces minus
+  meeting notes, ceremonies, drafts and archives). See [7.0 Gathering](#70-gathering-the-sources-srcsync-npm-run-sync).
+* **Ingest** (offline, idempotent, incremental): reads `kb/`, chunks by headings, embeds, writes the index.
 * **Ask** (online): retrieves the best chunks with *hybrid* search and streams an answer.
   It is exposed three ways — CLI, HTTP/SSE API, and a small web chat UI — all using the same
   `ask()` generator in `src/generation/ask.ts`.
@@ -107,28 +100,29 @@ cd ~/Desktop/ai-wiki          # this folder: contains kb/ and this project
 npm install
 cp .env.example .env          # defaults are fine for a first run
 
-# Pull the models (≈ 5 GB each, once). Or run: ./scripts/setup-ollama.sh
+# Pull the models (once). Or run: ./scripts/setup-ollama.sh
 ollama pull qwen3-embedding:0.6b   # embedder: sets the floor on ingest time (see §10)
-ollama pull qwen3:1.7b             # writes the chunk contexts at ingest time
 ollama pull qwen3:8b               # answers questions
 
-npm run doctor                # checks Ollama, models, kb/ folder, index state
+npm run doctor                # checks Ollama, models, kb/ folder, index state, source credentials
 ```
 
 ### Gather the knowledge base
 
 ```bash
 # .env: DEVPORTAL_TOKEN, GITLAB_TOKEN, CONFLUENCE_EMAIL + CONFLUENCE_API_TOKEN (see .env.example)
-npm run doctor                # "Sync sources" block: each source must be ✓ (Confluence is "enrichment")
+./refresh-dev-portal-token.sh # prints a fresh portal token (user tokens last ~1 h); paste it into .env
+npm run doctor                # "Sync sources" block: devportal, gitlab and confluence must be ✓
 npm run sync -- --dry-run     # what would be fetched, nothing written
-npm run sync                  # writes kb/devportal, kb/gitlab (+ data/sync/*.json state)
+npm run sync                  # writes kb/devportal, kb/gitlab, kb/confluence (+ data/sync/*.json state)
 ```
 
-Scope (GitLab groups, file globs, Confluence spaces used for enrichment, authority rules) lives in
-[`sources.yaml`](sources.yaml). The first run downloads everything the tokens can see in the configured groups
-(oneplatform: 348 repositories, ~45 000 files, 20–30 minutes); later runs only touch repositories whose head
-commit moved and files whose blob changed, and delete what disappeared at the source. `kb/manually-curated/` is
-hand-written and never touched by sync.
+Scope — portal page excludes, GitLab groups and file globs, Confluence spaces and tree filters, authority
+rules — lives in [`sources.yaml`](sources.yaml). The first run takes a few minutes for the portal, ~15 minutes for
+GitLab and a few minutes for Confluence; later runs only touch entities whose TechDocs build moved, repositories
+whose head commit moved, pages whose version changed, and delete what disappeared at the source. Every run logs
+why documents were skipped and writes the full list to `data/sync/<source>.skipped.jsonl`, so the noise
+filters can be audited. `kb/manually-curated/` is hand-written and never touched by sync.
 
 ### Index the knowledge base
 
@@ -136,23 +130,18 @@ hand-written and never touched by sync.
 npm run ingest                # or: npm run sync -- --ingest
 ```
 
-The first run writes a context for every chunk with the chat model (the slow part, see
-[7.3](#73-contextual-retrieval-srcingestcontextualizets)) and then embeds it — budget roughly **8 hours** for
-the full oneplatform KB on an M-series Mac with the default models, and see [§10](#10-tuning-guide) before
-changing either of them. A live status line reports the phase, progress and a moving ETA:
+The first run embeds every chunk — budget roughly **28 minutes** for the whole KB on an M-series Mac
+with the default embedder (~40 406 chunks at ~24 chunks/s); see [§10](#10-tuning-guide) before changing it.
+A live status line reports the phase, progress and a moving ETA:
 
 ```
-  contextualizing ·  37% · 42,150/113,910 chunks · 11,402/36,441 docs · 2.4 chunk/s · elapsed 4h 52m · ETA 8h 15m
+  embedding ·  37% · 12,150/40 406 chunks · 2,402/6,441 docs · 23.8 chunk/s · elapsed 8m 30s · ETA 14m 12s
 ```
 
-The rate is measured over the last minute, so the ETA settles after the first minute and reacts if the
-machine speeds up or slows down. In a terminal the line is rewritten in place; when the output is piped to
-a file it is appended every 15 s instead, so logs stay readable. `--quiet` prints phase messages only.
-
-Subsequent runs only touch files whose bytes changed. The run is resumable: the manifest is flushed every few
-seconds and every generated context is cached in `data/contexts/`, so an interrupted ingest (or a change of
-embedding model) never asks the chat model for the same chunk twice. Project cards and prose are indexed
-before source code, so the documentation is searchable while the code is still being processed.
+In a terminal the line is rewritten in place; when the output is piped to a file it is appended every 15 s
+instead, so logs stay readable. `--quiet` prints phase messages only. Subsequent runs only touch files whose
+bytes changed. The run is resumable: the manifest is flushed after every batch, so an interrupted ingest picks
+up where it stopped. Project cards and prose are indexed first, so the documentation is searchable early.
 
 ### Ask
 
@@ -166,9 +155,9 @@ npm run serve                 # then open http://127.0.0.1:8787
 
 | Command | What it does |
 |---|---|
-| `npm run sync` | Gather the sources into `KB_DIR` (Dev Portal → GitLab; Confluence is only queried for the project cards). Flags: `--source devportal,gitlab`, `--full` (ignore state), `--dry-run`, `--only <substring>` (entity / project path), `--prune-foreign` (delete files in `kb/<source>/` that sync did not produce, e.g. old imports), `--ingest` (run ingest afterwards) |
+| `npm run sync` | Gather the sources into `KB_DIR` (Dev Portal → GitLab → Confluence; GitLab uses the portal's catalog, Confluence is also queried for the project cards). Flags: `--source devportal,gitlab,confluence`, `--full` (ignore state), `--dry-run`, `--only <substring>` (entity / project path / page title), `--prune-foreign` (delete files in `kb/<source>/` that sync did not produce, e.g. old imports), `--ingest` (run ingest afterwards) |
 | `npm run ingest` | Incremental index of `KB_DIR`. Shows a live progress line (percentage, chunks/s, elapsed, ETA); `--quiet` disables it. Flags: `--reset` (rebuild all), `--dry-run` (chunk stats + samples, no embedding), `--only <substring>` (subset of files), `--kb <dir>` |
-| `npm run ask -- "question"` | Full pipeline, streams the answer to the terminal, prints cited sources and timings. Flags: `--k 8`, `--source-type adr,gitlab`, `--kind code,doc` (code = source files, project = repository cards, api = OpenAPI definitions), `--authority binding`, `--lang en`, `--json` |
+| `npm run ask -- "question"` | Full pipeline, streams the answer to the terminal, prints cited sources and timings. Flags: `--k 8`, `--source-type adr,confluence`, `--kind doc,api` (api = OpenAPI/AsyncAPI definitions, project = repository cards), `--authority binding`, `--lang en`, `--json` |
 | `npm run search -- "query"` | **Retrieval only** (no LLM): shows fused rank, vector rank, BM25 rank and text of each chunk. The main debugging tool — most RAG problems are retrieval problems. |
 | `npm run serve` | Starts the HTTP API + web UI on `HOST:PORT` (default `127.0.0.1:8787`) |
 | `npm run map` | Projects every chunk vector to 2-D with UMAP, groups the chunks into semantic clusters, and writes `data/kb-map.json.gz`, rendered by the web UI at `/map.html`. Re-run after `ingest`. Flags: `--clusters 8`, `--neighbors 15`, `--min-dist 0.1`, `--epochs 400`, `--project 256`, `--seed 42`, `--out <file>`, `--relabel` (recompute names only, ~1 s) |
@@ -179,9 +168,8 @@ npm run serve                 # then open http://127.0.0.1:8787
 ## 5. HTTP API
 
 All endpoints accept/return JSON. Filters are optional everywhere:
-`{ "filters": { "sourceTypes": ["adr"], "kinds": ["code"], "authorities": ["binding"], "langs": ["en"] } }`.
-Citations carry `kind`, the model-written `context`, and for code chunks `lineStart`/`lineEnd` plus a `sourceUrl`
-with a `#L<start>-<end>` anchor.
+`{ "filters": { "sourceTypes": ["adr", "confluence"], "kinds": ["api"], "authorities": ["binding"], "langs": ["en"] } }`.
+Citations carry `kind`, and for code chunks `lineStart`/`lineEnd` plus a `sourceUrl` with a `#L<start>-<end>` anchor.
 
 ### `POST /api/ask` — streaming (Server-Sent Events)
 
@@ -231,7 +219,7 @@ been built yet. Consumed by `/map.html` (see [6.1](#61-knowledge-base-map-maphtm
 ```jsonc
 {
   "version": 2, "chunks": 60633, "docs": 7101, "generatedAt": "…", "params": { … },
-  "dict":      { "groups": ["confluence/EC", …], "sourceTypes": […], "langs": […], "authorities": […] },
+  "dict":      { "groups": ["confluence/TeamCore", …], "sourceTypes": […], "langs": […], "authorities": […] },
   "documents": [{ "id": "<sourceId>", "title": "…", "url": "…", "path": "…", "g": 0, "s": 0, "l": 1, "a": 2 }],
   "clusters":  [{ "id": 0, "name": "TSC OpenTelemetry Legacy", "n": 1007, "x": 1.2, "y": -3.4 }],
   "points":    { "x": [], "y": [], "doc": [], "ord": [], "cl": [], "head": [] },
@@ -315,43 +303,57 @@ report chunks that are "not on the map" until you run `npm run map` again.
 ### 7.0 Gathering the sources (`src/sync/`, `npm run sync`)
 
 ```
- Developer Portal (Backstage)              GitLab (biosphere)                       Confluence Cloud (enrichment only)
- /api/catalog/entities  ─┐                 /api/v4/groups/*/projects                /wiki/rest/api/search?cql=
- /api/techdocs/metadata  │ etag            /repository/branches/{default} (head)      title ~ "<project>" OR text ~ …
- /api/techdocs/static/…  │ HTML            /repository/tree (blob sha)                        │ title, link, snippet
-          │              ▼                 /repository/files/…/raw   /languages               │
-          │  coveredRepos + repoEntities ──────────► owner/system per repo, skip docs/**       │
-          ▼                                         ▼                                          ▼
-   html → markdown (cheerio + turndown)   *.md as-is  ·  source files → fenced block  ·  project card ◄─┘
-          └────────────────────────────► rules (sources.yaml) → kb/<source>/… + data/sync/<source>.json
+ Developer Portal (Backstage)          GitLab (biosphere)                          Confluence Cloud (v2 API)
+ /api/catalog/entities  ─┐             /api/v4/groups/*/projects  + the repos       /wiki/api/v2/spaces?keys=…
+ /api/techdocs/metadata  │ etag        the portal points at (/projects/:path)       /spaces/{id}/pages (cursor)
+ /api/techdocs/static/…  │ HTML        /repository/branches/{default} (head)         /folders/{id} (ancestry)
+          │              ▼             /repository/tree (blob sha) → files/…/raw     /pages/{id}?body-format=export_view
+          │  coveredRepos + repoEntities ───► owner/system per repo, skip docs/**             │
+          ▼                                        ▼                                          ▼
+   exclude_pages globs, generated-page    *.md → doc · openapi*/asyncapi* → api       exclude_trees / exclude_titles,
+   and stub heuristics; html → md         README+langs+entity+wiki hits → card         stubs; html → md, ancestors → breadcrumb
+          └────────────────────────────► rules (sources.yaml) → duplicate-body skip → kb/<source>/… + data/sync/<source>.json
 ```
 
 | Source | What is indexed | Id / file | Incremental key |
 |---|---|---|---|
-| **devportal** | every TechDocs page of every catalog entity with `backstage.io/techdocs-ref`, plus the OpenAPI/AsyncAPI definition of `API` entities | `devportal:<ns>/<kind>/<name>/<page/>` → `kb/devportal/<kind>/<name>/<page>.md` | TechDocs `etag` (whole entity skipped when unchanged) |
-| **gitlab** — docs (`kind: doc`) | `gitlab.docs.include` globs (`*.md`, `*.mdx`…) in every project of `gitlab.groups` (recursive) and `gitlab.projects`, minus `exclude_projects` (the old KB export, `*/archived/*`, `*/deprecated/*`) and `docs.exclude`; for repositories the portal renders, `docs/**` is skipped (`skip_techdocs_if_in_devportal`) but READMEs and the rest are kept | `gitlab:<group/project>:<path>` → `kb/gitlab/<group>/<project>/<path>` | default-branch head commit (whole project skipped when unchanged), then blob sha per file |
-| **gitlab** — code (`kind: code`) | every source file matching `gitlab.code.include` (TS/JS, Python, Kotlin/Java, Go, C#, Rust, SQL, shell, Terraform, YAML/TOML, Dockerfiles, build files, `package.json`, OpenAPI/JSON schemas…) minus `code.exclude` (node_modules, dist/build, lockfiles, minified, `*.d.ts`, fixtures, generated) and test files (`skip_tests`); binary, generated (`@generated`), minified (avg line > 300 chars) or > 4 000-line files are skipped | same id → `kb/gitlab/<group>/<project>/<path>.md`, body = one fenced block with the language tag, frontmatter `language`, `lines`, `blob_sha` | blob sha |
-| **gitlab** — project card (`kind: project`) | one per repository: GitLab description/topics/languages, the Dev Portal entity (owner, system, lifecycle, description — via the portal's `repoEntities`), a README excerpt, top-level folders, and the Confluence pages found by searching the project name | `gitlab:<group/project>:__project` → `kb/gitlab/<group>/<project>/__project.md` | sha of the rendered card |
-| ~~confluence~~ | **not indexed** since 2026-09-09. The connector is now a lookup: for each repository, `/wiki/rest/api/search?cql=` with `title ~ "<name>"` first and `text ~ "<name>"` second, scoped to `confluence.spaces.include`, personal spaces dropped, top `max_pages_per_project` hits with their search snippets go on the card. Cached per project for `refresh_days`. | — | — |
+| **devportal** | every TechDocs page of every catalog entity with `backstage.io/techdocs-ref`, plus the OpenAPI/AsyncAPI definition of `API` entities (`kind: api`) — minus `devportal.exclude_pages` (the generated Swagger/Sphinx reference trees, ~6 000 pages), pages that look generated and pages without prose | `devportal:<ns>/<kind>/<name>/<page/>` → `kb/devportal/<kind>/<name>/<page>.md` | TechDocs `etag` + a hash of the page filters (whole entity skipped when unchanged) |
+| **gitlab** — docs (`kind: doc`) | `gitlab.docs.include` globs (`*.md`, `*.mdx`…) in every project of `gitlab.groups` (recursive), `gitlab.projects` and — with `include_devportal_repos` — every repository the portal catalog points at, minus `exclude_projects` (training, demos, playgrounds, PoCs, the old KB export…), `docs.exclude` (licences, changelogs, `CLAUDE.md`/`AGENTS.md`, templates, tests…), generator READMEs and pages without prose; for repositories the portal renders, `docs/**` is skipped but READMEs and the rest are kept | `gitlab:<group/project>:<path>` → `kb/gitlab/<group>/<project>/<path>` | default-branch head commit + a hash of the file settings (whole project skipped when unchanged), then blob sha per file |
+| **gitlab** — API contracts (`kind: api`) | `openapi*`, `swagger*`, `asyncapi*` YAML/JSON files (`gitlab.api_specs`) whose body really is an OpenAPI/AsyncAPI document: the `info.title`/`description` and a fenced copy of the spec | `gitlab:<group/project>:<path>` → `kb/gitlab/<group>/<project>/<path>.md` | blob sha |
+| **gitlab** — project card (`kind: project`) | one per repository: GitLab description/topics/languages, the Dev Portal entity (owner, system, lifecycle, description — via the portal's `repoEntities`), a README excerpt, top-level folders, the number of source files, and the Confluence pages found by searching the project name | `gitlab:<group/project>:__project` → `kb/gitlab/<group>/<project>/__project.md` | sha of the rendered card |
+| **gitlab** — code (`kind: code`, **off**) | `gitlab.code.enabled: true` indexes every source file as one fenced block, chunked at declaration boundaries with `#L<start>-<end>` deep links. Off by default: it was ~90 % of the files and noise for a technical Q&A corpus | same id → `kb/gitlab/<group>/<project>/<path>.md` | blob sha |
+| **confluence** | every current page of the spaces in `confluence.spaces.include`, minus pages that sit under an excluded tree (`exclude_trees`: page/folder ids or title wildcards matched against the page and every ancestor — sprint ceremonies, meetings, drafts, archives, org material, the CTO copies of the ADRs), minus `exclude_titles`, minus pages without prose; optional `roots` per space and `modified_since`. Bodies come from `export_view` (macros rendered), TOC/page-tree macros are stripped, and the space + ancestor titles become the page's `breadcrumb` | `confluence:<SPACE>:<pageId>` → `kb/confluence/<SPACE>/<pageId>-<slug>.md` | page version number + a hash of the quality thresholds |
 
-Scale seen on 2026-09-09 with one user's tokens: 266 portal entities with TechDocs plus 131 API entities;
-the `oneplatform` group has 348 non-empty repositories (156 in `islands`, 81 in `onefront`, 34 in `practice-ai`…),
-mostly TypeScript/JavaScript, then Python, Kotlin, HCL, SQL; sampling 50 of them extrapolates to ~40 000 source
-files (~12 % tests, excluded by default) and ~5 000 markdown files. Repository archives are refused by this GitLab
-(HTTP 406), so files are downloaded one by one with `SYNC_CONCURRENCY` parallel requests. Later runs are fast:
-an unchanged repository costs one branch request.
+Scale on 2026-09-09 with one user's tokens: 267 portal entities with TechDocs plus 131 API entities → **2 319**
+pages kept (6 360 skipped, of which ~6 150 generated reference); 462 GitLab repositories (351 in
+`oneplatform`, the rest portal-referenced) → **2 208** documents; 7 Confluence spaces → **599**
+pages of 1 311 listed. Repository archives are refused by this GitLab (HTTP 406), so files are
+downloaded one by one with `SYNC_CONCURRENCY` parallel requests. Later runs are fast: an unchanged repository
+costs one branch request, an unchanged entity one metadata request, an unchanged space one paginated listing.
 
 Why the portal first: it is populated from GitLab by CI, so it renders documentation from repositories you
 have no access to, and its TechDocs HTML is already the "published" view. It also knows who owns what, which the
-GitLab connector copies onto the project cards. Both keep a `source_url` pointing where people actually read the
-document (for code, the blob URL with a line anchor), so citations stay clickable.
+GitLab connector copies onto the project cards. Why GitLab too: READMEs, ADRs and in-repo docs that are not
+published as TechDocs, plus the API contracts and the cards. Why Confluence, selectively: functional and
+technical analyses of the core services (TS ID, Policy Manager, Hermes, Metering, Registry, One Back Office)
+exist only there, buried in spaces that are mostly meeting notes — hence whole spaces with hard tree filters
+rather than a curated page list that would go stale.
 
 Every document gets the frontmatter the ingest expects (`source_id`, `source_type`, `kind`, `title`, `source_url`,
-`authority`, `lang`, `last_modified`, `fetched_at`) plus source-specific fields (`entity`, `owner`, `system`,
-`project`, `file_path`, `language`, `lines`, `blob_sha`, `confluence_pages`…). `authority` and `source_type` are decided by the **rules** in
-`sources.yaml` (first match wins; e.g. `gitlab:oneplatform/adrs:*` → `source_type: adr, authority: binding`);
-`lang` is detected from function words (it/en/und, the embedding model is multilingual so nothing is translated).
-Markdown identifiers are **not** escaped (`subject_token` stays one BM25 token) and images become `[image: alt]`.
+`authority`, `lang`, `last_modified`, `fetched_at`, `fingerprint`, `breadcrumb`) plus source-specific fields
+(`entity`, `owner`, `system`, `project`, `file_path`, `api_type`, `space`, `ancestors`, `labels`,
+`confluence_pages`…). `authority` and `source_type` are decided by the **rules** in `sources.yaml` (first match
+wins; e.g. `gitlab:oneplatform/adrs:*` → `source_type: adr, authority: binding`); rules can also `skip` documents
+by id, URL or title (licences, AI-assistant files, generator READMEs). `lang` is detected from function words
+(it/en/und, the embedding model is multilingual so nothing is translated). Markdown identifiers are **not**
+escaped (`subject_token` stays one BM25 token) and images become `[image: alt]`.
+
+The content heuristics live in `src/sync/quality.ts`: `proseStats` counts words outside code fences, tables,
+headings and link-only lines; `isStub` skips pages with too few of them and no real table or code;
+`looksGenerated` recognises Swagger/Sphinx/JavaDoc output by title and body markers; `isBoilerplateReadme`
+recognises project-generator READMEs. The orchestrator additionally drops a document whose normalised body is
+identical to one already written in the same run (the same README in ten repositories, a page copied into two
+spaces), and every skip — with its reason — is counted in the log and listed in `data/sync/<source>.skipped.jsonl`.
 
 Safety rails: a source that aborts (network, expired token) never deletes anything; `--only` never deletes;
 files in `kb/<source>/` that sync does not know about are reported but only removed with `--prune-foreign`;
@@ -359,26 +361,28 @@ files are rewritten only when their content changed, so `npm run ingest` stays i
 
 **Credentials** (all read-only, all in `.env`):
 
-* `DEVPORTAL_TOKEN` — Backstage identity token. Log in to the portal, open DevTools → Network, click any
-  `/api/…` request and copy the `Authorization: Bearer …` value. User tokens expire after about an hour, enough
-  for a full run; for unattended runs ask the portal team for a static token (`backend.auth.externalAccess`).
+* `DEVPORTAL_TOKEN` — Backstage identity token. `./refresh-dev-portal-token.sh` prints a fresh one using the
+  browser's Microsoft refresh-token cookie (or: log in to the portal, DevTools → Network, copy the
+  `Authorization: Bearer …` value of any `/api/…` request). User tokens expire after about an hour, enough for a
+  full run; for unattended runs ask the portal team for a static token (`backend.auth.externalAccess`).
 * `GITLAB_TOKEN` — personal access token with the `read_api` scope (GitLab → Preferences → Access Tokens).
 * `CONFLUENCE_EMAIL` + `CONFLUENCE_API_TOKEN` — Atlassian API token from
-  <https://id.atlassian.com/manage-profile/security/api-tokens>, used only for the project-card lookups. Scoped
-  tokens (the default kind since 2025) are rejected by the site URL and only work through
-  `api.atlassian.com/ex/confluence/<cloudId>`; the connector detects this and switches automatically
-  (`CONFLUENCE_CLOUD_ID` forces it). Without it, sync still works — cards simply have no "Related Confluence pages".
+  <https://id.atlassian.com/manage-profile/security/api-tokens>, used both to index the configured spaces and for
+  the project-card lookups. Scoped tokens (the default kind since 2025) are rejected by the site URL and only work
+  through `api.atlassian.com/ex/confluence/<cloudId>`; the connector detects this and switches automatically
+  (`CONFLUENCE_CLOUD_ID` forces it).
 
 ### 7.1 Loading & metadata (`src/ingest/loader.ts`)
 
-Every file in `kb/` carries a YAML frontmatter produced by the upstream normalisation workflow. We use:
+Every file in `kb/` carries a YAML frontmatter written by sync (or by hand in `kb/manually-curated/`). We use:
 
 | Frontmatter | Used for |
 |---|---|
 | `source_id` | Stable chunk ids (`<source_id>::<n>`), incremental delete/replace |
-| `source_type` (`devportal`, `gitlab`, `adr`, `manually-curated`) | Filtering (`--source-type`, UI chips) |
-| `kind` (`doc`, `code`, `project`, `api`) | Chunking strategy, contextualization, filtering (`--kind`, UI chips) |
-| `title`, `source_url` | Breadcrumb in every chunk, citation links |
+| `source_type` (`devportal`, `gitlab`, `adr`, `confluence`, `manually-curated`) | Filtering (`--source-type`, UI chips) |
+| `kind` (`doc`, `api`, `project`, `code`) | Chunking strategy, filtering (`--kind`, UI chips) |
+| `title`, `source_url` | Breadcrumb root in every chunk, citation links |
+| `breadcrumb` | Where the document lives (`Confluence › TeamCore › TS ID - Feature`, `GitLab › oneplatform/adrs`, `Dev Portal › Hermes`); prepended to every chunk's heading path |
 | `authority` (`binding` / `normative` / `descriptive`) | Retrieval boost (+15 % / +12 %) and a prompt rule to prefer binding docs on conflict |
 | `lang` | Filtering |
 | `last_modified` / `fetched_at` | Shown in metadata |
@@ -397,80 +401,40 @@ Chunk quality decides answer quality, so the chunker is markdown-aware rather th
 * Blocks are packed into chunks of about **450 tokens** (max 700), preferring to break at headings; a break
   mid-section carries the last small block over as overlap.
 * Oversized tables are split **with the header row repeated**; oversized code keeps its fences.
-* Each chunk's embedding text is prefixed with a breadcrumb `Title > H2 > H3` so it is self-describing when
-  read out of context ("Decision" alone means nothing; "ADR0010 Client Credentials > Summary > Decision" does).
+* Each chunk's embedding text is prefixed with a heading path `Breadcrumb > Title > H2 > H3` so it is
+  self-describing when read out of context ("Decision" alone means nothing; `GitLab › oneplatform/adrs > ADR0010
+  Client Credentials > Summary > Decision` does). The breadcrumb comes from the frontmatter written by sync and
+  names the system and the tree the document lives in — the cheap, deterministic stand-in for the LLM-written
+  chunk contexts this project used to generate (see 7.3).
 * Heading-only pages produce no chunks (they are logged and skipped).
 
-Source files (`kind: code`) use `chunkCode` instead: the file is cut at **top-level declarations**
-(`function`/`class`/`def`/`fun`/`func`/`CREATE TABLE`/`resource "…"`… — anything that starts at column 0 and is
-not a closing bracket or an import) once a chunk reaches `CODE_CHUNK_TARGET_TOKENS` (600), at blank lines when
-no declaration is near, and hard-cuts only past `CODE_CHUNK_MAX_TOKENS` (900). Every chunk keeps the fence and
+Source files (`kind: code`, only when `gitlab.code.enabled`) use `chunkCode` instead: the file is cut at
+**top-level declarations** once a chunk reaches `CODE_CHUNK_TARGET_TOKENS` (600), at blank lines when no
+declaration is near, and hard-cuts only past `CODE_CHUNK_MAX_TOKENS` (900). Every chunk keeps the fence and
 language tag, records its 1-based line range (→ `#L10-45` citation links) and gets a
 `repo > path/to/file.ts > symbolA, symbolB` breadcrumb from the symbols it declares.
 
-`npm run ingest -- --dry-run` prints size statistics, sample chunks and how many chunks would go to the
-contextualizer, so you can see the effect of the `CHUNK_*` settings before spending model time.
+`npm run ingest -- --dry-run` prints size statistics and sample chunks, so you can see the effect of the
+`CHUNK_*` settings before spending model time.
 
-### 7.3 Contextual retrieval (`src/ingest/contextualize.ts`)
+### 7.3 Why there is no contextual retrieval stage
 
-A chunk embedded on its own loses what it belongs to: "retries: 3" or "returns the tenant" means nothing without
-the file and the project. Following Anthropic's
-[contextual retrieval](https://www.anthropic.com/engineering/contextual-retrieval) (−49 % retrieval failures
-on their benchmarks, −67 % with a reranker), every chunk is prefixed — for **both** the embedding and the
-BM25 index — with 1–2 sentences written by a chat model that saw:
-
-1. a **background**: for repository files the *project card* (name, description, Dev Portal owner/system,
-   languages, README excerpt, related Confluence pages — the essentials come first so truncation to
-   `CONTEXT_MAX_BACKGROUND_CHARS` keeps them); for portal pages the catalog entity; a one-liner otherwise;
-2. the **document, rendered once, split into its own chunks** inside `<chunk id="N">` markers;
-3. the instruction to write one line per id situating that chunk — mentioning identifiers verbatim.
-
-**One call situates a whole group of chunks**, not one call per chunk. That shape follows from how the
-hardware actually behaves: generation is the entire cost of this stage and it does *not* parallelise —
-Ollama on Metal time-slices concurrent requests rather than batch-decoding them, so aggregate throughput is
-a constant per model (measured on an M5 Pro: ~49 tok/s for an 8B, ~156 tok/s for `qwen3:1.7b`, flat from 1
-to 16 requests in flight). Wall-clock is therefore just *generated tokens ÷ model throughput*, and the only
-levers are a smaller model, fewer generated tokens, and fewer prompt tokens re-read per context. Sending
-each chunk separately re-reads the document every time (~3 900 prompt tokens per chunk); rendering the
-document once with markers costs ~400. Groups are cut at `CONTEXT_GROUP_CHARS` so the prompt still fits
-`CONTEXT_NUM_CTX`; `CONTEXT_GROUP_CHARS_API` halves that for API reference pages, whose dense
-schema-after-schema text made the model skip 17 % of ids.
-
-The other half of the saving is in the *length* of what is generated, and a word count does not buy it:
-asked for "at most 30 words", `qwen3:1.7b` wrote ~59 tokens per context, and asking for 20 or 14 changed
-nothing. Two example lines in the system prompt, shown purely for their length, cut that to ~29 and removed
-the skipped ids that a long answer causes — a 1.8× speed-up on its own. The cost is that a small model
-handed a two-chunk document sometimes copies an example instead of reading the chunk (~4 % of chunks in
-short documents; *telling* it not to copy made that worse), so the parser drops any line that is one of the
-examples verbatim and re-asks that id on its own.
-
-An id the model skips or truncates is re-asked **on its own**, with the original single-chunk prompt, so a
-malformed batch costs a little time and never quality; only a failure of that retry falls back to the
-deterministic sentence. Chunk text becomes `breadcrumb ⏎⏎ context ⏎⏎ content`, and the context is stored in
-its own column, shown under each citation in the UI and given to the answering model as `about: …`.
-
-> A model whose Ollama architecture is `qwen35` (e.g. `ornith-1.5:9b`) is pinned to a single slot — Ollama
-> logs `model architecture does not currently support parallel requests` — and is also a 9B. It is a poor
-> choice for `CONTEXT_MODEL`; the `qwen3` family is roughly 4× faster here.
-
-What is *not* sent to the model, because there is nothing to situate: documents with fewer than
-`CONTEXT_MIN_CHUNKS` chunks (`CONTEXT_MIN_CHUNKS_CODE` for source files, whose indexed text already carries
-`repo > file > symbol`), project cards, and kinds outside `CONTEXT_KINDS` — they get a deterministic context
-such as `Source file src/x.ts (typescript) of the core-registry repository (oneplatform/…) — <description>`.
-Every generated context is cached in `data/contexts/<shard>/<hash>.json` keyed by document id and
-chunk-content hash: re-ingests, embedding-model changes and crashes never redo a chunk, and an edited file
-only re-contextualizes the chunks whose text changed. Documents are processed in batches of
-`INGEST_BATCH_CHUNKS`: contextualize the batch, then embed it, so the two models are not swapped in and out per
-document. `CONTEXTUALIZE=false` turns the whole stage off (and rebuilds the index, since every text changes);
-`CONTEXT_MODEL` picks a smaller/faster model than the answering one.
+Until 2026-09-09 every chunk was prefixed with 1–2 sentences written by a small chat model that had seen the
+whole document ([contextual retrieval](https://www.anthropic.com/engineering/contextual-retrieval)). It was
+~7 of the ~8 hours a full ingest took, and on this knowledge base it did not measurably help: a synthetic
+retrieval benchmark on the same chunks scored contexts **off** at 94 % hit@6 / MRR 0.853 against contexts **on**
+at 92 % / 0.833 (n=100, a tie within the error bar). The reason is that the indexed text already carried what a
+context would say — the heading path names the document, the section and (now) the system and tree it lives in.
+The stage, its cache, its model and its dozen `CONTEXT_*` knobs were therefore removed; the `breadcrumb`
+frontmatter and the heading-path prefix (7.2) are what remains of the idea.
 
 ### 7.4 Embeddings (`src/llm/embeddings.ts`)
 
 [Qwen3-Embedding](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B) via Ollama, multilingual (Italian +
 English in the same space), 32k context. The default is the **0.6b** (1024 dimensions): embedding touches
 every chunk and is prompt-bound, which makes the model size a hard floor on ingest time — 2.9 chunks/s for
-the 8b against 24 chunks/s for the 0.6b on an M5 Pro, i.e. 11 h versus 1.3 h over 114k chunks. `:8b`
-(4096 dims) is the quality ceiling if you can spend the hours. Two model-specific details:
+the 8b against 24 chunks/s for the 0.6b on an M5 Pro. `:8b` (4096 dims) is the quality ceiling if you can spend
+the hours (about 2 points of hit@6 in our benchmark for 8× the time). Two model-specific details:
 
 * It is **instruction-aware**: queries are embedded as `Instruct: <task>\nQuery: <question>`; documents are
   embedded as-is. Getting this asymmetry right is worth several points of recall.
@@ -478,14 +442,14 @@ the 8b against 24 chunks/s for the 0.6b on an M5 Pro, i.e. 11 h versus 1.3 h ove
   `EMBEDDING_DIMENSIONS` may be set below what the model emits (1024 for the 0.6b/4b, 4096 for the 8b) to
   shrink the vector index — we truncate + renormalise client-side. It may never exceed the model's width.
 
-Chunks are embedded in batches (`EMBED_BATCH_SIZE`) through `/api/embed`; the manifest is written after each
-document, so an interrupted ingest resumes where it stopped.
+Documents are embedded in batches of about `INGEST_BATCH_CHUNKS` chunks (`EMBED_BATCH_SIZE` texts per
+`/api/embed` call); the manifest is written after each batch, so an interrupted ingest resumes where it stopped.
 
 ### 7.5 Storage (`src/store/`)
 
 * **LanceDB** (`data/lancedb/`): embedded, file-based, Apache Arrow columns, native Apple-Silicon binary.
   One table `chunks` with the vector plus all metadata columns, so filters are plain SQL-like predicates
-  (`source_type IN ('adr')`, `kind IN ('code')`). No ANN index is created: with tens of thousands of vectors a
+  (`source_type IN ('adr')`, `kind IN ('api')`). No ANN index is created: with tens of thousands of vectors a
   brute-force cosine scan is a few milliseconds and exact.
 * **BM25** (`data/bm25.json.gz`): a ~150-line Okapi BM25 implementation. Tokeniser lower-cases, folds accents
   (`perché` → `perche`), drops Italian/English stopwords and splits alphanumeric codes so `ADR0010`, `ADR 0010`
@@ -509,10 +473,10 @@ knows no synonyms. Together they cover each other's blind spots.
 ### 7.7 Generation (`src/generation/`)
 
 The system prompt (`prompt.ts`) contains the rules — answer only from context, say when the context does not
-cover the question, cite `[n]` after each claim, prefer binding sources, name repository + file and quote the
-lines when answering from code, reply in the user's language — followed by the numbered context blocks (each
-with its heading path, line range, source type, kind, authority, URL and the chunk's `about:` context). Previous turns
-(last 6) are appended so follow-ups work; the new question comes last.
+cover the question, cite `[n]` after each claim, prefer binding sources, name repository + file when answering
+from a repository document, reply in the user's language — followed by the numbered context blocks (each with
+its heading path, source type, kind, authority and URL). Previous turns (last 6) are appended so follow-ups
+work; the new question comes last.
 
 Generation streams from Ollama `/api/chat`, which returns two kinds of delta: `thinking` (reasoning) and
 `content` (the visible answer). Both are forwarded as separate stream events, so the UI can show the
@@ -531,19 +495,13 @@ Everything is an environment variable (`.env`, see `.env.example` for the full a
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` | |
 | `EMBEDDING_MODEL` | `qwen3-embedding:0.6b` | Any Ollama embedding model; sets the floor on ingest time (§10); changing it triggers a full rebuild |
 | `EMBEDDING_DIMENSIONS` | `1024` | Matryoshka truncation, ≤ model output (1024 for the 0.6b/4b, 4096 for the 8b) |
+| `EMBED_BATCH_SIZE` | `16` | Texts per `/api/embed` call |
+| `INGEST_BATCH_CHUNKS` | `256` | Documents are embedded in batches of about this many chunks; the manifest is flushed after each batch |
 | `CHAT_MODEL` | `qwen3:8b` | Any Ollama chat model (e.g. `ornith-1.5:9b`, `gemma3:12b`, `qwen3:14b`) |
 | `CHAT_THINK` | `false` | Default reasoning mode; per request, override with `"think": true` or the UI's **Reasoning** button |
 | `CHAT_NUM_CTX` | `16384` | Context window requested from Ollama; 6 chunks × 450 tok + prompt + history fits easily |
 | `CHUNK_TARGET_TOKENS` / `CHUNK_MAX_TOKENS` / `CHUNK_OVERLAP_TOKENS` | `450` / `700` / `60` | Prose chunking; changing them triggers a full rebuild |
-| `CODE_CHUNK_TARGET_TOKENS` / `CODE_CHUNK_MAX_TOKENS` | `600` / `900` | Source-file chunking (cut at declarations); full rebuild on change |
-| `CONTEXTUALIZE` | `true` | Contextual retrieval on/off (toggling rebuilds the index) |
-| `CONTEXT_MODEL` | `CHAT_MODEL` | Model that writes the chunk contexts; `qwen3:1.7b` generates ~3× faster than `qwen3:8b`. Avoid `qwen35`-architecture models (§7.3) |
-| `CONTEXT_GROUP_CHARS` / `CONTEXT_GROUP_CHARS_API` | `16000` / `8000` | Chunk characters per batched call — larger groups mean fewer prefills, but must fit `CONTEXT_NUM_CTX`; dense API pages need less |
-| `CONTEXT_MAX_WORDS` | `30` | Words per context. Generation is the whole cost of the stage, so this is the main time/quality dial |
-| `CONTEXT_MIN_CHUNKS` / `CONTEXT_MIN_CHUNKS_CODE` | `2` / `4` | Documents below this get a deterministic context |
-| `CONTEXT_NUM_CTX` / `CONTEXT_MAX_DOC_CHARS` / `CONTEXT_MAX_BACKGROUND_CHARS` / `CONTEXT_MAX_TOKENS` | `8192` / `16000` / `1800` / `120` | Prompt budget; the last two apply to the single-chunk retry |
-| `CONTEXT_KINDS` | `doc,code,api` | Kinds sent to the model (project cards never are) |
-| `INGEST_BATCH_CHUNKS` | `256` | Contextualize this many chunks, then embed them |
+| `CODE_CHUNK_TARGET_TOKENS` / `CODE_CHUNK_MAX_TOKENS` | `600` / `900` | Source-file chunking (cut at declarations); only used with `gitlab.code.enabled: true` |
 | `RETRIEVAL_CANDIDATES` / `RETRIEVAL_TOP_K` | `24` / `6` | Candidates per retriever before fusion / chunks sent to the LLM |
 | `RETRIEVAL_VECTOR_WEIGHT` / `RETRIEVAL_BM25_WEIGHT` | `1.0` / `1.0` | RRF weights |
 | `RETRIEVAL_MAX_CHUNKS_PER_DOC` | `3` | Diversity cap |
@@ -551,10 +509,10 @@ Everything is an environment variable (`.env`, see `.env.example` for the full a
 | `QUERY_REWRITE` | `true` | Rewrite follow-ups into standalone queries |
 | `PORT` / `HOST` | `8787` / `127.0.0.1` | Set `HOST=0.0.0.0` to reach the UI from other machines on the LAN |
 | `EMBEDDING_PROVIDER` / `CHAT_PROVIDER` | `ollama` | `mock` runs the whole pipeline without Ollama (tests/CI) |
-| `SOURCES_FILE` | `./sources.yaml` | Scope and rules for `npm run sync` |
-| `DEVPORTAL_BASE_URL` / `DEVPORTAL_TOKEN` | `https://development.teamsystem.com` / — | Backstage bearer token (see 7.0) |
+| `SOURCES_FILE` | `./sources.yaml` | Scope, filters and rules for `npm run sync` |
+| `DEVPORTAL_BASE_URL` / `DEVPORTAL_TOKEN` | `https://development.teamsystem.com` / — | Backstage bearer token (see 7.0; `./refresh-dev-portal-token.sh`) |
 | `GITLAB_BASE_URL` / `GITLAB_TOKEN` | `https://biosphere.teamsystem.com` / — | PAT with `read_api` |
-| `CONFLUENCE_BASE_URL` / `CONFLUENCE_EMAIL` / `CONFLUENCE_API_TOKEN` | `https://teamsystem.atlassian.net` / — / — | Atlassian API token (classic or scoped), used only to enrich project cards |
+| `CONFLUENCE_BASE_URL` / `CONFLUENCE_EMAIL` / `CONFLUENCE_API_TOKEN` | `https://teamsystem.atlassian.net` / — / — | Atlassian API token (classic or scoped): indexes the configured spaces and enriches the project cards |
 | `CONFLUENCE_CLOUD_ID` | auto | Forces the `api.atlassian.com` gateway used by scoped tokens |
 | `SYNC_CONCURRENCY` | `4` | Parallel requests per source (8 recommended for the per-file GitLab downloads) |
 
@@ -649,54 +607,34 @@ negatives with false abstention ≤ 5 %, judge correctness ≥ 85 %. Below that,
 
 ## 10. Tuning guide
 
-**Ingest is slow.** Both stages are model-bound, and neither gets faster by issuing more requests: Ollama on
+**Ingest is slow.** It is embedding-bound, and it does not get faster by issuing more requests: Ollama on
 Metal time-slices concurrent work instead of batching it, so aggregate throughput is a constant per model.
-Budget the run as *tokens ÷ throughput* and pick model sizes accordingly. Measured on an M5 Pro over the
-oneplatform KB (36 441 documents → 113 910 chunks, 80 472 of them contextualized):
+Budget the run as *chunks ÷ chunks-per-second* and pick the model accordingly. Measured on an M5 Pro:
 
-| Stage | Cost driver | With the old defaults | With the current defaults |
-|---|---|---|---|
-| Contexts | generated tokens | `ornith-1.5:9b`, one call per chunk — ~2.9 s/chunk → **~73 h** | `qwen3:1.7b`, one call per group — ~0.35 s/chunk → **~7 h** |
-| Embeddings | prompt tokens | `qwen3-embedding:8b`, 2.9 chunks/s → **~11 h** | `qwen3-embedding:0.6b`, 24 chunks/s → **~1.3 h** |
+| Embedder | Throughput | Whole KB (40 406 chunks) |
+|---|---|---|
+| `qwen3-embedding:0.6b` @1024d (default) | ~24 chunks/s | **~28 min** |
+| `qwen3-embedding:8b` @4096d | ~2.9 chunks/s | ~3.9 h |
 
-Levers, in order of impact: **`CONTEXT_MODEL`** (`qwen3:1.7b` generates ~156 tok/s against ~49 for an 8B, and
-`qwen35`-architecture models such as `ornith-1.5:9b` are pinned to one slot by Ollama — see §7.3);
-**`EMBEDDING_MODEL`** (`qwen3-embedding:0.6b` is ~8× the 8b's throughput); **`CONTEXT_MAX_WORDS`** (the stage
-costs exactly what it generates); `CONTEXT_MIN_CHUNKS_CODE` and `CONTEXT_KINDS=doc,api` to send less code to
-the model; narrower `gitlab.groups` / `exclude_projects` in `sources.yaml`; larger `CODE_CHUNK_TARGET_TOKENS`.
-The run is resumable and the contexts are cached per chunk hash, so it is fine to stop it and pick it up later
-— and swapping the embedding model rebuilds the index while reusing every context.
+In a synthetic retrieval benchmark (`scripts/bench/`: the chat model writes one question per chunk, we measure
+how often that chunk comes back in the top 6) the 8b bought about 2 points of hit@6 over the 0.6b for 8× the
+time — the reason the 0.6b is the default. Levers if it is still too slow: `EMBEDDING_MODEL`, a narrower
+`sources.yaml` (more `exclude_projects`, fewer Confluence spaces, `roots` per space), larger
+`CHUNK_TARGET_TOKENS`. The run is resumable, so it is fine to stop it and pick it up later.
 
-**What the speed costs in quality.** `evals/questions.jsonl` still refers to source ids from an older export,
-so it cannot arbitrate this yet (§9). The numbers below come from `scripts/bench/` instead: the chat model
-writes one question per chunk, and we measure how often that chunk comes back in the top 6. Three indexes
-over the same 621-chunk sample of `kb/`, the same 300 questions, and — for the first two rows — literally the
-same generated contexts:
-
-| Index | hit@6 | MRR | Ingest cost |
-|---|---|---|---|
-| `qwen3-embedding:0.6b` @1024d, contexts on | 90.0 % | 0.791 | ~8 h |
-| `qwen3-embedding:8b` @4096d, contexts on | 92.3 % | 0.796 | ~18 h |
-| `qwen3-embedding:0.6b` @1024d, **contexts off** | 91.7 % | 0.821 | ~1.5 h |
-
-At n=300 one point of hit@6 is about ±1.6, so read row 2 as *the 8b buys perhaps 2 points for 8.5× the
-embedding time* — the reason the 0.6b is the default. Row 3 is the uncomfortable one: **contextual retrieval
-did not measurably help on this knowledge base**, and it is ~7 of the ~8 hours. Two caveats before acting on
-it: the questions are written *from* each chunk's own text, which flatters a bare chunk and under-rewards a
-context prefix; and this KB already puts the heading path (`repo > file > symbol`) into the indexed text,
-which is much of what a context would have said. If you want the hours back, `CONTEXTUALIZE=false` is the
-single biggest lever there is — but settle it against a repaired `evals/questions.jsonl` first.
-
-**Memory.** The two default models (~1.5 GB and ~2 GB resident) stay loaded together comfortably, which is what
-the batched ingest relies on (contexts, then embeddings, per batch). The 8b pair (`qwen3-embedding:8b` ~9 GB,
-`qwen3:8b` ~6 GB) plus an 8k context still fits in 24 GB, but see the table above before choosing it. Ollama
+**Memory.** `qwen3-embedding:0.6b` (~1.5 GB) and `qwen3:8b` (~6 GB) stay loaded together comfortably. Ollama
 unloads idle models after 5 minutes; the first request after idling pays a few seconds of load time. If you move
-to a 14B chat model, keep `CHAT_NUM_CTX` at 16k or lower and expect the contextualizer to swap models per batch.
+to a 14B chat model, keep `CHAT_NUM_CTX` at 16k or lower.
 
 **Answers miss things that are in the docs.** Run `npm run search -- "<question>"` and look at the `vec=` /
 `bm25=` ranks. If the right chunk is found by only one retriever, adjust the weights. If it is not found at all,
 the chunk is probably too big/mixed — lower `CHUNK_TARGET_TOKENS` — or the question uses vocabulary the docs do
-not (add a glossary page to `kb/manually-curated`, which is exactly what those files are for).
+not (add a glossary page to `kb/manually-curated`, which is exactly what those files are for). If the document
+is simply not in `kb/`, check `data/sync/<source>.skipped.jsonl`: a filter in `sources.yaml` may have dropped it.
+
+**Answers are polluted by noise.** The filters in `sources.yaml` are the lever: `devportal.exclude_pages`,
+`gitlab.exclude_projects` / `docs.exclude`, `confluence.exclude_trees` / `exclude_titles`, and the
+`min_prose_words` thresholds. Skipped documents are listed with their reason next to the sync state.
 
 **Answers hallucinate.** Lower `CHAT_TEMPERATURE` (0–0.2), reduce `RETRIEVAL_TOP_K` so irrelevant chunks do not
 dilute the context, or enable `RERANK=llm`.
@@ -704,25 +642,26 @@ dilute the context, or enable `RERANK=llm`.
 **Follow-ups retrieve the wrong thing.** Check the `Search query:` status line printed by `ask`; if the rewrite
 is poor, disable `QUERY_REWRITE` or improve the prompt in `src/generation/ask.ts`.
 
-**Code questions land on docs (or vice versa).** Use the `kind` filter: `--kind code` / the `</> code` chip in the
-UI restricts retrieval to source files, `--kind project` to the repository cards ("who owns X", "what is X").
+**Endpoint questions land on prose (or vice versa).** Use the `kind` filter: `--kind api` / the UI chip
+restricts retrieval to OpenAPI/AsyncAPI definitions, `--kind project` to the repository cards ("who owns X",
+"what is X"), `--source-type confluence` to the wiki analyses.
 
 **Access control.** `RetrievalFilters` already filters at query time; to enforce permissions, map the caller's
-identity to allowed `sourceTypes` / `kinds` (or add a column, e.g. GitLab group) in the API layer before calling
-`retriever.retrieve()`.
+identity to allowed `sourceTypes` / `kinds` (or add a column, e.g. Confluence space) in the API layer before
+calling `retriever.retrieve()`.
 
 ## 11. Project layout
 
 ```
 ai-wiki/
-├── kb/                          the knowledge base (markdown + frontmatter): kb/{devportal,gitlab} are written
-│                                by `npm run sync` (gitlab holds docs, source files and __project.md cards), kb/manually-curated/ by hand
-├── ARCHITECTURE.md              the knowledge base end to end: sources, kinds, incremental keys, storage
-├── sources.yaml                 what sync gathers (groups, doc/code globs, Confluence enrichment) and authority/source_type rules
-├── data/                        generated index (LanceDB, BM25, manifest, kb-map.json.gz), data/contexts/ (cached chunk
-│                                contexts) and data/sync/ state — git-ignored
+├── kb/                          the knowledge base (markdown + frontmatter): kb/{devportal,gitlab,confluence} are written
+│                                by `npm run sync` (gitlab holds docs, API specs and __project.md cards), kb/manually-curated/ by hand
+├── ARCHITECTURE.md              the knowledge base end to end: sources, filters, kinds, incremental keys, storage
+├── sources.yaml                 what sync gathers (portal excludes, GitLab groups/globs, Confluence spaces + tree filters) and rules
+├── refresh-dev-portal-token.sh  prints a fresh Dev Portal bearer token (user tokens last ~1 h)
+├── data/                        generated index (LanceDB, BM25, manifest, kb-map.json.gz) and data/sync/ state + skipped lists — git-ignored
 ├── evals/questions.jsonl        evaluation set
-├── scripts/setup-ollama.sh      pulls the two models
+├── scripts/setup-ollama.sh      pulls the two models · scripts/bench/ retrieval and embedding benchmarks
 ├── src/
 │   ├── config.ts                env → typed config
 │   ├── types.ts                 shared types (Chunk, RetrievedChunk, Citation, AskEvent…)
@@ -731,12 +670,13 @@ ai-wiki/
 │   │   ├── embeddings.ts        Qwen3 query instruction, Matryoshka truncation, mock embedder
 │   │   └── chat.ts              chat provider (Ollama | mock)
 │   ├── sync/
-│   │   ├── index.ts             orchestrator: run connectors, write kb/, prune, persist state
-│   │   ├── devportal.ts         Backstage catalog + TechDocs connector (emits coveredRepos, repoEntities)
-│   │   ├── gitlab.ts            GitLab connector: docs, source files, project cards (head-commit incremental)
-│   │   ├── code.ts              language map, junk detection, fenced rendering, declaration/symbol regexes
+│   │   ├── index.ts             orchestrator: run connectors, apply rules, skip duplicates, write kb/, prune, persist state
+│   │   ├── devportal.ts         Backstage catalog + TechDocs connector (page excludes, generated/stub gates; emits coveredRepos, repoEntities)
+│   │   ├── gitlab.ts            GitLab connector: docs, API specs, project cards, optional code (head-commit incremental)
+│   │   ├── confluence.ts        Confluence v2 source connector (spaces, ancestry, tree filters) + the CQL lookup for the cards
+│   │   ├── quality.ts           prose statistics, stub / generated-page / boilerplate-README / duplicate heuristics
 │   │   ├── project-card.ts      the per-repository card (GitLab + Dev Portal + README + Confluence hits)
-│   │   ├── confluence.ts        Confluence CQL lookup used to enrich the cards (pages are not indexed)
+│   │   ├── code.ts              language map, junk detection, fenced rendering, declaration/symbol regexes (code kind)
 │   │   ├── html.ts              cheerio + turndown HTML → markdown (code panels, tables, admonitions)
 │   │   ├── sources-config.ts    sources.yaml parsing, globs, rules
 │   │   ├── kb-writer.ts         frontmatter rendering, slugs
@@ -744,10 +684,9 @@ ai-wiki/
 │   │   └── lang.ts, state.ts, types.ts
 │   ├── ingest/
 │   │   ├── loader.ts            file walk, frontmatter parsing, metadata (kind), cleaning
-│   │   ├── chunker.ts           markdown block parser + heading-aware packing; declaration-aware code chunking
-│   │   ├── contextualize.ts     contextual retrieval: background, prompt, sanitising, per-document cache
+│   │   ├── chunker.ts           markdown block parser + heading-aware packing (breadcrumb prefix); declaration-aware code chunking
 │   │   ├── manifest.ts          incremental-ingest bookkeeping
-│   │   └── pipeline.ts          orchestrates load → chunk → contextualize → embed → store → BM25 rebuild, in batches
+│   │   └── pipeline.ts          orchestrates load → chunk → embed → store → BM25 rebuild, in batches
 │   ├── store/
 │   │   ├── vector-store.ts      LanceDB table (schema, add/delete/search/filters)
 │   │   └── bm25.ts              tokenizer + Okapi BM25 + gzip persistence
@@ -761,27 +700,29 @@ ai-wiki/
 │       ├── index.ts             Fastify: /api/ask (SSE), /api/ask/sync, /api/search, /api/map, /api/ingest, …
 │       ├── public/index.html    chat UI
 │       └── public/map.html      2-D map: clusters, labels, density LOD (canvas, no build step)
-└── tests/                       vitest unit tests (chunkers, contextualizer, loader, BM25, prompt, sync connectors with fake fetch)
+└── tests/                       vitest unit tests (chunkers, loader, BM25, prompt, sync connectors with fake fetch)
 ```
 
-Design choices worth knowing: no LangChain/LlamaIndex (the whole pipeline is ~1 500 lines you can read in an
-hour and every stage is swappable); no Ollama SDK (two `fetch` calls); a mock provider so the full pipeline —
-ingest, storage, retrieval, API, UI — runs in tests and CI without models.
+Design choices worth knowing: no LangChain/LlamaIndex (the whole pipeline is a few thousand lines you can read
+in an afternoon and every stage is swappable); no Ollama SDK (two `fetch` calls); a mock provider so the full
+pipeline — ingest, storage, retrieval, API, UI — runs in tests and CI without models.
 
 ## 12. Troubleshooting
 
 | Symptom | Fix |
 |---|---|
 | `Cannot reach Ollama at http://127.0.0.1:11434` | Start Ollama (`ollama serve` or the app). `npm run doctor` |
-| `model "qwen3-embedding:0.6b" not found` | `ollama pull qwen3-embedding:0.6b` (same for the chat and context models) |
+| `model "qwen3-embedding:0.6b" not found` | `ollama pull qwen3-embedding:0.6b` (same for the chat model) |
 | `The index is empty. Run npm run ingest first.` | Exactly that |
 | `Existing index is incompatible (...) rebuilding` | Expected after changing embedding model/dims or chunk sizes |
-| `[devportal] ... HTTP 401 ... Missing credentials` | `DEVPORTAL_TOKEN` missing or expired (user tokens last ~1 h): copy a fresh one from the browser, or use a static token |
-| `confluence (enrichment): HTTP 401 ...` | Scoped API token; the connector falls back to the `api.atlassian.com` gateway by itself. If the gateway also fails, check `CONFLUENCE_EMAIL` and the token's Confluence read/search scopes — or set `confluence.enrich_projects: false`; sync works without it |
+| `[devportal] ... HTTP 401 ... Missing credentials` | `DEVPORTAL_TOKEN` missing or expired (user tokens last ~1 h): `./refresh-dev-portal-token.sh`, or use a static token |
+| `[confluence] ... HTTP 401 ...` | Scoped API token; the connector falls back to the `api.atlassian.com` gateway by itself. If the gateway also fails, check `CONFLUENCE_EMAIL` and the token's Confluence read/search scopes |
+| `confluence.spaces.include is empty` | List the space keys to index in `sources.yaml` (or set `confluence.enabled: false`) |
+| `ancestor page <id> is not readable; its children are treated as roots` | The token cannot see a parent page/folder; tree filters on *that* ancestor cannot apply. Exclude the children by id or title if needed |
+| A page you expected is missing from `kb/` | `grep <title-or-id> data/sync/<source>.skipped.jsonl` shows the filter that dropped it; adjust `sources.yaml` and re-run sync |
 | `sources.yaml: "gitlab.include" is no longer supported` | The 2026-09-09 layout moved the globs to `gitlab.docs` / `gitlab.code`; the error names the new key |
 | `[gitlab] ... repository/archive... HTTP 406` | Expected on this instance (archives disabled); files are downloaded one by one |
-| Ingest ETA is days | Check `CONTEXT_MODEL` and `EMBEDDING_MODEL` first — see the table in §10. It is safe to stop and resume |
-| `contexts generated` ≫ `calls`, or many `retried singly` | Normal: one call situates a group. A high retry count means the model is not honouring the numbered format — lower `CONTEXT_GROUP_CHARS` or raise `CONTEXT_MAX_WORDS` |
+| `N of M Dev Portal repositories outside the configured groups are readable` | Normal: `include_devportal_repos` asks for every repository the portal knows; the token cannot read them all |
 | `[gitlab] group X: HTTP 404` | The token cannot see that group; remove it from `sources.yaml` or list the projects you can see under `gitlab.projects` |
 | `N file(s) in gitlab/ were not produced by sync` | Old imports in `kb/<source>/`; check them, then `npm run sync -- --prune-foreign` |
 | Ingest interrupted (Ctrl-C, sleep) | Just run `npm run ingest` again; it resumes from the manifest |
@@ -791,13 +732,12 @@ ingest, storage, retrieval, API, UI — runs in tests and CI without models.
 
 ## 13. Roadmap / ideas
 
-* **More sources**: the loader only needs markdown + frontmatter, so anything the upstream normaliser exports
-  (Jira, tickets, PDFs converted with Docling/MarkItDown) plugs in unchanged.
+* **Regenerate `evals/questions.jsonl`**: most of its ids still point at the pre-2026-09 export (Confluence page
+  ids and ADR file names have been remapped where the mapping was mechanical; the `git-md:` cases have not).
 * **Cross-encoder reranker** (e.g. `bge-reranker-v2-m3` through a small Python sidecar or ONNX) instead of the
-  LLM rerank — better precision at lower latency; Anthropic's numbers say it compounds with contextual retrieval.
-* **Widen the GitLab scope** (`tsdigital`, `paas`, `madbit`) once the oneplatform throughput is known; and
-  **regenerate `evals/questions.jsonl`**, whose ids still point at the old Confluence-based export.
+  LLM rerank — better precision at lower latency.
+* **More sources**: the loader only needs markdown + frontmatter, so anything exported as such (Jira, tickets,
+  PDFs converted with Docling/MarkItDown) plugs in unchanged. Legacy Confluence spaces (TPAAS, TSDIGITAL) are one
+  `spaces.include` entry away if their PaaS-era content turns out to be needed.
 * **Per-user permissions** at the API layer, mapping identity → allowed source types / spaces.
 * **Feedback loop**: thumbs up/down in the UI appended to `evals/questions.jsonl`.
-* **Light LoRA on the chat model** for house style, trained on logged Q&A pairs with their retrieved context
-  ("RAFT"-style) — the one place fine-tuning does add value on top of RAG.

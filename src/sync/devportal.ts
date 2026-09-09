@@ -5,6 +5,8 @@ import { HttpError, mapLimit } from "./http.js";
 import { slugify } from "./kb-writer.js";
 import { detectLang } from "./lang.js";
 import type { EntitySummary } from "./project-card.js";
+import { isStub, looksGenerated } from "./quality.js";
+import { matchesAny, wildcardToRegExp } from "./sources-config.js";
 import { previousIdsWithPrefix, type Connector, type ConnectorContext, type SyncEvent } from "./types.js";
 
 /**
@@ -18,6 +20,11 @@ import { previousIdsWithPrefix, type Connector, type ConnectorContext, type Sync
  * Also emits `coveredRepos` (GitLab project paths behind those entities) so the GitLab connector can skip
  * the mkdocs content already rendered here, and `repoEntities` (owner, system, lifecycle, description per
  * repository) so the GitLab project cards can say who owns what.
+ *
+ * Not everything the portal renders is documentation: some entities publish generated API reference
+ * (thousands of Swagger model pages, Sphinx module dumps). Those are dropped by `exclude_pages` globs on
+ * `<kind>/<name>/<page path>` and by the generated-page heuristics in quality.ts, and pages without prose
+ * (empty templates, link-only index pages) are skipped as stubs.
  */
 
 interface Entity {
@@ -159,11 +166,20 @@ function entityRef(e: Entity): { ns: string; kind: string; name: string; ref: st
 export const syncDevPortal: Connector = async function* (ctx): AsyncGenerator<SyncEvent> {
   const cfg = ctx.sources.devportal;
   const base = ctx.baseUrl;
-  const excluded = new Set(cfg.exclude_entities.map((s) => s.toLowerCase()));
+  const excludedEntity = entityExcluder(cfg.exclude_entities);
+  const excludedPages = cfg.exclude_pages;
+  const globCache = new Map<string, RegExp>();
   const coveredRepos = new Set<string>();
   const prevCovered = ctx.previous.meta["coveredRepos"];
   if (Array.isArray(prevCovered)) for (const r of prevCovered) if (typeof r === "string") coveredRepos.add(r);
   const repoEntities: Record<string, EntitySummary> = { ...((ctx.previous.meta["repoEntities"] ?? {}) as Record<string, EntitySummary>) };
+  // Build id last seen per entity. Needed for entities that kept no page (every page a stub): they have no
+  // items to compare against and would otherwise be re-downloaded and re-skipped on every run.
+  const prevBuilds = (ctx.previous.meta["entityBuilds"] ?? {}) as Record<string, string>;
+  const builds: Record<string, string> = {};
+
+  // Part of every page fingerprint: a change to the page filters must re-evaluate entities whose TechDocs build did not move.
+  const filterHash = createHash("sha1").update(JSON.stringify([cfg.exclude_pages, cfg.min_body_chars, cfg.min_prose_words, cfg.skip_generated])).digest("hex").slice(0, 8);
 
   const entities = await listEntities(ctx, "metadata.annotations.backstage.io/techdocs-ref");
   ctx.log(`Dev Portal: ${entities.length} entities with TechDocs`);
@@ -172,7 +188,7 @@ export const syncDevPortal: Connector = async function* (ctx): AsyncGenerator<Sy
   for (const e of entities) {
     entityIndex++;
     const { ns, kind, name, ref } = entityRef(e);
-    if (excluded.has(`${kind}/${name}`) || excluded.has(ref)) continue;
+    if (excludedEntity(kind, name, ref)) continue;
     const prefix = `devportal:${ref}/`;
     const ann = e.metadata.annotations ?? {};
 
@@ -186,6 +202,7 @@ export const syncDevPortal: Connector = async function* (ctx): AsyncGenerator<Sy
 
     if (ctx.only && !ref.includes(ctx.only)) {
       for (const id of previousIdsWithPrefix(ctx.previous, prefix)) yield { type: "unchanged", sourceId: id };
+      if (prevBuilds[ref]) builds[ref] = prevBuilds[ref] as string;
       continue;
     }
 
@@ -198,12 +215,16 @@ export const syncDevPortal: Connector = async function* (ctx): AsyncGenerator<Sy
       continue;
     }
 
-    const fingerprint = String(meta.etag ?? meta.build_timestamp ?? "");
+    const build = String(meta.etag ?? meta.build_timestamp ?? "");
+    const fingerprint = build ? `${build}|${filterHash}` : "";
     const prevIds = previousIdsWithPrefix(ctx.previous, prefix);
-    if (fingerprint && prevIds.length && prevIds.every((id) => ctx.previous.items[id]?.fingerprint === fingerprint)) {
+    const sameBuild = prevIds.length ? prevIds.every((id) => ctx.previous.items[id]?.fingerprint === fingerprint) : prevBuilds[ref] === fingerprint;
+    if (fingerprint && sameBuild) {
       for (const id of prevIds) yield { type: "unchanged", sourceId: id };
+      builds[ref] = fingerprint;
       continue;
     }
+    if (fingerprint) builds[ref] = fingerprint;
 
     const staticBase = `${base}/api/techdocs/static/docs/${ns}/${kind}/${encodeURIComponent(name)}`;
     let files: string[];
@@ -223,7 +244,16 @@ export const syncDevPortal: Connector = async function* (ctx): AsyncGenerator<Sy
     const spec = e.spec ?? {};
     const sourceLocation = ann["backstage.io/source-location"]?.replace(/^url:/, "");
 
-    const events = await mapLimit(files, ctx.concurrency, async (file): Promise<SyncEvent | null> => {
+    const entityTitle = e.metadata.title?.trim() || meta.site_name?.trim() || name;
+    const pages = files.filter((file) => {
+      const pagePath = pagePathOf(file);
+      return !(excludedPages.length && matchesAny(`${kind}/${name}/${pagePath}`, excludedPages, globCache));
+    });
+    const excludedCount = files.length - pages.length;
+    if (excludedCount) ctx.log(`    ${excludedCount} pages excluded by devportal.exclude_pages`);
+    for (let i = 0; i < excludedCount; i++) yield { type: "skip", sourceId: prefix, reason: "excluded by devportal.exclude_pages" };
+
+    const events = await mapLimit(pages, ctx.concurrency, async (file): Promise<SyncEvent | null> => {
       const pagePath = pagePathOf(file);
       const sourceId = `${prefix}${pagePath}`;
       const pageUrl = `${base}/docs/${ns}/${kind}/${name}/${pagePath}`;
@@ -236,6 +266,8 @@ export const syncDevPortal: Connector = async function* (ctx): AsyncGenerator<Sy
         const editUrl = $('a[href*="/-/edit/"], a[href*="/-/blob/"], a.md-content__button[href]').first().attr("href");
         const md = htmlToMarkdown(html, { baseUrl: pageUrl, contentSelectors: CONTENT_SELECTORS, removeSelectors: REMOVE });
         if (md.length < cfg.min_body_chars) return { type: "skip", sourceId, reason: `stub (${md.length} chars)` };
+        if (cfg.skip_generated && looksGenerated(title, md)) return { type: "skip", sourceId, reason: "generated reference page" };
+        if (isStub(md, cfg.min_prose_words)) return { type: "skip", sourceId, reason: `stub (no prose)` };
         return {
           type: "doc",
           doc: {
@@ -249,6 +281,7 @@ export const syncDevPortal: Connector = async function* (ctx): AsyncGenerator<Sy
             body: md,
             fingerprint,
             extra: {
+              breadcrumb: `Dev Portal › ${entityTitle}`,
               entity: ref,
               entity_kind: kind,
               entity_name: name,
@@ -283,7 +316,7 @@ export const syncDevPortal: Connector = async function* (ctx): AsyncGenerator<Sy
     ctx.log(`Dev Portal: ${apis.length} API entities`);
     for (const e of apis) {
       const { ns, kind, name, ref } = entityRef(e);
-      if (excluded.has(`${kind}/${name}`) || excluded.has(ref)) continue;
+      if (excludedEntity(kind, name, ref)) continue;
       const sourceId = `devportal:${ref}#definition`;
       if (ctx.only && !ref.includes(ctx.only)) {
         if (ctx.previous.items[sourceId]) yield { type: "unchanged", sourceId };
@@ -318,16 +351,23 @@ export const syncDevPortal: Connector = async function* (ctx): AsyncGenerator<Sy
           lastModified: null,
           body,
           fingerprint,
-          extra: { entity: ref, entity_kind: kind, entity_name: name, owner: e.spec?.["owner"], system: e.spec?.["system"], api_type: apiType, tags: e.metadata.tags },
+          extra: { breadcrumb: `Dev Portal › API › ${e.metadata.title ?? name}`, entity: ref, entity_kind: kind, entity_name: name, owner: e.spec?.["owner"], system: e.spec?.["system"], api_type: apiType, tags: e.metadata.tags },
         },
       };
     }
   }
 
+  yield { type: "meta", key: "entityBuilds", value: builds };
   yield { type: "meta", key: "coveredRepos", value: [...coveredRepos].sort() };
   yield { type: "meta", key: "repoEntities", value: repoEntities };
   yield { type: "meta", key: "entities", value: entities.length };
 };
+
+/** `exclude_entities` accepts "kind/name" or "ns/kind/name", with wildcards, case-insensitive. */
+export function entityExcluder(patterns: string[]): (kind: string, name: string, ref: string) => boolean {
+  const res = patterns.map(wildcardToRegExp);
+  return (kind, name, ref) => res.some((re) => re.test(`${kind}/${name}`) || re.test(ref));
+}
 
 function summarizeEntity(e: Entity, base: string): EntitySummary {
   const { ns, kind, name, ref } = entityRef(e);

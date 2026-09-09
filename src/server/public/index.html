@@ -261,7 +261,7 @@
           <div class="title">${link}<span class="badge">${esc(c.sourceType)}</span>${c.kind && c.kind !== "doc" ? `<span class="badge">${esc(c.kind)}</span>` : ""}<span class="badge ${cls}">${esc(c.authority)}</span></div>
           <div class="path">${esc(c.headingPath)}${c.lineStart ? ` · L${c.lineStart}-${c.lineEnd}` : ""} · <span class="toggle">show passage</span></div>
         </div>
-        <div class="excerpt">${c.context ? `<em>${esc(c.context)}</em>\n\n` : ""}${esc(c.excerpt)}</div>
+        <div class="excerpt">${esc(c.excerpt)}</div>
       </div>`;
     }).join("");
     box.hidden = false;

@@ -132,6 +132,14 @@ export function htmlToMarkdown(html: string, opts: HtmlToMarkdownOptions = {}): 
     });
   }
 
+  // mkdocs-material / Pygments render line-numbered code as a two-column table (line numbers | code). Left
+  // alone it becomes one giant markdown table row with <br>-separated code; keep only the code block.
+  root.find("table.highlighttable").each((_, t) => {
+    const code = $(t).find("td.code pre").first();
+    if (code.length) $(t).replaceWith(code);
+    else $(t).find(".linenos, .linenodiv").remove();
+  });
+
   root.find("img").each((_, img) => {
     const alt = ($(img).attr("alt") ?? $(img).attr("title") ?? "").trim();
     $(img).replaceWith(alt ? `[image: ${alt}]` : "");

@@ -54,7 +54,9 @@ rules:
   it("merges over defaults", () => {
     expect(cfg.gitlab.groups).toEqual(["oneplatform"]);
     expect(cfg.gitlab.docs.include).toEqual(["**/*.md", "**/*.markdown", "**/*.mdx"]);
-    expect(cfg.gitlab.code.enabled).toBe(true);
+    expect(cfg.gitlab.code.enabled).toBe(false); // source code is off unless asked for
+    expect(cfg.gitlab.api_specs.enabled).toBe(true);
+    expect(cfg.confluence.enabled).toBe(false);
     expect(cfg.confluence.enrich_projects).toBe(true);
     expect(cfg.rules).toHaveLength(3);
   });
@@ -73,7 +75,15 @@ rules:
 
   it("rejects the pre-2026-09-09 keys with a pointer to their new home", () => {
     expect(() => parseSourcesConfig(`gitlab:\n  include: ["**/*.md"]`)).toThrow(/gitlab\.docs\.include/);
-    expect(() => parseSourcesConfig(`confluence:\n  enabled: true`)).toThrow(/enrich_projects/);
+    expect(() => parseSourcesConfig(`gitlab:\n  skip_if_in_devportal: true`)).toThrow(/skip_techdocs_if_in_devportal/);
+  });
+
+  it("normalises the Confluence tree filters", () => {
+    const c = parseSourcesConfig(`confluence:\n  enabled: true\n  spaces:\n    include: [CTO]\n  roots:\n    TONEPLAT: 113147908\n  exclude_trees:\n    - id: 804880489\n    - title: "Sprint*"`);
+    expect(c.confluence.enabled).toBe(true);
+    expect(c.confluence.exclude_trees).toEqual([{ id: "804880489" }, { title: "Sprint*" }]);
+    expect(c.confluence.roots).toEqual({ TONEPLAT: ["113147908"] });
+    expect(() => parseSourcesConfig(`confluence:\n  exclude_trees:\n    - foo: 1`)).toThrow(/exclude_trees/);
   });
 
   it("rejects unknown authority values", () => {

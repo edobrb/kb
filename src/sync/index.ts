@@ -1,11 +1,12 @@
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { config, paths } from "../config.js";
-import { createConfluenceLookup, resolveConfluenceApi } from "./confluence.js";
+import { createConfluenceLookup, resolveConfluenceApi, syncConfluence } from "./confluence.js";
 import { syncDevPortal } from "./devportal.js";
 import { syncGitLab } from "./gitlab.js";
 import { createHttp, type HttpClient } from "./http.js";
 import { renderKbDocument } from "./kb-writer.js";
+import { duplicateKey } from "./quality.js";
 import { applyRules, loadSourcesConfig, type SourcesConfig } from "./sources-config.js";
 import { emptyState, readState, writeState } from "./state.js";
 import type { Connector, ProjectEnricher, SyncState } from "./types.js";
@@ -86,6 +87,8 @@ export interface SourceReport {
   unchanged: number;
   removed: number;
   skipped: number;
+  /** Documents skipped because their body duplicates one already written in this run (included in `skipped`). */
+  duplicates: number;
   errors: number;
   foreign: number;
   durationMs: number;
@@ -127,6 +130,20 @@ export function builtinDefinitions(sources: SourcesConfig): Record<string, Sourc
         return cf && cf.enabled && cf.hasCredentials ? cf.create() : undefined;
       },
       run: syncGitLab,
+    },
+    confluence: {
+      folder: "confluence",
+      baseUrl: c.confluence.baseUrl,
+      enabled: sources.confluence.enabled,
+      credentialsHint: "set CONFLUENCE_EMAIL and CONFLUENCE_API_TOKEN (Atlassian API token) or set confluence.enabled: false",
+      hasCredentials: Boolean(c.confluence.email && c.confluence.token),
+      http: () => createHttp({ headers: { authorization: `Basic ${Buffer.from(`${c.confluence.email}:${c.confluence.token}`).toString("base64")}` } }),
+      settings: { cloudId: c.confluence.cloudId || undefined },
+      probe: async (http) => {
+        const api = await resolveConfluenceApi(http, c.confluence.baseUrl, c.confluence.cloudId || undefined);
+        return `${api.mode === "gateway" ? "reachable via api.atlassian.com gateway (scoped token)" : "reachable via site URL"}; spaces ${sources.confluence.spaces.include.join(", ") || "(none configured)"}`;
+      },
+      run: syncConfluence,
     },
   };
 }
@@ -180,7 +197,7 @@ export async function runSync(opts: SyncOptions = {}): Promise<SourceReport[]> {
   for (const name of wanted) {
     const def = defs[name] as SourceDefinition;
     const started = Date.now();
-    const report: SourceReport = { source: name, added: 0, updated: 0, unchanged: 0, removed: 0, skipped: 0, errors: 0, foreign: 0, durationMs: 0 };
+    const report: SourceReport = { source: name, added: 0, updated: 0, unchanged: 0, removed: 0, skipped: 0, duplicates: 0, errors: 0, foreign: 0, durationMs: 0 };
     reports.push(report);
 
     if (!def.hasCredentials) {
@@ -195,6 +212,18 @@ export async function runSync(opts: SyncOptions = {}): Promise<SourceReport[]> {
     const next: SyncState = { ...emptyState(name), meta: { ...previous.meta } };
     const ownedDir = path.join(kbDir, def.folder);
     const takenPaths = new Map<string, string>();
+    // Identical bodies under different ids (a README copied into ten repositories, a page duplicated in two
+    // spaces) would come back as near-identical chunks: keep the first, skip the rest.
+    const seenBodies = new Map<string, string>();
+    // Why documents were skipped: counts go to the log, the full list next to the state file, so the quality
+    // filters in sources.yaml can be audited without re-running with a debugger.
+    const skipReasons = new Map<string, number>();
+    const skipped: { id: string; reason: string }[] = [];
+    const noteSkip = (id: string, reason: string) => {
+      const key = reason.replace(/ — .*$/, "").replace(/\(.*?\)/g, "").replace(/".*?"/g, "").trim();
+      skipReasons.set(key, (skipReasons.get(key) ?? 0) + 1);
+      if (skipped.length < 50_000) skipped.push({ id, reason });
+    };
     const now = new Date().toISOString();
     let completed = false;
 
@@ -227,6 +256,7 @@ export async function runSync(opts: SyncOptions = {}): Promise<SourceReport[]> {
             break;
           case "skip":
             report.skipped++;
+            noteSkip(ev.sourceId, ev.reason);
             break;
           case "error":
             report.errors++;
@@ -236,7 +266,19 @@ export async function runSync(opts: SyncOptions = {}): Promise<SourceReport[]> {
             const doc = applyRules(ev.doc, sources.rules);
             if (!doc) {
               report.skipped++;
+              noteSkip(ev.doc.sourceId, "skipped by a sources.yaml rule");
               break;
+            }
+            if (doc.kind !== "project") {
+              const key = duplicateKey(doc.body);
+              const dupOf = key.length >= 80 ? seenBodies.get(key) : undefined;
+              if (dupOf && dupOf !== doc.sourceId) {
+                report.skipped++;
+                report.duplicates++;
+                noteSkip(doc.sourceId, `duplicate of ${dupOf}`);
+                break;
+              }
+              if (key.length >= 80) seenBodies.set(key, doc.sourceId);
             }
             if (!doc.relPath.startsWith(`${def.folder}/`)) {
               report.errors++;
@@ -309,12 +351,21 @@ export async function runSync(opts: SyncOptions = {}): Promise<SourceReport[]> {
       }
     }
 
+    if (skipReasons.size) {
+      const top = [...skipReasons.entries()].sort((a, b) => b[1] - a[1]).map(([r, n]) => `${n} ${r}`).join(", ");
+      log(`  skipped ${report.skipped}: ${top}`);
+    }
+    if (!opts.dryRun) {
+      await mkdir(stateDir, { recursive: true });
+      await writeFile(path.join(stateDir, `${name}.skipped.jsonl`), skipped.map((s) => JSON.stringify(s)).join("\n") + (skipped.length ? "\n" : ""), "utf8");
+    }
+
     next.lastRunAt = now;
     if (!opts.dryRun) await writeState(stateDir, next);
     report.durationMs = Date.now() - started;
     log(
       `[${name}] done in ${(report.durationMs / 1000).toFixed(1)}s — added ${report.added}, updated ${report.updated}, unchanged ${report.unchanged}, ` +
-        `removed ${report.removed}, skipped ${report.skipped}, errors ${report.errors}${report.fatal ? ` — ABORTED: ${report.fatal}` : ""}`,
+        `removed ${report.removed}, skipped ${report.skipped}${report.duplicates ? ` (${report.duplicates} duplicates)` : ""}, errors ${report.errors}${report.fatal ? ` — ABORTED: ${report.fatal}` : ""}`,
     );
   }
   return reports;

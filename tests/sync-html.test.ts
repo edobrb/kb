@@ -150,3 +150,15 @@ describe("detectLang", () => {
     expect(detectLang("OK")).toBe("und");
   });
 });
+
+describe("mkdocs line-numbered code tables", () => {
+  it("keeps only the code of a Pygments highlighttable", async () => {
+    const { htmlToMarkdown } = await import("../src/sync/html.js");
+    const html = `<article><p>Intro.</p><div class="language-yaml highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span class="normal">1</span>\n<span class="normal">2</span></pre></div></td><td class="code"><div><pre><span></span><code>openapi: 3.0.0\ninfo: x</code></pre></div></td></tr></table></div><p>After.</p></article>`;
+    const md = htmlToMarkdown(html, { contentSelectors: ["article"] });
+    expect(md).toContain("```yaml\nopenapi: 3.0.0\ninfo: x\n```");
+    expect(md).not.toContain("|");
+    expect(md).not.toContain("<br>");
+    expect(md).not.toMatch(/^1\s*$/m);
+  });
+});

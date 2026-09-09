@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import YAML from "yaml";
 import { parseFrontmatter } from "../ingest/loader.js";
 import { codeSkipReason, languageOf, renderCodeBody } from "./code.js";
 import { tidyMarkdown } from "./html.js";
@@ -6,18 +7,21 @@ import { HttpError, mapLimit } from "./http.js";
 import { firstHeading } from "./kb-writer.js";
 import { detectLang } from "./lang.js";
 import { buildProjectCard, type EntitySummary } from "./project-card.js";
+import { isBoilerplateReadme, isStub } from "./quality.js";
 import { matchesAny, wildcardToRegExp, type SourcesConfig } from "./sources-config.js";
 import { previousIdsWithPrefix, type ConfluenceHit, type Connector, type ConnectorContext, type SyncEvent } from "./types.js";
 
 /**
  * GitLab connector (REST API v4, personal access token with `read_api`).
  *
- * For every project of the configured groups (recursively) and explicit projects it produces:
- *  - the markdown documentation (`gitlab.docs` globs), as before;
- *  - every source file matching `gitlab.code` globs, stored as one fenced code block per file
- *    (`kind: code`), so the ingest can chunk it at declaration boundaries;
+ * For every project of the configured groups (recursively), the explicit projects and — with
+ * `include_devportal_repos` — the repositories the Dev Portal catalog points at, it produces:
+ *  - the markdown documentation (`gitlab.docs` globs), minus stubs and generator boilerplate;
+ *  - the OpenAPI/AsyncAPI contracts kept in the repository (`gitlab.api_specs`), as `kind: api`;
  *  - one "project card" (`kind: project`) combining the GitLab metadata, the Dev Portal entity
- *    (owner/system/lifecycle), the README, the languages and the Confluence pages that mention the project.
+ *    (owner/system/lifecycle), the README, the languages and the Confluence pages that mention the project;
+ *  - optionally (`gitlab.code.enabled`, off by default: too much noise for a technical Q&A corpus) every
+ *    source file matching `gitlab.code` globs as one fenced block per file (`kind: code`).
  *
  * Incremental at two levels: a project whose default-branch head commit is unchanged is skipped entirely;
  * within a changed project only blobs whose sha changed are downloaded. Repository archives are not used
@@ -76,7 +80,7 @@ async function paged<T>(ctx: ConnectorContext, urlWithoutPage: string): Promise<
 
 const enc = encodeURIComponent;
 
-async function discoverProjects(ctx: ConnectorContext): Promise<Project[]> {
+async function discoverProjects(ctx: ConnectorContext, extraPaths: Iterable<string> = []): Promise<Project[]> {
   const cfg = ctx.sources.gitlab;
   const base = ctx.baseUrl;
   const byPath = new Map<string, Project>();
@@ -100,12 +104,32 @@ async function discoverProjects(ctx: ConnectorContext): Promise<Project[]> {
       ctx.log(`  ! project ${path}: ${(err as Error).message}`);
     }
   }
+  // Repositories the portal documents but that live outside the configured groups. Many are not readable
+  // with this token (404/403): count them instead of logging one line each.
+  const extra = [...new Set([...extraPaths].map((p) => p.toLowerCase()))].filter((p) => !byPath.has(p));
+  if (extra.length) {
+    let unreadable = 0;
+    const found = await mapLimit(extra, ctx.concurrency, async (path) => {
+      try {
+        return await ctx.http.json<Project>(`${base}/api/v4/projects/${enc(path)}`);
+      } catch {
+        unreadable++;
+        return null;
+      }
+    });
+    for (const p of found) if (p) byPath.set(p.path_with_namespace.toLowerCase(), p);
+    ctx.log(`GitLab: ${found.length - unreadable} of ${extra.length} Dev Portal repositories outside the configured groups are readable${unreadable ? ` (${unreadable} not accessible with this token)` : ""}`);
+  }
   return [...byPath.values()].sort((a, b) => a.path_with_namespace.localeCompare(b.path_with_namespace));
 }
 
 export interface SelectedFiles {
   docs: TreeEntry[];
+  /** OpenAPI / AsyncAPI contracts (`kind: api`). */
+  api: TreeEntry[];
   code: TreeEntry[];
+  /** Files that look like source code by extension, whether or not code indexing is on (for the card). */
+  sourceFileCount: number;
 }
 
 /** mkdocs content the Dev Portal already renders for repositories it covers. */
@@ -115,19 +139,45 @@ const TECHDOCS_PATTERNS = ["docs/**", "mkdocs.yml", "mkdocs.yaml"];
 export function selectFiles(tree: TreeEntry[], gitlab: SourcesConfig["gitlab"], coveredByDevportal: boolean): SelectedFiles {
   const cache = new Map<string, RegExp>();
   const docs: TreeEntry[] = [];
+  const api: TreeEntry[] = [];
   const code: TreeEntry[] = [];
+  let sourceFileCount = 0;
   for (const t of tree) {
     if (t.type !== "blob") continue;
     if (gitlab.docs.enabled && matchesAny(t.path, gitlab.docs.include, cache) && !matchesAny(t.path, gitlab.docs.exclude, cache)) {
       if (!(coveredByDevportal && gitlab.docs.skip_techdocs_if_in_devportal && matchesAny(t.path, TECHDOCS_PATTERNS, cache))) docs.push(t);
       continue;
     }
-    if (gitlab.code.enabled && matchesAny(t.path, gitlab.code.include, cache) && !matchesAny(t.path, gitlab.code.exclude, cache)) {
+    if (gitlab.api_specs.enabled && matchesAny(t.path, gitlab.api_specs.include, cache) && !matchesAny(t.path, gitlab.api_specs.exclude, cache)) {
+      api.push(t);
+      continue;
+    }
+    if (matchesAny(t.path, gitlab.code.include, cache) && !matchesAny(t.path, gitlab.code.exclude, cache)) {
       if (gitlab.code.skip_tests && matchesAny(t.path, gitlab.code.test_patterns, cache)) continue;
-      code.push(t);
+      sourceFileCount++;
+      if (gitlab.code.enabled) code.push(t);
     }
   }
-  return { docs, code };
+  return { docs, api, code, sourceFileCount };
+}
+
+/** Parsed head of an OpenAPI / AsyncAPI / Swagger document, or null when the file is not one. */
+export function apiSpecInfo(raw: string): { flavour: "openapi" | "asyncapi" | "swagger"; version: string; title: string; description: string; format: "yaml" | "json" } | null {
+  const head = raw.slice(0, 4096);
+  const key = /^\s*\{?\s*["']?(openapi|asyncapi|swagger)["']?\s*:\s*["']?(\d[\w.-]*)/m.exec(head);
+  if (!key) return null;
+  const format = /^\s*\{/.test(raw) ? "json" : "yaml";
+  let title = "";
+  let description = "";
+  try {
+    const parsed = YAML.parse(raw) as { info?: { title?: unknown; description?: unknown } } | null;
+    const info = parsed?.info ?? {};
+    title = typeof info.title === "string" ? info.title.trim() : "";
+    description = typeof info.description === "string" ? info.description.trim() : "";
+  } catch {
+    /* an unparsable spec is still worth indexing as text */
+  }
+  return { flavour: key[1] as "openapi" | "asyncapi" | "swagger", version: key[2] as string, title, description, format };
 }
 
 /** Kept for callers/tests of the previous API: markdown selection only. */
@@ -162,7 +212,7 @@ export const syncGitLab: Connector = async function* (ctx): AsyncGenerator<SyncE
     if (covered.size) ctx.log(`GitLab: ${covered.size} repositories are documented in the Dev Portal (their docs/ content is ${cfg.docs.skip_techdocs_if_in_devportal ? "skipped" : "indexed too"})`);
   }
 
-  const projects = await discoverProjects(ctx);
+  const projects = await discoverProjects(ctx, cfg.include_devportal_repos ? covered : []);
   if (!projects.length) {
     yield { type: "error", message: "no GitLab projects discovered (check gitlab.groups / gitlab.projects in sources.yaml and GITLAB_TOKEN)" };
   }
@@ -209,7 +259,7 @@ export const syncGitLab: Connector = async function* (ctx): AsyncGenerator<SyncE
     // the file-selection settings (changing a glob re-lists every repository; unchanged blobs still cost nothing).
     const isCovered = covered.has(path.toLowerCase());
     const entity = entities.get(path.toLowerCase()) ?? null;
-    const headKey = `${head.id ?? p.last_activity_at}|${sha256(JSON.stringify([isCovered, entity, cfg.docs, cfg.code])).slice(7, 19)}`;
+    const headKey = `${head.id ?? p.last_activity_at}|${sha256(JSON.stringify([isCovered, entity, cfg.docs, cfg.api_specs, cfg.code, cfg.min_body_chars, cfg.min_prose_words, cfg.skip_boilerplate_readmes])).slice(7, 19)}`;
     const prevIds = previousIdsWithPrefix(ctx.previous, prefix);
     if (prevHeads[path] === headKey && prevIds.length) {
       yield* keepPrevious();
@@ -242,7 +292,7 @@ export const syncGitLab: Connector = async function* (ctx): AsyncGenerator<SyncE
       };
       files.code = [];
     }
-    ctx.log(`  [${projectIndex}/${projects.length}] ${path}: ${files.docs.length} docs, ${files.code.length} source files`);
+    ctx.log(`  [${projectIndex}/${projects.length}] ${path}: ${files.docs.length} docs, ${files.api.length} API specs${cfg.code.enabled ? `, ${files.code.length} source files` : ""}`);
     const headDate = head.committed_date?.slice(0, 10) ?? p.last_activity_at.slice(0, 10);
     const common = { project: path, project_url: p.web_url, ref: branch, project_last_activity: p.last_activity_at.slice(0, 10) };
 
@@ -250,7 +300,11 @@ export const syncGitLab: Connector = async function* (ctx): AsyncGenerator<SyncE
     const readmeEntry = tree.find(isReadme) ?? null;
     const readmePromise: Promise<string | null> = readmeEntry
       ? ctx.http.text(`${base}/api/v4/projects/${p.id}/repository/files/${enc(readmeEntry.path)}/raw?ref=${enc(branch)}`, { headers: { accept: "text/plain, */*" } }).then(
-          (raw) => tidyMarkdown(parseFrontmatter(raw).body),
+          (raw) => {
+            const md = tidyMarkdown(parseFrontmatter(raw).body);
+            // A generator README says nothing about this repository: leave the card without an excerpt.
+            return cfg.skip_boilerplate_readmes && isBoilerplateReadme(md) ? null : md;
+          },
           () => null,
         )
       : Promise.resolve(null);
@@ -281,6 +335,8 @@ export const syncGitLab: Connector = async function* (ctx): AsyncGenerator<SyncE
         const { frontmatter, body } = parseFrontmatter(raw);
         const md = tidyMarkdown(body);
         if (md.length < cfg.min_body_chars) return { type: "skip", sourceId, reason: `stub (${md.length} chars)` };
+        if (cfg.skip_boilerplate_readmes && isBoilerplateReadme(md)) return { type: "skip", sourceId, reason: "generator boilerplate" };
+        if (isStub(md, cfg.min_prose_words)) return { type: "skip", sourceId, reason: "stub (no prose)" };
         const fmTitle = typeof frontmatter["title"] === "string" ? frontmatter["title"].trim() : "";
         const title = fmTitle || firstHeading(md) || f.name.replace(/\.(md|markdown|mdx)$/i, "").replace(/[-_]+/g, " ");
 
@@ -305,7 +361,7 @@ export const syncGitLab: Connector = async function* (ctx): AsyncGenerator<SyncE
             lastModified: lastModified ?? headDate,
             body: md,
             fingerprint: f.id,
-            extra: { ...common, file_path: f.path, blob_sha: f.id, doc_frontmatter_title: fmTitle || undefined },
+            extra: { ...common, breadcrumb: `GitLab › ${path}`, file_path: f.path, blob_sha: f.id, doc_frontmatter_title: fmTitle || undefined },
           },
         };
       } catch (err) {
@@ -313,6 +369,42 @@ export const syncGitLab: Connector = async function* (ctx): AsyncGenerator<SyncE
       }
     });
     for (const ev of docEvents) if (ev) yield ev;
+
+    const apiEvents = await mapLimit(files.api, ctx.concurrency, async (f): Promise<SyncEvent | null> => {
+      const sourceId = `${prefix}${f.path}`;
+      const prev = ctx.previous.items[sourceId];
+      if (prev && prev.fingerprint === f.id) return { type: "unchanged", sourceId };
+      try {
+        const raw = await ctx.http.text(`${base}/api/v4/projects/${p.id}/repository/files/${enc(f.path)}/raw?ref=${enc(branch)}`, {
+          headers: { accept: "text/plain, */*" },
+        });
+        if (raw.length > cfg.api_specs.max_file_kb * 1024) return { type: "skip", sourceId, reason: `too large (${Math.round(raw.length / 1024)} KB)` };
+        const info = apiSpecInfo(raw);
+        if (!info) return { type: "skip", sourceId, reason: "not an OpenAPI/AsyncAPI document" };
+        const label = info.flavour === "asyncapi" ? "AsyncAPI" : "OpenAPI";
+        const title = info.title ? `${info.title} (${label} definition)` : `${f.name} (${label} definition)`;
+        const intro = [info.description, `${label} ${info.version} definition \`${f.path}\` of the repository \`${path}\`.`].filter(Boolean).join("\n\n");
+        return {
+          type: "doc",
+          doc: {
+            sourceId,
+            sourceType: "gitlab",
+            kind: "api",
+            relPath: `gitlab/${path}/${f.path}.md`,
+            title,
+            sourceUrl: `${p.web_url}/-/blob/${branch}/${f.path}`,
+            lang: detectLang(info.description) === "it" ? "it" : "en",
+            lastModified: headDate,
+            body: `${intro}\n\n${renderCodeBody(raw, info.format)}`,
+            fingerprint: f.id,
+            extra: { ...common, breadcrumb: `GitLab › ${path}`, file_path: f.path, blob_sha: f.id, api_type: info.flavour, api_version: info.version },
+          },
+        };
+      } catch (err) {
+        return { type: "error", sourceId, message: (err as Error).message };
+      }
+    });
+    for (const ev of apiEvents) if (ev) yield ev;
 
     const codeEvents = await mapLimit(files.code, ctx.concurrency, async (f): Promise<SyncEvent | null> => {
       const sourceId = `${prefix}${f.path}`;
@@ -366,7 +458,7 @@ export const syncGitLab: Connector = async function* (ctx): AsyncGenerator<SyncE
         entity,
         readme,
         confluence: enr.hits,
-        files: { total: tree.filter((t) => t.type === "blob").length, code: files.code.length, docs: files.docs.length, topDirs },
+        files: { total: tree.filter((t) => t.type === "blob").length, code: files.sourceFileCount, docs: files.docs.length, topDirs },
       });
       const cardId = `${prefix}__project`;
       const fingerprint = sha256(card.body);

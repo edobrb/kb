@@ -112,9 +112,33 @@ describe("chunkCode", () => {
     expect(chunkCode(doc("# x.py\n\n```python\n\n```", "x.py", "code"), { targetTokens: 400, maxTokens: 700 })).toEqual([]);
   });
 
-  it("composes the embedding text from breadcrumb, context and content", () => {
-    expect(composeChunkText("A > B", "", "body")).toBe("A > B\n\nbody");
-    expect(composeChunkText("A > B", "ctx", "body")).toBe("A > B\n\nctx\n\nbody");
+  it("composes the embedding text from breadcrumb and content", () => {
+    expect(composeChunkText("A > B", "body")).toBe("A > B\n\nbody");
+    expect(composeChunkText("", "body")).toBe("body");
+  });
+});
+
+describe("breadcrumb frontmatter", () => {
+  const crumb = "Confluence › TeamCore › TS ID - Feature";
+
+  it("leads the heading path of prose and code chunks", () => {
+    const para = "Lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor. ".repeat(6);
+    const prose = chunkDocument(doc(`# Test Doc\n\n## Alpha\n\n${para}`, "Test Doc", "doc", { breadcrumb: crumb }), opts);
+    expect(prose[0]?.headingPath).toBe(`${crumb} > Test Doc > Alpha`);
+    expect(prose[0]?.text.startsWith(`${crumb} > Test Doc > Alpha`)).toBe(true);
+
+    const code = chunkCode(doc("# a.ts\n\n```ts\nexport const x = 1;\n```", "a.ts", "code", { breadcrumb: crumb, project: "oneplatform/x" }), {
+      targetTokens: 400,
+      maxTokens: 700,
+    });
+    expect(code[0]?.headingPath.startsWith(`${crumb} > oneplatform/x > a.ts`)).toBe(true);
+  });
+
+  it("is skipped when absent, empty or equal to the title", () => {
+    const body = "# Test Doc\n\n## Alpha\n\nSome prose here that is long enough to keep.";
+    expect(chunkDocument(doc(body), opts)[0]?.headingPath).toBe("Test Doc > Alpha");
+    expect(chunkDocument(doc(body, "Test Doc", "doc", { breadcrumb: "  " }), opts)[0]?.headingPath).toBe("Test Doc > Alpha");
+    expect(chunkDocument(doc(body, "Test Doc", "doc", { breadcrumb: "test doc" }), opts)[0]?.headingPath).toBe("Test Doc > Alpha");
   });
 });
 
@@ -129,5 +153,17 @@ describe("giant single lines", () => {
     for (const c of code) expect(c.tokenEstimate).toBeLessThanOrEqual(220);
     expect(code[0]?.lineStart).toBe(1);
     expect(code.at(-1)?.lineEnd).toBe(3);
+  });
+});
+
+describe("oversized table rows", () => {
+  it("cuts a single giant row into chunk-sized pieces instead of emitting one huge chunk", async () => {
+    const { chunkDocument } = await import("../src/ingest/chunker.js");
+    const blob = "x".repeat(20_000);
+    const doc = { meta: { sourceId: "t:1", sourceType: "t", kind: "doc", title: "T", sourceUrl: null, authority: "descriptive", lang: "en", lastModified: null, contentHash: "h", relPath: "t.md" }, body: `# T\n\n| a | b |\n| --- | --- |\n| 1 | ${blob} |\n| 2 | small |`, frontmatter: {} } as never;
+    const chunks = chunkDocument(doc, { targetTokens: 450, maxTokens: 700, overlapTokens: 60 });
+    expect(chunks.length).toBeGreaterThan(5);
+    expect(Math.max(...chunks.map((c) => c.tokenEstimate))).toBeLessThan(800);
+    expect(chunks.every((c) => c.content.includes("| a | b |"))).toBe(true); // header row repeated on every piece
   });
 });

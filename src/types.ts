@@ -37,7 +37,7 @@ export interface Document {
   frontmatter: Record<string, unknown>;
 }
 
-/** A chunk ready to be embedded / indexed. `text` is what gets embedded (breadcrumb + context + content). */
+/** A chunk ready to be embedded / indexed. `text` is what gets embedded (breadcrumb + content). */
 export interface Chunk {
   id: string;
   sourceId: string;
@@ -46,13 +46,7 @@ export interface Chunk {
   headingPath: string;
   /** Raw chunk body (shown to users). */
   content: string;
-  /**
-   * Contextual-retrieval prefix: a few sentences, written by the chat model, that situate the chunk in its
-   * document and project (https://www.anthropic.com/engineering/contextual-retrieval). Empty until the
-   * ingest pipeline fills it in.
-   */
-  context: string;
-  /** Embedding/index text: breadcrumb + context + content. */
+  /** Embedding/index text: breadcrumb + content. */
   text: string;
   tokenEstimate: number;
   /** 1-based line range in the source file (code chunks only). */
@@ -74,7 +68,6 @@ export interface StoredChunk {
   rel_path: string;
   ordinal: number;
   heading_path: string;
-  context: string;
   content: string;
   text: string;
   /** -1 when not a code chunk. */
@@ -102,7 +95,6 @@ export interface RetrievedChunk {
   relPath: string;
   ordinal: number;
   headingPath: string;
-  context: string;
   content: string;
   lineStart: number | null;
   lineEnd: number | null;
@@ -140,7 +132,6 @@ export interface Citation {
   authority: string;
   headingPath: string;
   relPath: string;
-  context: string;
   excerpt: string;
   lineStart: number | null;
   lineEnd: number | null;

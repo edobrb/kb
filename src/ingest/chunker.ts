@@ -19,9 +19,9 @@ export function estimateCodeTokens(text: string): number {
   return Math.ceil(text.length / 3.2);
 }
 
-/** The text that gets embedded and BM25-indexed: breadcrumb, contextual-retrieval prefix, content. */
-export function composeChunkText(headingPath: string, context: string, content: string): string {
-  return [headingPath, context, content].filter((s) => s && s.trim()).join("\n\n");
+/** The text that gets embedded and BM25-indexed: breadcrumb, then content. */
+export function composeChunkText(headingPath: string, content: string): string {
+  return [headingPath, content].filter((s) => s && s.trim()).join("\n\n");
 }
 
 type BlockKind = "heading" | "code" | "table" | "text";
@@ -127,7 +127,8 @@ function splitOversized(block: Block, maxTokens: number): Block[] {
     const rows = lines.slice(2);
     let cur: string[] = [];
     const headerTokens = estimateTokens(header.join("\n"));
-    for (const row of rows) {
+    // A single row longer than a chunk (a cell holding a blob of JSON or code) is cut into pieces rather than kept atomic.
+    for (const row of rows.flatMap((r) => hardWrap(r, maxTokens))) {
       if (cur.length && headerTokens + estimateTokens([...cur, row].join("\n")) > maxTokens) {
         pieces.push({ ...block, text: [...header, ...cur].join("\n") });
         cur = [];
@@ -184,9 +185,21 @@ export function hardWrap(line: string, maxTokens: number, charsPerToken = 3.5): 
   return out;
 }
 
-function joinPath(title: string, path: string[]): string {
-  const parts = [title, ...path.filter((p) => p.toLowerCase() !== title.toLowerCase())];
-  return parts.join(" > ");
+/**
+ * Where the document sits, as an optional `breadcrumb` frontmatter field written by sync
+ * (e.g. "Confluence › TeamCore › TS ID - Feature"). It leads every heading path so a chunk
+ * carries the space/hierarchy it came from, not just its own title.
+ */
+function breadcrumbOf(doc: Document): string {
+  const v = doc.frontmatter["breadcrumb"];
+  return typeof v === "string" ? v.trim() : "";
+}
+
+/** "Breadcrumb > Title > H2 > H3", dropping any segment that just repeats the title. */
+function joinPath(title: string, path: string[], prefix = ""): string {
+  const repeatsTitle = (p: string) => p.toLowerCase() === title.toLowerCase();
+  const head = prefix && !repeatsTitle(prefix) ? [prefix] : [];
+  return [...head, title, ...path.filter((p) => !repeatsTitle(p))].join(" > ");
 }
 
 function makeChunk(doc: Document, ordinal: number, headingPath: string, content: string, tokens: number, lines: [number, number] | null): Chunk {
@@ -196,8 +209,7 @@ function makeChunk(doc: Document, ordinal: number, headingPath: string, content:
     ordinal,
     headingPath,
     content,
-    context: "",
-    text: composeChunkText(headingPath, "", content),
+    text: composeChunkText(headingPath, content),
     tokenEstimate: tokens,
     lineStart: lines ? lines[0] : null,
     lineEnd: lines ? lines[1] : null,
@@ -209,13 +221,14 @@ function makeChunk(doc: Document, ordinal: number, headingPath: string, content:
  *  - packs consecutive blocks up to `targetTokens`, never over `maxTokens`
  *  - prefers to break at headings once a chunk is at least ~1/3 of target
  *  - carries a short overlap (last block) when a break happens mid-section
- *  - prefixes each chunk's embedding text with "Title > H2 > H3" so it is self-describing
+ *  - prefixes each chunk's embedding text with "[breadcrumb >] Title > H2 > H3" so it is self-describing
  * Source files (`kind: code`) go through `chunkCode` instead.
  */
 export function chunkDocument(doc: Document, opts: ChunkOptions): Chunk[] {
   if (doc.meta.kind === "code") return chunkCode(doc, opts.code ?? { targetTokens: opts.targetTokens, maxTokens: opts.maxTokens });
 
   const { targetTokens, maxTokens, overlapTokens } = opts;
+  const breadcrumb = breadcrumbOf(doc);
   const minTokens = Math.max(40, Math.floor(targetTokens / 3));
   const blocks = parseBlocks(doc.body).flatMap((b) => splitOversized(b, maxTokens));
 
@@ -235,7 +248,7 @@ export function chunkDocument(doc: Document, opts: ChunkOptions): Chunk[] {
     }
     const first = meaningful[0] as Block;
     const content = cur.map((b) => b.text).join("\n\n").trim();
-    chunks.push(makeChunk(doc, chunks.length, joinPath(doc.meta.title, first.path), content, estimateTokens(content), null));
+    chunks.push(makeChunk(doc, chunks.length, joinPath(doc.meta.title, first.path, breadcrumb), content, estimateTokens(content), null));
   };
 
   for (const block of blocks) {
@@ -275,7 +288,7 @@ export function chunkDocument(doc: Document, opts: ChunkOptions): Chunk[] {
     const prev = chunks.at(-2) as Chunk;
     if (last.tokenEstimate < minTokens / 2 && prev.tokenEstimate + last.tokenEstimate <= maxTokens) {
       prev.content = `${prev.content}\n\n${last.content}`;
-      prev.text = composeChunkText(prev.headingPath, prev.context, prev.content);
+      prev.text = composeChunkText(prev.headingPath, prev.content);
       prev.tokenEstimate = estimateTokens(prev.content);
       chunks.pop();
     }
@@ -310,7 +323,7 @@ interface Piece {
  * Chunking for source files: cut at top-level declarations (function/class/def/...) once a chunk has
  * reached the target size, at blank lines when no declaration is near, and hard-cut only when a single
  * construct exceeds the maximum. Every chunk keeps the fence and language tag, carries the 1-based line
- * range for deep links, and gets a "project > file > symbols" breadcrumb.
+ * range for deep links, and gets a "[breadcrumb >] project > file > symbols" heading path.
  */
 export function chunkCode(doc: Document, sizes: { targetTokens: number; maxTokens: number }): Chunk[] {
   const fenced = extractFencedCode(doc.body);
@@ -370,7 +383,9 @@ export function chunkCode(doc: Document, sizes: { targetTokens: number; maxToken
   }
 
   const project = typeof doc.frontmatter["project"] === "string" ? (doc.frontmatter["project"] as string) : "";
-  const root = project && !doc.meta.title.startsWith(project) ? `${project} > ${doc.meta.title}` : doc.meta.title;
+  const base = project && !doc.meta.title.startsWith(project) ? `${project} > ${doc.meta.title}` : doc.meta.title;
+  const breadcrumb = breadcrumbOf(doc);
+  const root = breadcrumb && breadcrumb.toLowerCase() !== doc.meta.title.toLowerCase() ? `${breadcrumb} > ${base}` : base;
   const chunks: Chunk[] = [];
   for (const p of pieces) {
     // Trim blank lines at both ends but keep the real line numbers.

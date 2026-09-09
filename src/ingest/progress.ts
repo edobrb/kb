@@ -1,8 +1,8 @@
 /** Progress reporting for long ingest runs: throughput, percentage and ETA. */
 
 export interface IngestProgress {
-  /** contextualizing = writing chunk contexts with the chat model; embedding = vectors; indexing = BM25 rebuild. */
-  phase: "contextualizing" | "embedding" | "indexing";
+  /** embedding = vectors for the chunk batches; indexing = BM25 rebuild over the whole table. */
+  phase: "embedding" | "indexing";
   docsDone: number;
   docsTotal: number;
   chunksDone: number;

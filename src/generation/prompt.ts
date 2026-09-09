@@ -33,7 +33,6 @@ export function toCitations(chunks: RetrievedChunk[]): Citation[] {
     authority: c.authority,
     headingPath: c.headingPath,
     relPath: c.relPath,
-    context: c.context,
     excerpt: c.content.length > 600 ? `${c.content.slice(0, 600)}…` : c.content,
     lineStart: c.lineStart,
     lineEnd: c.lineEnd,
@@ -48,10 +47,7 @@ export function formatContext(chunks: RetrievedChunk[]): string {
       const header = [
         `[${i + 1}] ${c.headingPath}${c.kind === "code" && c.lineStart ? ` (lines ${c.lineStart}-${c.lineEnd})` : ""}`,
         `source_type=${c.sourceType} kind=${c.kind} authority=${c.authority}${url ? ` url=${url}` : ""}`,
-        c.context ? `about: ${c.context}` : "",
-      ]
-        .filter(Boolean)
-        .join("\n");
+      ].join("\n");
       return `${header}\n${c.content}`;
     })
     .join("\n\n-----\n\n");

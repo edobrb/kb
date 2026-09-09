@@ -19,8 +19,15 @@ export interface SourcesConfig {
     enabled: boolean;
     include_api_definitions: boolean;
     max_definition_chars: number;
+    /** "kind/name" or "ns/kind/name" (wildcards allowed, case-insensitive). */
     exclude_entities: string[];
+    /** Page globs on "<kind>/<name>/<page path>" never indexed (generated reference trees). */
+    exclude_pages: string[];
     min_body_chars: number;
+    /** Pages with fewer prose words (outside code, tables, headings, link lists) are stubs and skipped. */
+    min_prose_words: number;
+    /** Skip pages whose title/body look generated from code (Swagger models, Sphinx modules...). */
+    skip_generated: boolean;
   };
   gitlab: {
     enabled: boolean;
@@ -28,8 +35,18 @@ export interface SourcesConfig {
     projects: string[];
     /** Project paths (wildcards allowed, case-insensitive) never indexed, e.g. the repo that held the old KB. */
     exclude_projects: string[];
+    /**
+     * Also sync the repositories the Dev Portal catalog points at (`coveredRepos` from the devportal state),
+     * wherever they live on GitLab: their README, non-TechDocs markdown and a project card with the catalog
+     * owner/system. Their docs/** is already rendered by the portal and is skipped.
+     */
+    include_devportal_repos: boolean;
     include_archived: boolean;
     min_body_chars: number;
+    /** Markdown pages with fewer prose words are stubs and skipped (tables and code count as content). */
+    min_prose_words: number;
+    /** Skip READMEs left by project generators (Create React App, Vite, Angular CLI, Nest...). */
+    skip_boilerplate_readmes: boolean;
     /** One "project card" per repository (description, owner, README excerpt, related Confluence pages). */
     project_cards: boolean;
     /** Markdown documentation inside the repositories. */
@@ -41,7 +58,14 @@ export interface SourcesConfig {
       /** For repositories the Dev Portal already renders, skip the mkdocs content (docs/**) but keep READMEs etc. */
       skip_techdocs_if_in_devportal: boolean;
     };
-    /** Source code, stored one fenced block per file and chunked at declaration boundaries. */
+    /** OpenAPI / AsyncAPI contracts kept in the repositories, indexed as `kind: api` (small, high value). */
+    api_specs: {
+      enabled: boolean;
+      include: string[];
+      exclude: string[];
+      max_file_kb: number;
+    };
+    /** Source code, stored one fenced block per file and chunked at declaration boundaries. Off by default. */
     code: {
       enabled: boolean;
       include: string[];
@@ -56,15 +80,30 @@ export interface SourcesConfig {
     };
   };
   /**
-   * Confluence pages are NOT indexed. The wiki is only searched for pages about each repository, whose
-   * titles and snippets go into the project card (and from there into the chunk contexts).
+   * Confluence Cloud is indexed *selectively*: whole technical spaces, minus the subtrees and titles that
+   * are meeting notes, sprint ceremonies, drafts and archives, minus pages without prose. It is also still
+   * consulted while building the GitLab project cards (`enrich_projects`).
    */
   confluence: {
-    enrich_projects: boolean;
+    enabled: boolean;
     spaces: { include: string[]; exclude: string[] };
+    /** Optional per-space root page/folder ids: when set for a space, only their descendants are indexed. */
+    roots: Record<string, string[]>;
+    /** A page is skipped when it or any ancestor (page or folder) matches one of these (id or title wildcard). */
+    exclude_trees: { id?: string; title?: string }[];
+    /** Title wildcards applied to the page itself only. */
+    exclude_titles: string[];
+    /** Only pages modified on/after this ISO date (YYYY-MM-DD) are indexed; empty = no limit. */
+    modified_since: string;
+    min_body_chars: number;
+    min_prose_words: number;
+    /** Pages longer than this (markdown chars) are truncated with a marker. */
+    max_body_chars: number;
+    /** Project-card enrichment (the lookup the GitLab connector uses). */
+    enrich_projects: boolean;
     max_pages_per_project: number;
     excerpt_chars: number;
-    /** Re-run the lookup for a project only after this many days. */
+    /** Re-run the card lookup for a project only after this many days. */
     refresh_days: number;
   };
   rules: Rule[];
@@ -76,15 +115,21 @@ export const DEFAULT_SOURCES: SourcesConfig = {
     include_api_definitions: true,
     max_definition_chars: 60_000,
     exclude_entities: [],
+    exclude_pages: [],
     min_body_chars: 40,
+    min_prose_words: 15,
+    skip_generated: true,
   },
   gitlab: {
     enabled: true,
     groups: [],
     projects: [],
     exclude_projects: [],
+    include_devportal_repos: false,
     include_archived: false,
     min_body_chars: 40,
+    min_prose_words: 15,
+    skip_boilerplate_readmes: true,
     project_cards: true,
     docs: {
       enabled: true,
@@ -93,8 +138,14 @@ export const DEFAULT_SOURCES: SourcesConfig = {
       max_file_kb: 512,
       skip_techdocs_if_in_devportal: true,
     },
-    code: {
+    api_specs: {
       enabled: true,
+      include: ["**/openapi*.yaml", "**/openapi*.yml", "**/openapi*.json", "**/swagger*.yaml", "**/swagger*.yml", "**/swagger*.json", "**/asyncapi*.yaml", "**/asyncapi*.yml", "**/asyncapi*.json"],
+      exclude: ["**/node_modules/**", "**/vendor/**", "**/dist/**", "**/build/**", "**/test/**", "**/tests/**", "**/__tests__/**", "**/fixtures/**", "**/examples/**", "**/*.template.*"],
+      max_file_kb: 1024,
+    },
+    code: {
+      enabled: false,
       include: [
         "**/*.ts", "**/*.tsx", "**/*.js", "**/*.jsx", "**/*.mjs", "**/*.cjs",
         "**/*.py", "**/*.kt", "**/*.kts", "**/*.java", "**/*.go", "**/*.cs", "**/*.rs", "**/*.rb", "**/*.php", "**/*.scala",
@@ -120,8 +171,16 @@ export const DEFAULT_SOURCES: SourcesConfig = {
     },
   },
   confluence: {
-    enrich_projects: true,
+    enabled: false,
     spaces: { include: [], exclude: [] },
+    roots: {},
+    exclude_trees: [],
+    exclude_titles: [],
+    modified_since: "",
+    min_body_chars: 120,
+    min_prose_words: 25,
+    max_body_chars: 400_000,
+    enrich_projects: true,
     max_pages_per_project: 3,
     excerpt_chars: 400,
     refresh_days: 30,
@@ -150,7 +209,6 @@ const LEGACY: [path: string[], hint: string][] = [
   [["gitlab", "exclude"], "gitlab.docs.exclude / gitlab.code.exclude"],
   [["gitlab", "max_file_kb"], "gitlab.docs.max_file_kb / gitlab.code.max_file_kb"],
   [["gitlab", "skip_if_in_devportal"], "gitlab.docs.skip_techdocs_if_in_devportal"],
-  [["confluence", "enabled"], "confluence pages are no longer indexed; use confluence.enrich_projects to enrich the GitLab project cards"],
 ];
 
 export function parseSourcesConfig(yamlText: string): SourcesConfig {
@@ -167,6 +225,11 @@ export function parseSourcesConfig(yamlText: string): SourcesConfig {
     if (r.authority && !["binding", "normative", "descriptive"].includes(r.authority))
       throw new Error(`sources.yaml rule ${JSON.stringify(r.match ?? r.url ?? r.title)}: authority must be binding|normative|descriptive`);
   }
+  cfg.confluence.exclude_trees = (Array.isArray(cfg.confluence.exclude_trees) ? cfg.confluence.exclude_trees : []).map((t) => {
+    if (!isObj(t) || (t["id"] === undefined && t["title"] === undefined)) throw new Error(`sources.yaml confluence.exclude_trees: each entry needs an "id" or a "title"`);
+    return { ...(t["id"] !== undefined ? { id: String(t["id"]) } : {}), ...(typeof t["title"] === "string" ? { title: t["title"] } : {}) };
+  });
+  cfg.confluence.roots = isObj(cfg.confluence.roots) ? Object.fromEntries(Object.entries(cfg.confluence.roots).map(([k, v]) => [k, (Array.isArray(v) ? v : [v]).map(String)])) : {};
   return cfg;
 }
 

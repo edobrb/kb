@@ -134,8 +134,8 @@
         </select>
       </div>
       <div class="row" style="margin-top:7px">
-        <label class="check"><input type="checkbox" id="showLabels" checked /> cluster labels</label>
-        <label class="check"><input type="checkbox" id="forceDensity" /> density</label>
+        <label class="check"><input type="checkbox" id="showLabels" /> cluster labels</label>
+        <label class="check"><input type="checkbox" id="forceDensity" checked /> density</label>
       </div>
     </section>
     <section>
@@ -179,7 +179,7 @@
   let query = "", queryHits = null;
   let probe = null, probeByPoint = null;
   let selected = null, focusDoc = null, hover = null;
-  let showLabels = true, forceDensity = false;
+  let showLabels = false, forceDensity = true;
   const T = { k: 1, tx: 0, ty: 0 };
   let W = 0, H = 0, dpr = 1, baseK = null, splatBuf = null;
 
@@ -434,14 +434,20 @@
 
   function drawArcs(wx0, wy0, wx1, wy1, surface, dimming) {
     const pad = 20 / T.k;
-    forEachInRect(wx0 - pad, wy0 - pad, wx1 + pad, wy1 + pad, (i) => {
-      if (!isVisible(i)) return;
-      const r = radius(i);
-      ctx.globalAlpha = dimming ? (emphasised(i) ? 0.95 : 0.08) : 0.85;
-      ctx.fillStyle = catColor[V.cat[i]];
-      ctx.beginPath(); ctx.arc(sx(i), sy(i), r, 0, Math.PI * 2); ctx.fill();
-      if (view === "docs") { ctx.globalAlpha = 1; ctx.strokeStyle = surface; ctx.lineWidth = 1; ctx.stroke(); }
-    });
+    // Two passes when dimming, so a match is never painted over by the haystack drawn after it.
+    const passes = dimming ? [false, true] : [null];
+    for (const pass of passes) {
+      forEachInRect(wx0 - pad, wy0 - pad, wx1 + pad, wy1 + pad, (i) => {
+        if (!isVisible(i)) return;
+        const hot = pass === null ? null : emphasised(i);
+        if (pass !== null && hot !== pass) return;
+        const r = radius(i) * (hot ? 1.35 : 1);
+        ctx.globalAlpha = pass === null ? 0.6 : hot ? 1 : 0.06;
+        ctx.fillStyle = catColor[V.cat[i]];
+        ctx.beginPath(); ctx.arc(sx(i), sy(i), r, 0, Math.PI * 2); ctx.fill();
+        if (view === "docs") { ctx.globalAlpha = pass === false ? 0.06 : 1; ctx.strokeStyle = surface; ctx.lineWidth = 1; ctx.stroke(); }
+      });
+    }
     ctx.globalAlpha = 1;
   }
 
@@ -456,13 +462,19 @@
     const d = splatBuf.data;
     const [br, bg, bb] = hexToRgb(surface);
     for (let o = 0; o < d.length; o += 4) { d[o] = br; d[o + 1] = bg; d[o + 2] = bb; d[o + 3] = 255; }
-    const side = Math.max(1, Math.min(4, Math.round(radius(0) * dpr * 0.9)));
+    // Per point, so the document view keeps its "bigger dot = more chunks" encoding in the density path.
+    const sideOf = (i) => Math.max(1, Math.min(view === "docs" ? 8 : 4, Math.round(radius(i) * dpr * 0.9)));
     const pad = 20 / T.k;
-    forEachInRect(wx0 - pad, wy0 - pad, wx1 + pad, wy1 + pad, (i) => {
-      if (!isVisible(i)) return;
-      const a = dimming ? (emphasised(i) ? 0.75 : 0.05) : 0.55;
+    // Each point is faint, so overlap is what builds brightness: sparse regions stay dark, dense ones glow.
+    const BASE = 0.3, HOT = 0.9, COLD = 0.09;
+    // A dimmed point blends toward a near-background version of its colour, so no pile-up of misses can
+    // ever out-shine a match: accumulation converges on COLD_MIX of the hue, not on the hue itself.
+    const COLD_MIX = 0.22;
+    const paint = (i, a, mix) => {
       const rgb = D.catRgb[V.cat[i]];
-      const px = Math.round(sx(i) * dpr), py = Math.round(sy(i) * dpr);
+      const tr = br + (rgb[0] - br) * mix, tg = bg + (rgb[1] - bg) * mix, tb = bb + (rgb[2] - bb) * mix;
+      const side = sideOf(i);
+      const px = Math.round(sx(i) * dpr) - (side >> 1), py = Math.round(sy(i) * dpr) - (side >> 1);
       for (let ddy = 0; ddy < side; ddy++) {
         const yy = py + ddy;
         if (yy < 0 || yy >= chh) continue;
@@ -470,12 +482,21 @@
           const xx = px + ddx;
           if (xx < 0 || xx >= cw) continue;
           const o = (yy * cw + xx) * 4;
-          d[o] += (rgb[0] - d[o]) * a;
-          d[o + 1] += (rgb[1] - d[o + 1]) * a;
-          d[o + 2] += (rgb[2] - d[o + 2]) * a;
+          d[o] += (tr - d[o]) * a;
+          d[o + 1] += (tg - d[o + 1]) * a;
+          d[o + 2] += (tb - d[o + 2]) * a;
         }
       }
-    });
+    };
+    const passes = dimming ? [false, true] : [null];
+    for (const pass of passes) {
+      forEachInRect(wx0 - pad, wy0 - pad, wx1 + pad, wy1 + pad, (i) => {
+        if (!isVisible(i)) return;
+        if (pass === null) { paint(i, BASE, 1); return; }
+        if (emphasised(i) !== pass) return;
+        pass ? paint(i, HOT, 1) : paint(i, COLD, COLD_MIX);
+      });
+    }
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.putImageData(splatBuf, 0, 0);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -657,8 +678,10 @@
     const b = e.target.closest("button"); if (!b || b.dataset.v === view) return;
     view = b.dataset.v;
     $("#viewSeg").querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
-    selected = null; focusDoc = null; select(null);
-    rebuildView(); fitView(); draw();
+    selected = null; focusDoc = null; hover = null;
+    // Rebuild before select(null): it draws, and drawing "docs" against the chunk view reads V.size (null).
+    rebuildView(); fitView();
+    select(null);
   });
   $("#colorBy").addEventListener("change", (e) => { colorBy = e.target.value; hidden.clear(); assignCategories(); draw(); });
   $("#showLabels").addEventListener("change", (e) => { showLabels = e.target.checked; draw(); });

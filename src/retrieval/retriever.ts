@@ -44,7 +44,6 @@ function toRetrieved(row: Row, score: number, vectorRank: number | null, bm25Ran
     relPath: row.rel_path,
     ordinal: row.ordinal,
     headingPath: row.heading_path,
-    context: row.context,
     content: row.content,
     lineStart: row.line_start >= 0 ? row.line_start : null,
     lineEnd: row.line_end >= 0 ? row.line_end : null,
@@ -185,7 +184,7 @@ async function llmRerank(query: string, candidates: RetrievedChunk[]): Promise<R
     candidates.map(async (c) => {
       const prompt =
         `Rate how useful the passage is for answering the question. Reply with a single integer 0-10, nothing else.\n\n` +
-        `Question: ${query}\n\nPassage (${c.headingPath}):\n${c.context ? `${c.context}\n` : ""}${c.content.slice(0, 2000)}`;
+        `Question: ${query}\n\nPassage (${c.headingPath}):\n${c.content.slice(0, 2000)}`;
       try {
         const out = await chat.complete([{ role: "user", content: prompt }], { temperature: 0, think: false });
         const m = /\d+/.exec(out);

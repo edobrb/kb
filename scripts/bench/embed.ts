@@ -4,7 +4,7 @@ const host = process.env["OLLAMA_HOST"] ?? "http://127.0.0.1:11435";
 const model = process.env["BENCH_EMB_MODEL"] ?? "qwen3-embedding:8b";
 
 const docs = [...await sample("doc", 12), ...await sample("code", 12)];
-const texts = docs.flatMap((s) => s.chunks.map((c) => composeChunkText(c.headingPath, "A short generated context sentence that situates this chunk inside its document and project.", c.content))).slice(0, 256);
+const texts = docs.flatMap((s) => s.chunks.map((c) => composeChunkText(c.headingPath, c.content))).slice(0, 256);
 const chars = texts.reduce((a, t) => a + t.length, 0) / texts.length;
 console.log(`model=${model}  ${texts.length} chunks, avg ${Math.round(chars)} chars (~${Math.round(chars / 4)} tok)`);
 

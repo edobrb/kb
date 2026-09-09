@@ -35,6 +35,5 @@ results.forEach((r, i) => {
   );
   console.log(`    ${r.headingPath}${r.lineStart ? `  L${r.lineStart}-${r.lineEnd}` : ""}`);
   console.log(`    ${r.sourceUrl ?? r.relPath}`);
-  if (r.context) console.log(`    \x1b[2m${r.context.slice(0, 240)}\x1b[0m`);
   console.log(`    ${r.content.replace(/\s+/g, " ").slice(0, 240)}…`);
 });

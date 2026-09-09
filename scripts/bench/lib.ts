@@ -1,15 +1,13 @@
 import { config } from "../../src/config.js";
 import { listMarkdownFiles, loadDocument } from "../../src/ingest/loader.js";
 import { chunkDocument } from "../../src/ingest/chunker.js";
-import { buildBackground, ProjectCards } from "../../src/ingest/contextualize.js";
 import type { ChatMessage, Document, Chunk } from "../../src/types.js";
 
-export interface Sample { doc: Document; chunks: Chunk[]; background: string }
+export interface Sample { doc: Document; chunks: Chunk[] }
 
 /** N multi-chunk documents of the given kind, spread across the kb (deterministic pseudo-random pick). */
 export async function sample(kind: string, n: number, kbDir = config.kbDir): Promise<Sample[]> {
   const files = await listMarkdownFiles(kbDir);
-  const cards = new ProjectCards(kbDir);
   const out: Sample[] = [];
   // Deterministic stride so we touch many different repos rather than one folder.
   const stride = Math.max(1, Math.floor(files.length / (n * 40)));
@@ -18,9 +16,7 @@ export async function sample(kind: string, n: number, kbDir = config.kbDir): Pro
     if (doc.meta.kind !== kind) continue;
     const chunks = chunkDocument(doc, config.chunking);
     if (chunks.length < 2) continue;
-    const project = typeof doc.frontmatter["project"] === "string" ? (doc.frontmatter["project"] as string) : null;
-    const background = buildBackground(doc, project ? await cards.bodyFor(project) : null, config.context.maxBackgroundChars);
-    out.push({ doc, chunks, background });
+    out.push({ doc, chunks });
   }
   return out;
 }
