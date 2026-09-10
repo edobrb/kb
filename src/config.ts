@@ -61,6 +61,21 @@ export const config = {
     temperature: num("CHAT_TEMPERATURE", 0.2),
   },
 
+  /** Tools the chat model may call while answering (see src/generation/tools.ts). */
+  tools: {
+    /** Ignored when the chat model has no tool support; `npm run doctor` reports it. */
+    enabled: bool("CHAT_TOOLS", true),
+    /** How many times the model may call tools before it must answer. */
+    maxRounds: num("TOOL_MAX_ROUNDS", 3),
+    /** Character budget for one `fetch_document` result (~4 chars/token). */
+    docMaxChars: num("DOC_TOOL_MAX_CHARS", 20000),
+    /**
+     * Total characters tool results may add to one answer. Keep it well under CHAT_NUM_CTX * 4
+     * minus the retrieved passages, or the model's context will overflow mid-answer.
+     */
+    charBudget: num("TOOL_CHAR_BUDGET", 24000),
+  },
+
   chunking: {
     targetTokens: num("CHUNK_TARGET_TOKENS", 450),
     maxTokens: num("CHUNK_MAX_TOKENS", 700),

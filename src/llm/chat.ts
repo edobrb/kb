@@ -22,10 +22,14 @@ class OllamaChatProvider implements ChatProvider {
   }
 }
 
+/** `FETCH:<source_id>` in a mock question makes the mock model ask for that document once. */
+const MOCK_FETCH_RE = /FETCH:(\S+)/;
+
 /**
  * Mock chat model for tests: echoes which context blocks it received and cites all of them.
  * Lets the pipeline (prompting, citation parsing, SSE streaming) be exercised without Ollama.
- * With `think: true` it also emits a short fake reasoning stream.
+ * With `think: true` it also emits a short fake reasoning stream, and a question containing
+ * `FETCH:<source_id>` exercises the tool loop.
  */
 export class MockChatProvider implements ChatProvider {
   async *stream(messages: ChatMessage[], opts: ChatOptions = {}): AsyncGenerator<ChatDelta> {
@@ -33,14 +37,25 @@ export class MockChatProvider implements ChatProvider {
     const system = messages.find((m) => m.role === "system")?.content ?? "";
     const ids = [...system.matchAll(/^\[(\d+)\]/gm)].map((m) => m[1]);
     const question = user.split("\n").at(-1) ?? user;
+
+    // Tool round: ask for the requested document, but only until a tool result comes back.
+    const wanted = MOCK_FETCH_RE.exec(question)?.[1];
+    if (wanted && opts.tools?.length && !messages.some((m) => m.role === "tool")) {
+      yield { toolCalls: [{ function: { name: "fetch_document", arguments: { source_id: wanted } } }] };
+      return;
+    }
+    const toolBlocks = messages
+      .filter((m) => m.role === "tool")
+      .flatMap((m) => [...m.content.matchAll(/^\[(\d+)\]/gm)].map((x) => x[1] as string));
     if (opts.think) {
       for (const word of `(mock reasoning) Looking at ${ids.length} context blocks. `.split(/(?<=\s)/)) {
         yield { thinking: word };
       }
     }
-    const text = `(mock answer) Question: "${question.trim()}". Context blocks seen: ${ids.length}. ${ids
-      .map((i) => `[${i}]`)
-      .join(" ")}`;
+    const seen = [...ids, ...toolBlocks];
+    const text =
+      `(mock answer) Question: "${question.trim()}". Context blocks seen: ${seen.length}. ` +
+      `${[...new Set(seen)].map((i) => `[${i}]`).join(" ")}`;
     for (const word of text.split(/(?<=\s)/)) {
       yield { content: word };
     }

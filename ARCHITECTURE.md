@@ -118,6 +118,13 @@ chunks reach the model. Each context block carries its heading path (breadcrumb 
 and URL; the prompt requires citations, forbids outside knowledge, and asks for the repository and file when
 the answer comes from a repository document.
 
+The model also gets one tool, `fetch_document(source_id, section?)`: a passage is a chunk of a larger page,
+and this is how it reads the rest when the answer needs it (the next section, the full table, the exact
+values). Ids are resolved through `data/manifest.json`, so only indexed documents are reachable; results are
+capped (`DOC_TOOL_MAX_CHARS`, `TOOL_CHAR_BUDGET`) and carry the page outline so a follow-up call can ask for
+one section; the document is appended as one more numbered block and cited like any other. The loop is bounded
+by `TOOL_MAX_ROUNDS` and the last round runs without tools, so an answer always comes out.
+
 ## Where the code lives
 
 ```
@@ -131,7 +138,9 @@ src/ingest/        loader.ts (frontmatter, kinds) · chunker.ts (prose + code, b
                    pipeline.ts (batched load → chunk → embed → store, BM25 rebuild) · manifest.ts · progress.ts
 src/store/         vector-store.ts (LanceDB) · bm25.ts
 src/retrieval/     retriever.ts (RRF, boosts, diversity, optional LLM rerank)
-src/generation/    prompt.ts (system prompt, context blocks, deep links) · ask.ts (streaming loop)
-src/cli/           sync · ingest · ask · search · eval · doctor · map
+                   documents.ts (source_id → kb file: whole documents and sections for the fetch_document tool)
+src/generation/    prompt.ts (system prompt, context blocks, deep links) · ask.ts (streaming loop + tool loop)
+                   tools.ts (fetch_document: schema, id resolution, result formatting)
+src/cli/           sync · ingest · ask · doc · search · eval · doctor · map
 src/server/        Fastify API + public/index.html (chat) + public/map.html (2-D map) + public/architecture.html (this document, interactive)
 ```

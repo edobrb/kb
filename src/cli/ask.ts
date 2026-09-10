@@ -39,6 +39,11 @@ for await (const ev of ask(req)) {
     case "sources":
       sources = ev.citations;
       break;
+    case "tool":
+      process.stderr.write(
+        `\x1b[2m${ev.ok ? "tool" : "tool!"} ${ev.name}(${JSON.stringify(ev.args)}) → ${ev.summary}\x1b[0m\n`,
+      );
+      break;
     case "thinking":
       // Reasoning tokens (CHAT_THINK=true) go to stderr, dimmed, so `npm run ask > file` stays clean.
       process.stderr.write(`\x1b[2m${ev.text}\x1b[0m`);

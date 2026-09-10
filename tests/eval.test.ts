@@ -106,3 +106,30 @@ describe("eval metrics", () => {
     expect(s.pass).toBe(0.75);
   });
 });
+
+describe("looksLikeAbstention", () => {
+  it("recognises the refusals the model actually writes, in both languages", () => {
+    for (const s of [
+      "The knowledge base does not cover this.",
+      "Based on the CONTEXT blocks provided, I cannot find any information about a Salesforce connector.",
+      "Based on the CONTEXT provided, there is no mention of an official Flutter SDK.",
+      "I don't find a Zendesk integration for the ticket routing service in the provided context.",
+      "La knowledge base non copre questo aspetto.",
+      "Non trovo alcun riferimento a questo servizio nel contesto.",
+      "Non posso rispondere a questa domanda con i contenuti della knowledge base.",
+      "Non riesco a rispondere a questa domanda con il materiale disponibile.",
+      "I cannot answer this question with the documents I have.",
+    ]) {
+      expect(looksLikeAbstention(s), s).toBe(true);
+    }
+  });
+
+  it("does not read a caveat inside a real answer as an abstention", () => {
+    expect(
+      looksLikeAbstention(
+        "Platform APIs must use RFC 9457 problem+json [1]. The ADR does not mention gRPC, so only HTTP is covered.",
+      ),
+    ).toBe(false);
+    expect(looksLikeAbstention("The retention period is 12 months [3].")).toBe(false);
+  });
+});

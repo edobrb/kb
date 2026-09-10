@@ -63,7 +63,8 @@ console.log(
   `Evaluating ${cases.length} cases from ${path.relative(process.cwd(), file)}  (k=${k}, ${mode})\n` +
     DIM(
       `embedding=${config.embedding.model}  chat=${config.chat.model}${withJudge ? `  judge=${config.eval.judgeModel}` : ""}  ` +
-        `rerank=${config.retrieval.rerank}  weights vector/bm25=${config.retrieval.vectorWeight}/${config.retrieval.bm25Weight}`,
+        `rerank=${config.retrieval.rerank}  weights vector/bm25=${config.retrieval.vectorWeight}/${config.retrieval.bm25Weight}` +
+        (withAnswers ? `  tools=${config.tools.enabled ? `on (${config.tools.maxRounds} rounds, ${config.tools.docMaxChars} chars)` : "off"}` : ""),
     ) + "\n",
 );
 
@@ -106,6 +107,7 @@ for (const c of cases) {
         citationHit: citationHit(usedSourceIds, c.expected_source_ids),
         usedSourceIds,
         timings: res.timings,
+        ...(res.tools.length ? { toolCalls: res.tools.map(({ name, args, summary, ok }) => ({ name, args, summary, ok })) } : {}),
       };
       if (withJudge) {
         const context = res.citations.map((ct) => `[${ct.n}] ${ct.headingPath}\n${ct.excerpt}`).join("\n\n");
@@ -154,6 +156,9 @@ for (const c of cases) {
         answer.abstained ? RED("abstained on an answerable question") : "",
       ].filter(Boolean);
       console.log(`       ${parts.join("  ·  ")}`);
+    }
+    if (answer.toolCalls?.length) {
+      for (const t of answer.toolCalls) console.log(DIM(`       ${t.ok ? "tool" : "tool!"} ${t.name}: ${t.summary}`));
     }
     if (answer.judge) {
       const j = answer.judge;
@@ -210,6 +215,11 @@ console.log(
     (overall.totalMsP50 !== null ? `, end-to-end ${overall.totalMsP50} ms` : "") +
     (overall.falseAbstain !== null ? `   ·   false abstentions: ${pct(overall.falseAbstain).trim()}` : ""),
 );
+const withTools = results.filter((r) => r.answer?.toolCalls?.length).length;
+if (withAnswers && withTools) {
+  const calls = results.reduce((n, r) => n + (r.answer?.toolCalls?.length ?? 0), 0);
+  console.log(DIM(`Whole-document reads: ${calls} call(s) in ${withTools}/${results.length} answers`));
+}
 const errors = results.filter((r) => r.error).length;
 if (errors) console.log(RED(`${errors} case(s) errored — see above.`));
 
@@ -241,6 +251,7 @@ const report: Report = {
     judgeModel: withJudge ? config.eval.judgeModel : null,
     chunking: config.chunking,
     retrieval: config.retrieval,
+    tools: withAnswers ? config.tools : null,
   },
   summary: overall,
   bySourceType: groupBy(results, "source_type"),

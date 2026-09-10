@@ -5,8 +5,9 @@ import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import Fastify from "fastify";
 import { config, paths } from "../config.js";
-import { ask, askOnce, getRetriever, resetRetriever } from "../generation/ask.js";
+import { ask, askOnce, getRetriever, resetRetriever, toolsAvailable } from "../generation/ask.js";
 import { ingest } from "../ingest/pipeline.js";
+import { DocumentNotFoundError, getDocumentStore, resetDocumentStore } from "../retrieval/documents.js";
 import type { AskRequest, Authority, ChatMessage, RetrievalFilters } from "../types.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -47,7 +48,9 @@ function parseAskRequest(body: unknown): AskRequest {
   const topK = typeof topKRaw === "number" && topKRaw > 0 && topKRaw <= 20 ? Math.floor(topKRaw) : undefined;
   const thinkRaw = (body as { think?: unknown })?.think;
   const think = typeof thinkRaw === "boolean" ? thinkRaw : undefined;
-  return { messages: parseMessages(body), filters: parseFilters(body), topK, think };
+  const toolsRaw = (body as { tools?: unknown })?.tools;
+  const tools = typeof toolsRaw === "boolean" ? toolsRaw : undefined;
+  return { messages: parseMessages(body), filters: parseFilters(body), topK, think, tools };
 }
 
 // ---- routes -------------------------------------------------------------------
@@ -60,11 +63,36 @@ app.get("/api/health", async () => {
     embeddingModel: config.embedding.model,
     chatModel: config.chat.model,
     think: config.chat.think,
+    tools: await toolsAvailable(),
+    documents: (await getDocumentStore()).size,
     ...stats,
   };
 });
 
 app.get("/api/facets", async () => (await getRetriever()).facets());
+
+/**
+ * Whole kb document by source_id — what the `fetch_document` tool reads, exposed so the UI (and
+ * anything else holding a citation) can show the full page behind a passage.
+ */
+app.post("/api/document", async (req, reply) => {
+  try {
+    const body = (req.body ?? {}) as { sourceId?: unknown; source_id?: unknown; section?: unknown; maxChars?: unknown };
+    const sourceId = typeof body.sourceId === "string" ? body.sourceId : typeof body.source_id === "string" ? body.source_id : "";
+    if (!sourceId.trim()) return reply.code(400).send({ error: "`sourceId` is required" });
+    const store = await getDocumentStore();
+    const maxChars = typeof body.maxChars === "number" ? Math.min(200_000, Math.max(500, body.maxChars)) : undefined;
+    return await store.fetch(sourceId, {
+      section: typeof body.section === "string" ? body.section : null,
+      ...(maxChars ? { maxChars } : {}),
+    });
+  } catch (err) {
+    if (err instanceof DocumentNotFoundError) {
+      return reply.code(404).send({ error: err.message, suggestions: err.suggestions });
+    }
+    return reply.code(500).send({ error: (err as Error).message });
+  }
+});
 
 /**
  * 2-D UMAP projection of the whole index, built offline by `npm run map`; rendered by /map.html.
@@ -175,6 +203,7 @@ app.post("/api/ingest", async (req, reply) => {
     const body = (req.body ?? {}) as { reset?: boolean };
     const report = await ingest({ reset: Boolean(body.reset), log: (m) => app.log.info(m) });
     resetRetriever();
+    resetDocumentStore();
     return report;
   } catch (err) {
     return reply.code(500).send({ error: (err as Error).message });
@@ -190,7 +219,7 @@ try {
   app.log.info(`Chat UI:  http://${config.server.host}:${config.server.port}/`);
   app.log.info(`Map:      http://${config.server.host}:${config.server.port}/map.html (after \`npm run map\`)`);
   app.log.info(`Arch:     http://${config.server.host}:${config.server.port}/architecture.html`);
-  app.log.info(`API:      POST /api/ask (SSE) · POST /api/ask/sync · POST /api/search · GET /api/map · POST /api/chunk · GET /api/health`);
+  app.log.info(`API:      POST /api/ask (SSE) · POST /api/ask/sync · POST /api/search · POST /api/document · GET /api/map · POST /api/chunk · GET /api/health`);
 } catch (err) {
   app.log.error(err);
   process.exit(1);

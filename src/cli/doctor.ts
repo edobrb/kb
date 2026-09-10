@@ -1,7 +1,8 @@
 import { stat } from "node:fs/promises";
 import { config, paths } from "../config.js";
-import { listModels } from "../llm/ollama.js";
+import { listModels, modelCapabilities } from "../llm/ollama.js";
 import { readManifest } from "../ingest/manifest.js";
+import { getDocumentStore } from "../retrieval/documents.js";
 import { Retriever } from "../retrieval/retriever.js";
 import { builtinDefinitions, builtinEnrichers } from "../sync/index.js";
 import { loadTaxonomy } from "../citymap.js";
@@ -102,6 +103,20 @@ if (config.embedding.provider === "ollama" || config.chat.provider === "ollama")
         bad(`chat model missing → run: ollama pull ${config.chat.model}`);
         failures++;
       }
+      // fetch_document is only offered to a model that can call tools (see src/generation/tools.ts).
+      const caps = await modelCapabilities();
+      if (!config.tools.enabled) warn(`kb tools disabled (CHAT_TOOLS=false) — the model cannot read whole documents`);
+      else if (caps.includes("tools")) {
+        ok(`chat model supports tools → fetch_document enabled (max ${config.tools.maxRounds} rounds, ${config.tools.docMaxChars} chars/document)`);
+        // Worst case in one answer: the retrieved passages, the whole tool budget, and the prompt.
+        const need = Math.ceil(config.tools.charBudget / 3.5) + config.retrieval.topK * config.chunking.maxTokens + 600;
+        if (need > config.chat.numCtx * 0.8) {
+          warn(
+            `worst case ≈ ${need} tokens (${config.retrieval.topK} passages + TOOL_CHAR_BUDGET=${config.tools.charBudget}) ` +
+              `against CHAT_NUM_CTX=${config.chat.numCtx}; raise the context or lower TOOL_CHAR_BUDGET`,
+          );
+        }
+      } else warn(`chat model ${config.chat.model} has no tool support (capabilities: ${caps.join(", ") || "unknown"}) — fetch_document will stay off`);
     }
   } catch (err) {
     bad((err as Error).message);
@@ -123,6 +138,7 @@ if (!manifest) {
     const r = await Retriever.open();
     const s = await r.stats();
     ok(`LanceDB: ${s.chunks} chunks · BM25: ${s.bm25Docs} chunks`);
+    ok(`whole-document access: ${(await getDocumentStore()).size} documents resolvable by source_id`);
     if (s.chunks !== s.bm25Docs) warn(`vector and keyword index sizes differ; re-run npm run ingest`);
     // The map is derived from the vectors but survives a rebuild, so it can outlive the index it describes
     // (its chunk ids then point at rows that no longer exist). Compare timestamps rather than open it: the

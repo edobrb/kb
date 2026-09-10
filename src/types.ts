@@ -105,9 +105,18 @@ export interface RetrievedChunk {
   bm25Rank: number | null;
 }
 
+/** A tool call as the model asked for it (Ollama/OpenAI shape). */
+export interface ToolCall {
+  function: { name: string; arguments: Record<string, unknown> };
+}
+
 export interface ChatMessage {
-  role: "system" | "user" | "assistant";
+  role: "system" | "user" | "assistant" | "tool";
   content: string;
+  /** Tools the assistant asked to call in this turn; echoed back so the model sees its own request. */
+  tool_calls?: ToolCall[];
+  /** Which tool produced this message (role "tool"). */
+  tool_name?: string;
 }
 
 export interface AskRequest {
@@ -117,6 +126,8 @@ export interface AskRequest {
   topK?: number;
   /** Ask the model to emit reasoning tokens. Defaults to CHAT_THINK. */
   think?: boolean;
+  /** Offer the knowledge-base tools (fetch_document). Defaults to CHAT_TOOLS and model support. */
+  tools?: boolean;
 }
 
 export interface Citation {
@@ -145,5 +156,7 @@ export type AskEvent =
   /** A reasoning delta, streamed before/while the answer is produced (thinking models only). */
   | { type: "thinking"; text: string }
   | { type: "token"; text: string }
+  /** The model called a knowledge-base tool; `citation` is set when the result became a new source. */
+  | { type: "tool"; name: string; args: Record<string, unknown>; summary: string; ok: boolean; citation?: number }
   | { type: "done"; answer: string; thinking: string; usedCitations: number[]; timings: Record<string, number> }
   | { type: "error"; message: string };

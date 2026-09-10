@@ -3,7 +3,7 @@ import type { ChatMessage, Citation, RetrievedChunk } from "../types.js";
 export const SYSTEM_PROMPT = `You are the internal knowledge assistant for TeamSystem OnePlatform. Your knowledge base contains the Developer Portal documentation (TechDocs pages, API definitions), the OnePlatform GitLab repositories (README and docs, project cards, and the SOURCE CODE itself) and a few hand-written references (glossary, manifesto, ADRs).
 
 Rules:
-- Answer ONLY from the CONTEXT blocks below. Do not use outside knowledge about TeamSystem.
+- Answer ONLY from the CONTEXT blocks below (plus any document you read with a tool). Do not use outside knowledge about TeamSystem.
 - If the context does not contain the answer, say so plainly (e.g. "The knowledge base does not cover this") and, if useful, say which related topics the context does cover. Never invent names, dates, endpoints, values, code or policies.
 - Cite your sources: after each sentence or bullet that relies on a context block, add its number like [1] or [2][4]. Only cite blocks you actually used.
 - Prefer blocks marked authority=binding or normative (ADRs, standards) when they conflict with descriptive pages, and mention the conflict.
@@ -54,13 +54,37 @@ export function formatContext(chunks: RetrievedChunk[]): string {
 }
 
 /**
+ * Appended to the system prompt when the model is given the `fetch_document` tool: the passages are
+ * chunks of larger pages, so it has to be told that the rest of the page is one call away.
+ */
+export const TOOL_INSTRUCTIONS = `Tool: fetch_document(source_id, section?) returns a whole knowledge-base document. Each CONTEXT block is only a passage of a larger page.
+
+- Call it when a block is the right page but the answer needs what surrounds the passage: the rest of a procedure, a full list or table, exact values, a section the text refers to. Pass that block's source_id, or its number ("3").
+- A truncated result lists the page outline; call again with one of those sections to read further. Never invent a source_id.
+- Otherwise answer straight from the CONTEXT. Do not explain or announce your decision about the tool, and never describe the CONTEXT block by block: either call the tool or write the answer.
+- A fetched document arrives as a numbered block like the others and is cited the same way.`
+
+export interface BuildOptions {
+  /** Keep at most this many prior turns. */
+  maxHistory?: number;
+  /** Add the tool instructions (only when the model is actually given the tools). */
+  tools?: boolean;
+}
+
+/**
  * Build the chat transcript sent to the model. Retrieved context goes into the system prompt;
  * prior turns are kept (trimmed) so follow-up questions work.
  */
-export function buildMessages(history: ChatMessage[], question: string, chunks: RetrievedChunk[], maxHistory = 6): ChatMessage[] {
+export function buildMessages(
+  history: ChatMessage[],
+  question: string,
+  chunks: RetrievedChunk[],
+  opts: BuildOptions = {},
+): ChatMessage[] {
+  const maxHistory = opts.maxHistory ?? 6;
   const system: ChatMessage = {
     role: "system",
-    content: `${SYSTEM_PROMPT}\n\nCONTEXT:\n\n${formatContext(chunks)}`,
+    content: `${SYSTEM_PROMPT}${opts.tools ? `\n\n${TOOL_INSTRUCTIONS}` : ""}\n\nCONTEXT:\n\n${formatContext(chunks)}`,
   };
   const prior = history.filter((m) => m.role !== "system").slice(-maxHistory);
   return [...[system], ...prior, { role: "user", content: question }];

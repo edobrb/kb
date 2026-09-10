@@ -12,6 +12,7 @@
     "ingest": "tsx src/cli/ingest.ts",
     "map": "tsx src/cli/map.ts",
     "ask": "tsx src/cli/ask.ts",
+    "doc": "tsx src/cli/doc.ts",
     "search": "tsx src/cli/search.ts",
     "serve": "tsx src/server/index.ts",
     "eval": "tsx src/cli/eval.ts",

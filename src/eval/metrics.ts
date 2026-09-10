@@ -56,10 +56,20 @@ export const ABSTAIN_PATTERNS: RegExp[] = [
   /\bthere is (no|not enough|insufficient) (information|documentation|detail)s? (in|about|on)\b/i,
   /\b(no|not enough|insufficient) (information|details|documentation) (is |was |are |were )?(available|found|provided) (in|about|on)\b/i,
   /could not find anything relevant/i,
+  // "I cannot find any information about X" / "there is no mention of X": same refusal, other words.
+  /\b(cannot|can't|could not|couldn't|do not|don't|did not|didn't) find (any |no )?(information|mention|reference|evidence|anything|details)\b/i,
+  /\bthere is no (mention|reference|record|indication|information) (of|about|on)\b/i,
+  new RegExp(`\\b(cannot|can't|could not|couldn't|do not|don't|did not|didn't) find\\b[^.]{0,90}\\bin (the|any) ${KB_SUBJECT_EN}`, "i"),
+  /\bno (mention|reference|indication) of\b.{0,80}\bin the ${KB_SUBJECT_EN}/i,
+  /\bnon (trovo|risulta|risultano|compare|compaiono) (alcun|alcuna|nessun|nessuna|traccia|menzione)\b/i,
+  /\bnon (viene|vengono) (menzionat|citat|indicat|riportat)/i,
   /\b(outside|beyond) the scope of the (knowledge base|documentation|context)/i,
   new RegExp(`\\b(la|le|il|i|nella|nei) ${KB_SUBJECT_IT} non (copre|coprono|contiene|contengono|include|includono|menziona|menzionano|tratta|trattano|fornisce|forniscono|riporta|riportano|descrive|descrivono)`, "i"),
   new RegExp(`\\bnon (è|sono|viene|vengono) (coperto|coperta|coperti|coperte|trattato|trattata|trattati|trattate|documentato|documentata|documentati|documentate|presente|presenti|disponibile|disponibili|menzionato|menzionata) (nella|nel|nei|nelle|dalla|dal|dai|dalle) ${KB_SUBJECT_IT}`, "i"),
   /\bnessuna informazione\b/i,
+  // Outright refusals: the model says it cannot answer at all, then lists what the KB does cover.
+  /\b(cannot|can't|could not|couldn't|am not able to) answer (this|that|your) question\b/i,
+  /\bnon (posso|riesco a|sono in grado di) rispondere\b/i,
   /\bnon (ho|abbiamo) trovato\b/i,
   /\bnon (sono|ci sono) (informazioni|dettagli|riferimenti) (su|riguardo|in merito|sul|sulla|sui)\b/i,
 ];
@@ -159,6 +169,8 @@ export interface AnswerResult {
   usedSourceIds: string[];
   judge?: JudgeVerdict;
   timings: Record<string, number>;
+  /** Whole-document reads the model made while answering (fetch_document). */
+  toolCalls?: { name: string; args: Record<string, unknown>; summary: string; ok: boolean }[];
 }
 
 export interface CaseResult {

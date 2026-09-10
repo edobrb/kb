@@ -159,6 +159,7 @@ npm run serve                 # then open http://127.0.0.1:8787
 | `npm run ingest` | Incremental index of `KB_DIR`. Shows a live progress line (percentage, chunks/s, elapsed, ETA); `--quiet` disables it. Flags: `--reset` (rebuild all), `--dry-run` (chunk stats + samples, no embedding), `--only <substring>` (subset of files), `--kb <dir>` |
 | `npm run ask -- "question"` | Full pipeline, streams the answer to the terminal, prints cited sources and timings. Flags: `--k 8`, `--source-type adr,confluence`, `--kind doc,api` (api = OpenAPI/AsyncAPI definitions, project = repository cards), `--authority binding`, `--lang en`, `--json` |
 | `npm run search -- "query"` | **Retrieval only** (no LLM): shows fused rank, vector rank, BM25 rank and text of each chunk. The main debugging tool — most RAG problems are retrieval problems. |
+| `npm run doc -- "<source-id>"` | Prints a whole kb document by `source_id` (or `kb/` path) — exactly what the model's `fetch_document` tool returns. Flags: `--section "Heading"`, `--outline` (headings only), `--max-chars 20000`, `--json` |
 | `npm run serve` | Starts the HTTP API + web UI on `HOST:PORT` (default `127.0.0.1:8787`) |
 | `npm run map` | Projects every chunk vector to 2-D with UMAP, groups the chunks into semantic clusters, places every document on the City Map (Dev Portal catalog + `taxonomy.yaml`) and writes `data/kb-map.json.gz`, rendered by the web UI at `/map.html`. Re-run after `ingest`. Flags: `--clusters 8`, `--neighbors 15`, `--min-dist 0.1`, `--epochs 400`, `--project 256`, `--seed 42`, `--out <file>`, `--relabel` (recompute names and City Map placements only, ~1 s) |
 | `npm run eval` | Retrieval metrics (hit@k, MRR) over `evals/questions.jsonl`; `--answers` also grades answers by expected keywords |
@@ -202,6 +203,13 @@ curl -s -X POST http://127.0.0.1:8787/api/ask/sync -H 'content-type: application
 `{"query":"client credentials M2M","topK":10,"filters":{...}}` → `{ results: RetrievedChunk[] }`.
 Use this from other tools (or another LLM) when you just want the relevant passages.
 
+### `POST /api/document` — a whole document
+
+`{"sourceId":"devportal:default/component/m3/m3/core-features/transfer-flow/","section":"Retry policy"}` →
+the document's markdown with its metadata, outline and truncation flags. Same view the model gets from
+`fetch_document`; 404 with `suggestions` when the id is unknown. `section` is optional (and reported back as
+`sectionNotFound` when no heading matches), `maxChars` overrides `DOC_TOOL_MAX_CHARS`.
+
 ### `POST /api/ingest` — re-index
 
 `{"reset": false}` runs an incremental ingest and hot-swaps the index. Returns the ingest report. 409 if
@@ -241,7 +249,8 @@ absent from the map payload, so the map UI loads a passage only when you select 
 
 `npm run serve` and open <http://127.0.0.1:8787>. Single static file (`src/server/public/index.html`, no build
 step, no framework): answers streamed token by token, a **Reasoning** button that streams the model's
-thinking into a collapsible panel above the answer, clickable `[n]` citations that jump to the source,
+thinking into a collapsible panel above the answer, a line per whole document the model pulled in with
+`fetch_document`, clickable `[n]` citations that jump to the source,
 source cards with title → original URL, source-type and authority badges, expandable passage, source-type
 filter chips, multi-turn conversation, and a **Re-index** button. Auto-scroll follows the stream but stops
 as soon as you scroll up to read.
@@ -494,11 +503,33 @@ Documents are embedded in batches of about `INGEST_BATCH_CHUNKS` chunks (`EMBED_
 5. Optional (`RERANK=llm`): ask the chat model to score each of the top 3·k candidates 0–10 and re-sort.
    Slower (one short generation per candidate) but noticeably more precise on ambiguous questions.
 
+### 7.7 Whole-document reads (`src/retrieval/documents.ts`, `src/generation/tools.ts`)
+
+Chunks are the right unit for ranking and the wrong unit for some answers: the retry table is in the next
+section, the procedure continues past the passage, the ADR's consequences are one heading below what matched.
+So the answering model is given one tool, `fetch_document(source_id, section?)`, and the passages it received
+tell it which ids exist.
+
+* `DocumentStore` maps a `source_id` back to its `kb/*.md` file through `data/manifest.json`, so the tool can
+  only ever read documents that are actually indexed (a path from a tool call never reaches the filesystem).
+  Ids are matched forgivingly (case, punctuation, a `kb/` path, or the citation number `[3]` the model was
+  shown), and an unknown id comes back as an error listing the ids in context, which the model can retry from.
+* Long documents are cut at a line boundary to `DOC_TOOL_MAX_CHARS` and the result carries the document's
+  heading outline, so the follow-up call can ask for one `section` instead of the whole page.
+* The document is appended as one more numbered context block, so the answer cites it with the same `[n]`
+  mechanism and the UI shows it as a source. A document that is already cited keeps its number.
+* `TOOL_MAX_ROUNDS` rounds and a `TOOL_CHAR_BUDGET` across the answer bound the loop; the last round is always
+  run without tools, so a model that keeps calling still has to answer. `CHAT_TOOLS=false` turns it off, and
+  it stays off automatically on a chat model without tool support (`npm run doctor` reports which).
+
+Why a tool and not simply bigger chunks: whole pages in the context would cost 5–10× the tokens on every
+question to help the few that need it, and `CHAT_NUM_CTX` is the scarce resource on a local model.
+
 Why hybrid: embeddings understand paraphrase ("come si ottiene un token machine-to-machine" ≈ "M2M client
 credentials flow") but are weak on exact identifiers; BM25 nails `ADR0016`, `TSPAY`, `X-Correlation-Id` but
 knows no synonyms. Together they cover each other's blind spots.
 
-### 7.7 Generation (`src/generation/`)
+### 7.8 Generation (`src/generation/`)
 
 The system prompt (`prompt.ts`) contains the rules — answer only from context, say when the context does not
 cover the question, cite `[n]` after each claim, prefer binding sources, name repository + file when answering
@@ -535,6 +566,9 @@ Everything is an environment variable (`.env`, see `.env.example` for the full a
 | `RETRIEVAL_MAX_CHUNKS_PER_DOC` | `3` | Diversity cap |
 | `RERANK` | `none` | `llm` for the LLM rerank stage |
 | `QUERY_REWRITE` | `true` | Rewrite follow-ups into standalone queries |
+| `CHAT_TOOLS` | `true` | Give the model `fetch_document` (ignored on a model without tool support) |
+| `TOOL_MAX_ROUNDS` | `3` | Tool rounds before the model must answer |
+| `DOC_TOOL_MAX_CHARS` / `TOOL_CHAR_BUDGET` | `20000` / `24000` | Cap per document / per answer |
 | `PORT` / `HOST` | `8787` / `127.0.0.1` | Set `HOST=0.0.0.0` to reach the UI from other machines on the LAN |
 | `EMBEDDING_PROVIDER` / `CHAT_PROVIDER` | `ollama` | `mock` runs the whole pipeline without Ollama (tests/CI) |
 | `SOURCES_FILE` | `./sources.yaml` | Scope, filters and rules for `npm run sync` |
@@ -665,6 +699,11 @@ is simply not in `kb/`, check `data/sync/<source>.skipped.jsonl`: a filter in `s
 `gitlab.exclude_projects` / `docs.exclude`, `confluence.exclude_trees` / `exclude_titles`, and the
 `min_prose_words` thresholds. Skipped documents are listed with their reason next to the sync state.
 
+**The answer stops mid-procedure or misses a table that is in the page.** That is the case
+`fetch_document` exists for: check `npm run doctor` says the chat model supports tools, then run
+`npm run ask` and look for the `tool fetch_document(…)` line on stderr. `npm run doc -- "<source-id>"` shows
+what the model would have read.
+
 **Answers hallucinate.** Lower `CHAT_TEMPERATURE` (0–0.2), reduce `RETRIEVAL_TOP_K` so irrelevant chunks do not
 dilute the context, or enable `RERANK=llm`.
 
@@ -728,7 +767,7 @@ ai-wiki/
 │   │   └── ask.ts               the streaming RAG loop shared by CLI and API
 │   ├── cli/                     sync · ingest · ask · search · eval · doctor · map
 │   └── server/
-│       ├── index.ts             Fastify: /api/ask (SSE), /api/ask/sync, /api/search, /api/map, /api/ingest, …
+│       ├── index.ts             Fastify: /api/ask (SSE), /api/ask/sync, /api/search, /api/document, /api/map, /api/ingest, …
 │       ├── public/index.html    chat UI
 │       ├── public/map.html      2-D map: City Map colours, cluster labels, density LOD (canvas, no build step)
 │       └── public/architecture.html  interactive architecture page: animated pipeline, live facets, RRF probe

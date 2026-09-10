@@ -1,5 +1,5 @@
 import { config } from "../config.js";
-import type { ChatMessage } from "../types.js";
+import type { ChatMessage, ToolCall } from "../types.js";
 
 /**
  * Minimal Ollama HTTP client (no SDK dependency).
@@ -69,6 +69,20 @@ export async function ollamaEmbed(texts: string[], signal?: AbortSignal): Promis
   return data.embeddings;
 }
 
+/** A function the model may call, in the JSON-schema shape Ollama and OpenAI both take. */
+export interface ToolSpec {
+  type: "function";
+  function: {
+    name: string;
+    description: string;
+    parameters: {
+      type: "object";
+      properties: Record<string, unknown>;
+      required?: string[];
+    };
+  };
+}
+
 export interface ChatOptions {
   temperature?: number;
   numCtx?: number;
@@ -78,19 +92,67 @@ export interface ChatOptions {
   model?: string;
   /** Cap on generated tokens (Ollama `num_predict`). */
   maxTokens?: number;
+  /** Tools the model may call in this turn. Requires a model with tool support. */
+  tools?: ToolSpec[];
 }
 
 interface ChatStreamChunk {
-  message?: { role: string; content?: string; thinking?: string };
+  message?: { role: string; content?: string; thinking?: string; tool_calls?: RawToolCall[] };
   done?: boolean;
   error?: string;
 }
 
-/** One streamed piece of an assistant turn: either visible answer text or reasoning text. */
+interface RawToolCall {
+  function?: { name?: string; arguments?: unknown };
+}
+
+/** One streamed piece of an assistant turn: visible answer text, reasoning text, or tool calls. */
 export interface ChatDelta {
   content?: string;
   /** Reasoning tokens, emitted by thinking models when `think` is enabled. */
   thinking?: string;
+  /** Tool calls requested in this turn; the caller runs them and continues the conversation. */
+  toolCalls?: ToolCall[];
+}
+
+/**
+ * Ollama sends tool arguments as a JSON object, but some models emit them as a JSON string;
+ * accept both so a tool call is never dropped over quoting.
+ */
+function normalizeToolCalls(raw: RawToolCall[]): ToolCall[] {
+  return raw.flatMap((c) => {
+    const name = c.function?.name;
+    if (!name) return [];
+    let args: Record<string, unknown> = {};
+    const a = c.function?.arguments;
+    if (typeof a === "string") {
+      try {
+        const parsed = JSON.parse(a);
+        if (parsed && typeof parsed === "object") args = parsed as Record<string, unknown>;
+      } catch {
+        args = {};
+      }
+    } else if (a && typeof a === "object") {
+      args = a as Record<string, unknown>;
+    }
+    return [{ function: { name, arguments: args } }];
+  });
+}
+
+/** Model capabilities from /api/show ("tools", "thinking", "vision", ...), cached per model. */
+const capabilityCache = new Map<string, Promise<string[]>>();
+export function modelCapabilities(model = config.chat.model): Promise<string[]> {
+  const cached = capabilityCache.get(model);
+  if (cached) return cached;
+  const p = request<{ capabilities?: string[] }>("/api/show", { model })
+    .then((d) => d.capabilities ?? [])
+    .catch(() => [] as string[]);
+  capabilityCache.set(model, p);
+  return p;
+}
+
+export async function modelSupportsTools(model = config.chat.model): Promise<boolean> {
+  return (await modelCapabilities(model)).includes("tools");
 }
 
 /** Stream an assistant turn from /api/chat as `content` / `thinking` deltas. */
@@ -105,6 +167,7 @@ export async function* ollamaChatStream(messages: ChatMessage[], opts: ChatOptio
         messages,
         stream: true,
         think: opts.think ?? config.chat.think,
+        ...(opts.tools?.length ? { tools: opts.tools } : {}),
         keep_alive: "10m",
         options: {
           temperature: opts.temperature ?? config.chat.temperature,
@@ -139,9 +202,13 @@ export async function* ollamaChatStream(messages: ChatMessage[], opts: ChatOptio
         if (!line) continue;
         const chunk = JSON.parse(line) as ChatStreamChunk;
         if (chunk.error) throw new OllamaError(chunk.error);
-        const { content, thinking } = chunk.message ?? {};
+        const { content, thinking, tool_calls: toolCalls } = chunk.message ?? {};
         if (thinking) yield { thinking };
         if (content) yield { content };
+        if (toolCalls?.length) {
+          const calls = normalizeToolCalls(toolCalls);
+          if (calls.length) yield { toolCalls: calls };
+        }
         if (chunk.done) return;
       }
     }
