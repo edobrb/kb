@@ -1,0 +1,859 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ai-wiki · architecture</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1c1f26; --muted: #6b7280; --border: #e3e6eb;
+    --accent: #2f5bea; --accent-soft: #e8eefc; --code: #f1f3f6; --other: #9a9a94;
+    --binding: #7c3aed; --normative: #0f766e;
+    /* categorical slots (same validated palette as map.html) */
+    --c1: #2a78d6; --c2: #eb6834; --c3: #1baf7a; --c4: #eda100; --c5: #e87ba4; --c6: #008300; --c7: #4a3aa7; --c8: #e34948;
+    --lane-offline: var(--c1); --lane-online: var(--c2);
+    --glow: rgba(47, 91, 234, .18);
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --panel: #171a21; --text: #e6e8ee; --muted: #9aa1ad; --border: #262b35;
+      --accent: #7c9cff; --accent-soft: #1d2540; --code: #1c2029; --other: #6f6f6a;
+      --binding: #b18cff; --normative: #3fc1ad;
+      --c1: #3987e5; --c2: #d95926; --c3: #199e70; --c4: #c98500; --c5: #d55181; --c6: #008300; --c7: #9085e9; --c8: #e66767;
+      --glow: rgba(124, 156, 255, .16);
+    }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html { scroll-behavior: smooth; }
+  html, body { margin: 0; }
+  body {
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+    background: var(--bg); color: var(--text); min-height: 100vh; display: flex; flex-direction: column;
+  }
+  code, .mono { font-family: var(--mono); font-size: .92em; }
+  code { background: var(--code); padding: 1px 5px; border-radius: 5px; }
+  a { color: var(--accent); }
+
+  /* ---- header: same chrome as the other pages ---- */
+  header {
+    display: flex; align-items: center; gap: 14px; padding: 12px 20px; border-bottom: 1px solid var(--border);
+    background: var(--panel); position: sticky; top: 0; z-index: 5;
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 650; }
+  header .meta { color: var(--muted); font-size: 12.5px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  header .spacer { flex: 1; }
+  header a.nav { border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; font-size: 13px; color: var(--text); text-decoration: none; }
+  header a.nav:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* ---- section chrome ---- */
+  main { flex: 1; }
+  .wrap { max-width: 1240px; margin: 0 auto; padding-inline: 20px; padding-block: 0 80px; }
+  section.block { padding-block: 44px 8px; border-top: 1px solid var(--border); margin-top: 36px; }
+  section.block:first-of-type { border-top: 0; margin-top: 0; }
+  .eyebrow { color: var(--accent); font-size: 12px; font-weight: 650; text-transform: uppercase; letter-spacing: .08em; margin: 0 0 6px; display: flex; align-items: center; gap: 8px; }
+  .eyebrow .num { font-family: var(--mono); font-size: 11.5px; color: var(--muted); font-weight: 500; }
+  h2 { font-size: 26px; line-height: 1.2; margin: 0 0 10px; font-weight: 700; letter-spacing: -.01em; }
+  h3 { font-size: 15px; margin: 22px 0 8px; font-weight: 650; }
+  .lede { color: var(--muted); max-width: 760px; margin: 0 0 22px; font-size: 15.5px; }
+  .lede strong { color: var(--text); font-weight: 600; }
+  .two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; }
+  .two > * { min-width: 0; }
+  @media (max-width: 860px) { .two { grid-template-columns: minmax(0, 1fr); } }
+
+  /* ---- hero ---- */
+  .hero { position: relative; padding-block: 56px 28px; overflow: hidden; }
+  .hero::before {
+    content: ""; position: absolute; inset: -40% -10% auto; height: 420px; pointer-events: none; z-index: -1;
+    background: radial-gradient(60% 70% at 30% 40%, var(--glow), transparent 70%), radial-gradient(40% 60% at 80% 20%, rgba(235,104,52,.10), transparent 70%);
+  }
+  .hero h2 { font-size: clamp(30px, 4.6vw, 48px); max-width: 860px; margin-bottom: 14px; }
+  .hero .lede { font-size: 17px; max-width: 800px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-top: 26px; }
+  .tile { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; min-width: 0; }
+  .tile .l { color: var(--muted); font-size: 12px; }
+  .tile .v { font-size: 26px; font-weight: 650; line-height: 1.15; margin-top: 2px; overflow-wrap: anywhere; }
+  .tile .v.small { font-size: 15px; font-family: var(--mono); margin-top: 6px; font-weight: 600; }
+  .tile .s { color: var(--muted); font-size: 11.5px; margin-top: 3px; }
+  .live { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--muted); }
+  .live .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--c3); box-shadow: 0 0 0 3px rgba(27,175,122,.18); }
+  .live.off .dot { background: var(--other); box-shadow: none; }
+
+  /* ---- pipeline diagram ---- */
+  .diagram { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+  .stage { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; overflow-x: auto; overflow-y: hidden; }
+  .stage svg { display: block; min-width: 1140px; width: 100%; height: auto; font: 12.5px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif; }
+  .stage .lane-label { font-size: 12px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; fill: var(--muted); }
+  .stage .lane-sub { font-size: 12px; fill: var(--muted); }
+  .stage .edge { fill: none; stroke: var(--border); stroke-width: 1.6; transition: stroke .15s; }
+  .stage .edge.reads { stroke-dasharray: 4 4; }
+  .stage .edge.lit { stroke: var(--accent); stroke-width: 2.2; }
+  .stage .elabel { font-size: 11.5px; fill: var(--muted); }
+  .stage .node { cursor: pointer; outline: none; }
+  .stage .node rect.box { fill: var(--bg); stroke: var(--border); stroke-width: 1.2; transition: stroke .15s, fill .15s; }
+  .stage .node:hover rect.box, .stage .node:focus-visible rect.box { stroke: var(--accent); }
+  .stage .node.on rect.box { stroke: var(--accent); stroke-width: 2; fill: var(--accent-soft); }
+  .stage .node text.t { fill: var(--text); font-weight: 650; font-size: 14px; }
+  .stage .node text.s { fill: var(--muted); font-size: 11.5px; }
+  .stage .node text.file { font-family: var(--mono); font-size: 11px; fill: var(--muted); }
+  .stage .node text.file tspan.dot { fill: var(--accent); }
+  .stage .particle { pointer-events: none; }
+  .detail {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 18px 22px;
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr); gap: 14px 32px; align-items: start;
+  }
+  @media (max-width: 860px) { .detail { grid-template-columns: minmax(0, 1fr); } }
+  .detail .lane { font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 999px; background: var(--code); color: var(--muted); }
+  .detail .lane i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .detail h3 { margin: 10px 0 4px; font-size: 20px; }
+  .detail .sum { color: var(--muted); font-size: 14px; margin: 0 0 12px; }
+  .detail dl { margin: 0; display: grid; grid-template-columns: 104px minmax(0, 1fr); gap: 7px 12px; font-size: 13px; }
+  .detail dt { color: var(--muted); }
+  .detail dd { margin: 0; overflow-wrap: anywhere; }
+  .detail dd.mono { font-family: var(--mono); font-size: 12px; }
+  .detail .code { margin-top: 12px; font-family: var(--mono); font-size: 11.5px; color: var(--muted); border-top: 1px dashed var(--border); padding-top: 8px; overflow-wrap: anywhere; }
+  .detail .hint { color: var(--muted); font-size: 13px; }
+  .detail .nav-stages { display: flex; gap: 6px; margin-top: 14px; }
+  .detail .nav-stages button { font: inherit; font-size: 12.5px; border: 1px solid var(--border); background: transparent; color: var(--text); border-radius: 8px; padding: 5px 9px; cursor: pointer; max-width: 48%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .detail .nav-stages button:hover { border-color: var(--accent); color: var(--accent); }
+  .legend-row { display: flex; flex-wrap: wrap; gap: 14px; margin: -4px 2px 0; color: var(--muted); font-size: 12.5px; align-items: center; }
+  .legend-row .sw { display: inline-block; width: 18px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
+  .legend-row .sw.dash { background: repeating-linear-gradient(90deg, var(--c7) 0 4px, transparent 4px 8px); }
+
+  /* ---- facet bars (corpus) ---- */
+  .facets { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 28px; }
+  @media (max-width: 860px) { .facets { grid-template-columns: 1fr; } }
+  .facet { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; min-width: 0; }
+  .facet .fh { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
+  .facet .fh b { font-weight: 650; font-size: 13.5px; }
+  .facet .fh span { color: var(--muted); font-size: 12px; }
+  .bar { display: flex; height: 18px; border-radius: 4px; overflow: hidden; background: var(--code); gap: 2px; }
+  .bar .seg { height: 100%; min-width: 2px; position: relative; }
+  .bar .seg:first-child { border-radius: 4px 0 0 4px; }
+  .bar .seg:last-child { border-radius: 0 4px 4px 0; }
+  .bar .seg .in { position: absolute; inset: 0; display: flex; align-items: center; padding-left: 6px; font-size: 11px; font-weight: 600; color: #fff; white-space: nowrap; overflow: hidden; pointer-events: none; }
+  .facet .leg { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 8px; font-size: 12.5px; }
+  .facet .leg span { display: inline-flex; align-items: center; gap: 6px; color: var(--text); }
+  .facet .leg i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+  .facet .leg em { color: var(--muted); font-style: normal; font-variant-numeric: tabular-nums; }
+  .sources-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin-top: 18px; }
+  .src-card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; border-top: 3px solid var(--tone, var(--border)); }
+  .src-card h4 { margin: 0 0 4px; font-size: 14.5px; }
+  .src-card .host { font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+  .src-card p { margin: 8px 0 0; font-size: 13.5px; }
+  .src-card ul { margin: 6px 0 0; padding-left: 18px; font-size: 13px; color: var(--muted); }
+  .src-card ul li { margin: 2px 0; }
+  .src-card .k { display: inline-block; margin-top: 10px; font-size: 11.5px; color: var(--muted); }
+  .src-card .k code { font-size: 11px; }
+
+  /* ---- chunk anatomy ---- */
+  .chunk-demo { display: grid; grid-template-columns: 1fr auto 1fr; gap: 14px; align-items: stretch; }
+  @media (max-width: 860px) { .chunk-demo { grid-template-columns: 1fr; } .chunk-demo .arrow { transform: rotate(90deg); justify-self: center; } }
+  .docbox, .chunkbox { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; font-family: var(--mono); font-size: 12px; line-height: 1.5; min-width: 0; overflow-x: auto; }
+  .docbox .fm { color: var(--muted); }
+  .docbox .fm .fk { color: var(--c7); }
+  .docbox .hd { color: var(--text); font-weight: 700; }
+  .docbox .body { color: var(--text); opacity: .85; }
+  .docbox .cut { border-top: 2px dashed var(--c2); margin: 6px -16px; position: relative; }
+  .docbox .cut::after { content: attr(data-n); position: absolute; right: 8px; top: -9px; background: var(--c2); color: #fff; font-size: 10px; padding: 0 6px; border-radius: 999px; font-weight: 700; }
+  .chunk-demo .arrow { align-self: center; color: var(--muted); font-size: 22px; }
+  .chunkbox .ch { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; background: var(--bg); }
+  .chunkbox .ch .id { color: var(--muted); font-size: 11px; }
+  .chunkbox .ch .hp { color: var(--c1); font-weight: 700; word-break: break-word; }
+  .chunkbox .ch .ct { color: var(--text); opacity: .85; white-space: pre-wrap; }
+  .chunkbox .ch .tk { color: var(--muted); font-size: 10.5px; margin-top: 4px; }
+  .kinds { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 18px; }
+  .kinds th, .kinds td { border-bottom: 1px solid var(--border); padding: 8px 10px; text-align: left; vertical-align: top; }
+  .kinds th { color: var(--muted); font-weight: 600; font-size: 12px; }
+  .kinds td:first-child { font-family: var(--mono); font-weight: 700; }
+  .tblwrap { overflow-x: auto; }
+  .pill { display: inline-block; border-radius: 999px; padding: 0 8px; font-size: 11.5px; background: var(--code); color: var(--muted); font-family: var(--mono); }
+
+  /* ---- retrieval probe ---- */
+  .probe { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 16px 18px; }
+  .probe form { display: flex; gap: 8px; }
+  .probe input { flex: 1; min-width: 0; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 9px 12px; }
+  .probe input:focus { outline: none; border-color: var(--accent); }
+  .probe button { font: inherit; font-weight: 600; background: var(--accent); color: #fff; border: 0; border-radius: 10px; padding: 0 16px; cursor: pointer; }
+  .probe button:disabled { opacity: .5; cursor: default; }
+  .probe .ex { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .probe .ex span { border: 1px solid var(--border); border-radius: 999px; padding: 3px 10px; font-size: 12px; color: var(--muted); cursor: pointer; }
+  .probe .ex span:hover { border-color: var(--accent); color: var(--accent); }
+  .probe .note { color: var(--muted); font-size: 12.5px; margin-top: 10px; min-height: 18px; }
+  .formula { font-family: var(--mono); font-size: 13px; background: var(--code); border-radius: 10px; padding: 10px 14px; margin: 14px 0 6px; overflow-x: auto; white-space: nowrap; }
+  .formula b { color: var(--c1); font-weight: 700; } .formula i { color: var(--c2); font-style: normal; font-weight: 700; }
+  .rrf { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
+  .rrf .row { display: grid; grid-template-columns: 28px minmax(0, 1.2fr) minmax(160px, 1fr) 64px; gap: 10px; align-items: center; padding: 7px 8px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg); }
+  @media (max-width: 700px) { .rrf .row { grid-template-columns: 28px 1fr; } .rrf .row .bars, .rrf .row .sc { grid-column: 2; } }
+  .rrf .n { font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums; }
+  .rrf .who { min-width: 0; }
+  .rrf .who .t { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rrf .who .p { color: var(--muted); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rrf .who .tags { display: flex; gap: 4px; margin-top: 3px; flex-wrap: wrap; }
+  .rrf .tag { font-size: 10.5px; border: 1px solid var(--border); border-radius: 5px; padding: 0 5px; color: var(--muted); }
+  .rrf .tag.binding { color: var(--binding); border-color: var(--binding); } .rrf .tag.normative { color: var(--normative); border-color: var(--normative); }
+  .rrf .bars { display: flex; flex-direction: column; gap: 3px; }
+  .rrf .bars .b { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .rrf .bars .b i { display: block; height: 8px; border-radius: 0 4px 4px 0; }
+  .rrf .bars .b.v i { background: var(--c1); } .rrf .bars .b.k i { background: var(--c2); }
+  .rrf .bars .b span { width: 34px; text-align: right; }
+  .rrf .sc { text-align: right; font-family: var(--mono); font-size: 12.5px; font-weight: 600; }
+  .rrf .sc small { display: block; color: var(--muted); font-weight: 500; font-size: 10.5px; }
+  .rrf-legend { display: flex; gap: 16px; font-size: 12.5px; color: var(--muted); margin-top: 8px; flex-wrap: wrap; }
+  .rrf-legend i { display: inline-block; width: 14px; height: 8px; border-radius: 3px; vertical-align: middle; margin-right: 6px; }
+
+  /* ---- tokenizer demo ---- */
+  .tok { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 16px 18px; }
+  .tok input { width: 100%; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 9px 12px; }
+  .tok input:focus { outline: none; border-color: var(--accent); }
+  .tok .out { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; min-height: 30px; }
+  .tok .t { font-family: var(--mono); font-size: 12.5px; background: var(--code); border-radius: 6px; padding: 3px 8px; }
+  .tok .t.split { border: 1px dashed var(--c2); }
+  .tok .t.stop { text-decoration: line-through; opacity: .5; }
+  .tok .why { color: var(--muted); font-size: 12.5px; margin-top: 8px; }
+
+  /* ---- incremental keys ---- */
+  .keys { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px; }
+  .key { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; }
+  .key .st { font-weight: 650; font-size: 13.5px; }
+  .key .kk { font-family: var(--mono); font-size: 11.5px; color: var(--c1); margin: 4px 0 6px; overflow-wrap: anywhere; }
+  .key .ef { color: var(--muted); font-size: 12.5px; }
+  .rails { margin-top: 14px; display: flex; flex-wrap: wrap; gap: 8px; }
+  .rails span { border: 1px solid var(--border); border-radius: 999px; padding: 4px 11px; font-size: 12.5px; color: var(--muted); background: var(--panel); }
+
+  /* ---- storage ---- */
+  .stores { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+  .store { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
+  .store h4 { margin: 0; font-size: 14.5px; display: flex; justify-content: space-between; gap: 8px; }
+  .store h4 code { font-size: 11.5px; }
+  .store p { color: var(--muted); font-size: 13px; margin: 6px 0 8px; }
+  .cols { display: flex; flex-wrap: wrap; gap: 4px; }
+  .cols span { font-family: var(--mono); font-size: 11px; background: var(--code); border-radius: 5px; padding: 1px 6px; }
+  .cols span.vec { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+  .api { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 8px; margin-top: 8px; }
+  .api div { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 9px 12px; font-size: 13px; display: flex; gap: 10px; align-items: baseline; }
+  .api .m { font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--c3); width: 38px; flex: none; }
+  .api .m.post { color: var(--c2); }
+  .api code { font-size: 12px; }
+  .api span { color: var(--muted); font-size: 12.5px; }
+
+  /* ---- code tree ---- */
+  .tree { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 14px 18px; font-family: var(--mono); font-size: 12.5px; line-height: 1.7; overflow-x: auto; }
+  .tree .d { color: var(--c1); font-weight: 700; }
+  .tree .f { color: var(--text); }
+  .tree .c { color: var(--muted); }
+  .tree .row { white-space: nowrap; }
+
+  footer.note { color: var(--muted); font-size: 12.5px; margin-top: 40px; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>ai-wiki architecture</h1>
+  <span class="meta" id="meta">connecting…</span>
+  <span class="spacer"></span>
+  <a class="nav" href="/">Chat</a>
+  <a class="nav" href="/map.html">Map</a>
+</header>
+
+<main>
+<div class="wrap">
+
+  <!-- ============================== HERO ============================== -->
+  <section class="hero">
+    <p class="eyebrow">System architecture</p>
+    <h2>How a wiki page becomes a cited answer.</h2>
+    <p class="lede">
+      Three sources are gathered into a folder of markdown, cut into self-describing chunks, indexed twice
+      (<strong>dense vectors</strong> and <strong>BM25</strong>), and fused at question time. Everything runs on this
+      machine: Ollama for the models, LanceDB for the vectors, a gzipped JSON file for the keyword index.
+      Numbers on this page are read live from the running index.
+    </p>
+    <div class="tiles" id="tiles">
+      <div class="tile"><div class="l">Chunks indexed</div><div class="v" id="t-chunks">—</div><div class="s" id="t-chunks-s"><span class="live off"><span class="dot"></span>waiting for /api/health</span></div></div>
+      <div class="tile"><div class="l">Vector dimensions</div><div class="v" id="t-dims">—</div><div class="s">Matryoshka-truncated, cosine</div></div>
+      <div class="tile"><div class="l">Embedding model</div><div class="v small" id="t-emb">—</div><div class="s">queries get an instruction prefix</div></div>
+      <div class="tile"><div class="l">Chat model</div><div class="v small" id="t-chat">—</div><div class="s" id="t-chat-s">streams thinking + answer</div></div>
+      <div class="tile"><div class="l">BM25 documents</div><div class="v" id="t-bm25">—</div><div class="s" id="t-bm25-s">rebuilt from the table after ingest</div></div>
+      <div class="tile"><div class="l">Documents</div><div class="v" id="t-docs">—</div><div class="s" id="t-docs-s">distinct source ids</div></div>
+    </div>
+  </section>
+
+  <!-- ============================== PIPELINE ============================== -->
+  <section class="block" id="pipeline">
+    <p class="eyebrow"><span class="num">01</span> The pipeline</p>
+    <h2>Two lanes, one index.</h2>
+    <p class="lede">
+      The <strong>offline lane</strong> runs on demand (<code>npm run sync</code>, <code>npm run ingest</code>) and is
+      incremental at every step. The <strong>online lane</strong> answers a question in a few seconds and only ever
+      reads. Click a stage to see what it does, what it reads and writes, and where the code lives.
+    </p>
+    <div class="diagram">
+      <div class="stage" id="stage"></div>
+      <div class="legend-row">
+        <span><i class="sw" style="background:var(--lane-offline)"></i>offline: sync → ingest → store</span>
+        <span><i class="sw" style="background:var(--lane-online)"></i>online: question → cited answer</span>
+        <span><i class="sw dash"></i>read at query time</span>
+        <span style="margin-left:auto">click a stage · Tab + Enter works too</span>
+      </div>
+      <div class="detail" id="detail" aria-live="polite"></div>
+    </div>
+  </section>
+
+  <!-- ============================== CORPUS ============================== -->
+  <section class="block" id="corpus">
+    <p class="eyebrow"><span class="num">02</span> What is indexed</p>
+    <h2>Documentation, contracts and cards. Not code, not meeting notes.</h2>
+    <p class="lede">
+      The knowledge base exists to answer <strong>technical questions about OnePlatform and TeamSystem</strong>. That goal
+      decides the scope: TechDocs pages, ADRs, in-repo documentation, API contracts and one card per repository.
+      Generated API reference (~6 200 of 8 600 portal pages), source code (~90 % of the files) and sprint ceremonies are
+      filtered out before they ever reach the index. The bars below are the live composition of the chunk table.
+    </p>
+    <div class="facets" id="facets">
+      <div class="facet"><div class="fh"><b>By source type</b><span>frontmatter <code>source_type</code></span></div><div class="bar" data-f="sourceTypes"></div><div class="leg"></div></div>
+      <div class="facet"><div class="fh"><b>By kind</b><span>frontmatter <code>kind</code>, decides the chunker</span></div><div class="bar" data-f="kinds"></div><div class="leg"></div></div>
+      <div class="facet"><div class="fh"><b>By authority</b><span>retrieval boost +15 % / +12 %</span></div><div class="bar" data-f="authorities"></div><div class="leg"></div></div>
+      <div class="facet"><div class="fh"><b>By language</b><span>detected from function words</span></div><div class="bar" data-f="langs"></div><div class="leg"></div></div>
+    </div>
+
+    <div class="sources-grid">
+      <div class="src-card" style="--tone: var(--c1)">
+        <h4>Developer Portal</h4><div class="host">development.teamsystem.com · Backstage + TechDocs</div>
+        <p>Every TechDocs page of every catalog entity, plus the OpenAPI/AsyncAPI definition of <code>API</code> entities. Populated from GitLab by CI, so it covers repositories the token cannot read, and it knows who owns what.</p>
+        <ul><li>minus <code>exclude_pages</code> globs: the Swagger / Sphinx reference trees</li><li>minus generated pages (<code>IO.Swagger.Model.*</code>, “Back to Model list”…)</li><li>minus stubs without prose</li></ul>
+        <span class="k">key: TechDocs <code>etag</code> + hash of the page filters</span>
+      </div>
+      <div class="src-card" style="--tone: var(--c2)">
+        <h4>GitLab</h4><div class="host">biosphere.teamsystem.com · oneplatform + portal-referenced repos</div>
+        <p>Markdown docs (<code>kind: doc</code>), OpenAPI/AsyncAPI contracts found in the repo (<code>kind: api</code>) and one project card per repository (<code>kind: project</code>). Archives are refused (HTTP 406), so files are fetched one by one, <code>SYNC_CONCURRENCY</code> at a time.</p>
+        <ul><li>minus training / demo / PoC repositories, licences, changelogs, templates, tests</li><li>minus generator READMEs (CRA, Vite, Angular CLI, Nest…)</li><li>minus <code>docs/**</code> of repos the portal already renders</li><li>source code only with <code>gitlab.code.enabled: true</code></li></ul>
+        <span class="k">key: default-branch head commit, then blob sha per file</span>
+      </div>
+      <div class="src-card" style="--tone: var(--c3)">
+        <h4>Confluence</h4><div class="host">teamsystem.atlassian.net · 7 technical spaces</div>
+        <p>Whole spaces (TeamCore, CTO, TONEPLAT, TeamMeteri, TeamWorksp, RPDD, OBO) as <code>kind: doc</code>, one file per page, with space and ancestor titles as the breadcrumb. Also searched per repository to put related pages on the project cards.</p>
+        <ul><li>minus <code>exclude_trees</code>: a page is skipped when it or any ancestor matches (ceremonies, meetings, drafts, archives, the CTO copies of the ADRs)</li><li>minus <code>exclude_titles</code>, stubs</li></ul>
+        <span class="k">key: page version number + hash of the quality thresholds</span>
+      </div>
+      <div class="src-card" style="--tone: var(--c5)">
+        <h4>Manually curated</h4><div class="host">kb/manually-curated/ · hand-written</div>
+        <p>Glossary, manifesto, design principles, product catalog. Never touched by sync; ingest picks a manual edit up through the file hash like any other document.</p>
+        <span class="k">key: sha256 of the file bytes</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================== CHUNKING ============================== -->
+  <section class="block" id="chunking">
+    <p class="eyebrow"><span class="num">03</span> Anatomy of a chunk</p>
+    <h2>Every chunk says where it comes from.</h2>
+    <p class="lede">
+      The chunker parses markdown into blocks (headings, fenced code, tables, paragraphs), tracks the heading stack and
+      packs blocks to about <strong>450 tokens</strong> (never over 700), preferring to break at headings once a chunk has
+      at least a third of the target. The text that gets embedded and BM25-indexed is
+      <code>heading path ⏎⏎ content</code>, where the heading path starts with the <strong>breadcrumb</strong> written by
+      sync. “Decision” alone means nothing. <code>GitLab › oneplatform/adrs &gt; ADR0010 Client Credentials &gt; Decision</code> does.
+    </p>
+    <div class="chunk-demo">
+      <div class="docbox" aria-label="A knowledge-base document with frontmatter and headings">
+        <div class="fm">---<br><span class="fk">source_id</span>: gitlab:oneplatform/adrs:ADR0010.md<br><span class="fk">source_type</span>: adr &nbsp;·&nbsp; <span class="fk">kind</span>: doc<br><span class="fk">authority</span>: binding &nbsp;·&nbsp; <span class="fk">lang</span>: en<br><span class="fk">breadcrumb</span>: GitLab › oneplatform/adrs<br><span class="fk">fingerprint</span>: 3f9c…<br>---</div>
+        <div class="hd"># ADR0010 Client Credentials</div>
+        <div class="body">Machine-to-machine access to platform APIs needs a token flow that does not involve a user…</div>
+        <div class="hd">## Context</div>
+        <div class="body">Services call each other across tenants; today each team has its own secret handling…</div>
+        <div class="cut" data-n="cut 1"></div>
+        <div class="hd">## Decision</div>
+        <div class="body">Use the OAuth 2.0 client credentials grant issued by TS ID. Tokens are short-lived…</div>
+        <div class="hd">### Consequences</div>
+        <div class="body">Every service registers a client; secrets rotate via the Policy Manager…</div>
+        <div class="cut" data-n="cut 2"></div>
+        <div class="hd">## Alternatives</div>
+        <div class="body">API keys (rejected: no expiry), mTLS only (rejected: operational cost)…</div>
+      </div>
+      <div class="arrow" aria-hidden="true">→</div>
+      <div class="chunkbox" aria-label="The chunks produced from that document">
+        <div class="ch"><div class="id">gitlab:oneplatform/adrs:ADR0010.md::0</div><div class="hp">GitLab › oneplatform/adrs &gt; ADR0010 Client Credentials &gt; Context</div><div class="ct">Machine-to-machine access to platform APIs needs a token flow… Services call each other across tenants…</div><div class="tk">~410 tokens · breaks at the next heading</div></div>
+        <div class="ch"><div class="id">…::1</div><div class="hp">GitLab › oneplatform/adrs &gt; ADR0010 Client Credentials &gt; Decision</div><div class="ct">Use the OAuth 2.0 client credentials grant issued by TS ID… Every service registers a client…</div><div class="tk">~445 tokens · H3 folded into the H2 section</div></div>
+        <div class="ch"><div class="id">…::2</div><div class="hp">GitLab › oneplatform/adrs &gt; ADR0010 Client Credentials &gt; Alternatives</div><div class="ct">API keys (rejected: no expiry), mTLS only…</div><div class="tk">~120 tokens · kept: a trailing chunk is merged only below 75 tokens</div></div>
+      </div>
+    </div>
+
+    <div class="tblwrap kinds-wrap">
+      <table class="kinds">
+        <thead><tr><th>kind</th><th>Body</th><th>Id → file</th><th>Chunked by</th></tr></thead>
+        <tbody>
+          <tr><td>doc</td><td>Prose markdown: TechDocs page, README, ADR, in-repo documentation, Confluence page</td><td><span class="pill">devportal:&lt;ns&gt;/&lt;kind&gt;/&lt;name&gt;/&lt;page/&gt;</span> <span class="pill">gitlab:&lt;project&gt;:&lt;path&gt;</span> <span class="pill">confluence:&lt;SPACE&gt;:&lt;pageId&gt;</span></td><td>headings, ~450 tokens, 60-token overlap</td></tr>
+          <tr><td>api</td><td>OpenAPI/AsyncAPI definition in a fenced block, preceded by its title and description</td><td><span class="pill">devportal:&lt;ns&gt;/api/&lt;name&gt;#definition</span> <span class="pill">gitlab:&lt;project&gt;:&lt;path&gt;</span></td><td>headings; an oversized fence is split by lines, fences preserved</td></tr>
+          <tr><td>project</td><td>Repository card: description, Dev Portal entity (owner, system, lifecycle), languages, top-level folders, README excerpt, related Confluence pages</td><td><span class="pill">gitlab:&lt;project&gt;:__project</span></td><td>headings</td></tr>
+          <tr><td>code</td><td>One fenced block with the language tag, the file verbatim. <b>Off by default.</b></td><td><span class="pill">gitlab:&lt;project&gt;:&lt;path&gt;</span></td><td>top-level declarations, ~600 tokens (max 900), 1-based line range for <code>#L10-45</code> deep links</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============================== RETRIEVAL ============================== -->
+  <section class="block" id="retrieval">
+    <p class="eyebrow"><span class="num">04</span> Anatomy of a query</p>
+    <h2>Two rankings, one fusion.</h2>
+    <p class="lede">
+      Embeddings understand paraphrase (“come si ottiene un token machine-to-machine” ≈ “M2M client credentials”)
+      but are weak on exact identifiers. BM25 nails <code>ADR0016</code>, <code>TSPAY</code>,
+      <code>X-Correlation-Id</code> but knows no synonyms. Each returns <strong>24 candidates</strong>; Reciprocal Rank
+      Fusion merges them without calibrating scores, binding documents get a nudge, at most 3 chunks per document
+      survive, and <strong>6</strong> reach the model. The probe below runs the real retriever and breaks each result’s
+      score into its two contributions.
+    </p>
+    <div class="formula" aria-label="Reciprocal rank fusion formula">score(chunk) = ( <b>w<sub>vec</sub> / (60 + rank<sub>vec</sub>)</b> + <i>w<sub>bm25</sub> / (60 + rank<sub>bm25</sub>)</i> ) × boost(authority) &nbsp;&nbsp; <span style="color:var(--muted)">w = 1.0 · boost: binding 1.15, normative 1.12, else 1.0</span></div>
+    <div class="probe">
+      <form id="probeForm">
+        <input type="text" id="probeQ" placeholder="Ask the retriever a question (no generation, just ranking)…" autocomplete="off" />
+        <button type="submit" id="probeGo">Retrieve</button>
+      </form>
+      <div class="ex" id="probeEx">
+        <span>What does ADR0010 say about client credentials?</span>
+        <span>Come funziona il social login in TSID?</span>
+        <span>OnePlatform data store tiers</span>
+        <span>RFC 9457 error format</span>
+      </div>
+      <div class="note" id="probeNote">Runs <code>POST /api/search</code> with <code>topK: 10</code>. Vector rank and BM25 rank are the positions in each list before fusion; a dash means the chunk was only found by the other index.</div>
+      <div class="rrf-legend" id="rrfLegend" hidden><span><i style="background:var(--c1)"></i>vector contribution 1/(60+rank)</span><span><i style="background:var(--c2)"></i>BM25 contribution 1/(60+rank)</span></div>
+      <div class="rrf" id="rrf"></div>
+    </div>
+
+    <div class="two" style="margin-top:18px">
+      <div class="tok">
+        <h3 style="margin-top:0">The BM25 tokenizer, live</h3>
+        <input type="text" id="tokIn" value="Perché ADR0010 richiede X-Correlation-Id per le API M2M?" autocomplete="off" />
+        <div class="out" id="tokOut"></div>
+        <div class="why">NFKD accent folding (<code>perché → perche</code>), lower-casing, letters and digits only, Italian and English stopwords dropped, tokens under two characters dropped. Alphanumeric codes are also split (dashed boxes) so <code>ADR0010</code>, <code>ADR 0010</code> and <code>adr-0010</code> all match. Okapi BM25 with <code>k1 = 1.2</code>, <code>b = 0.75</code>. Same function as <code>src/store/bm25.ts</code>.</div>
+      </div>
+      <div class="tok">
+        <h3 style="margin-top:0">What the model receives</h3>
+        <div class="why" style="margin-top:0">The system prompt carries the rules (answer only from context, cite <code>[n]</code> after each claim, prefer binding sources on conflict, name repository and file when answering from a repository document, reply in the user’s language) followed by the numbered context blocks:</div>
+        <pre class="formula" style="white-space:pre; font-size:12px; margin-top:10px">[1] GitLab › oneplatform/adrs &gt; ADR0010 Client Credentials &gt; Decision
+source_type=adr kind=doc authority=binding url=https://biosphere…/ADR0010.md
+Use the OAuth 2.0 client credentials grant issued by TS ID…
+
+-----
+
+[2] Dev Portal › TS ID &gt; Machine to machine &gt; Token request
+source_type=devportal kind=doc authority=descriptive url=https://development…
+POST /oauth2/token with grant_type=client_credentials…</pre>
+        <div class="why">Then the last 6 turns of history and the new question. Generation streams from Ollama <code>/api/chat</code> with two kinds of delta, <code>thinking</code> and <code>content</code>, forwarded as separate SSE events. After the stream ends the <code>[n]</code> actually cited are extracted so the UI can dim unused sources. A follow-up question is first rewritten into a standalone query from the last 4 turns (temperature 0, no thinking).</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================== INCREMENTAL ============================== -->
+  <section class="block" id="incremental">
+    <p class="eyebrow"><span class="num">05</span> What triggers re-work</p>
+    <h2>Nothing is redone unless its key changed.</h2>
+    <p class="lede">Every stage has its own change-detection key. A sync that finds nothing new rewrites no file, so the next ingest has nothing to embed. An unchanged repository costs one branch request, an unchanged portal entity one metadata request, an unchanged space one paginated listing.</p>
+    <div class="keys">
+      <div class="key"><div class="st">Portal entity</div><div class="kk">techdocs etag + hash(page filters)</div><div class="ef">Pages re-downloaded and re-filtered; otherwise one metadata request per entity.</div></div>
+      <div class="key"><div class="st">GitLab repository</div><div class="kk">default-branch head commit + hash(coverage, entity, docs/api/code settings, thresholds)</div><div class="ef">Tree listed again; otherwise one branch request per repository.</div></div>
+      <div class="key"><div class="st">GitLab file</div><div class="kk">blob sha</div><div class="ef">That file is downloaded again.</div></div>
+      <div class="key"><div class="st">Project card</div><div class="kk">sha256(rendered card)</div><div class="ef">The card document is rewritten.</div></div>
+      <div class="key"><div class="st">Confluence page</div><div class="kk">page version + hash(quality thresholds)</div><div class="ef">Body fetched again; the listing is one paginated request per space.</div></div>
+      <div class="key"><div class="st">Card enrichment</div><div class="kk">confluence.refresh_days per project</div><div class="ef">The wiki is searched again for that project.</div></div>
+      <div class="key"><div class="st">Ingest of a document</div><div class="kk">sha256(file bytes) in data/manifest.json</div><div class="ef">Old chunks deleted by source_id, document re-chunked and re-embedded.</div></div>
+      <div class="key"><div class="st">Whole index</div><div class="kk">embedding model · dimensions · chunk sizes</div><div class="ef">Manifest incompatible: full rebuild from scratch.</div></div>
+    </div>
+    <div class="rails">
+      <span>a source that aborts deletes nothing</span><span><code>--only</code> never deletes</span><span>foreign files in <code>kb/&lt;source&gt;/</code> are only removed with <code>--prune-foreign</code></span><span>a file is rewritten only when its content changed (<code>fetched_at</code> excluded)</span><span>duplicate bodies within a run are skipped</span><span>every skip and its reason lands in <code>data/sync/&lt;source&gt;.skipped.jsonl</code></span><span>manifest flushed every 5 s: an interrupted ingest resumes</span>
+    </div>
+  </section>
+
+  <!-- ============================== STORAGE ============================== -->
+  <section class="block" id="storage">
+    <p class="eyebrow"><span class="num">06</span> Storage and API</p>
+    <h2>Files on disk, no services to run.</h2>
+    <div class="stores">
+      <div class="store"><h4>LanceDB <code>data/lancedb/</code></h4><p>One <code>chunks</code> table, embedded and file-based (Apache Arrow columns). Filters are SQL-like predicates such as <code>kind IN ('api')</code>. No ANN index: a brute-force cosine scan is exact and takes milliseconds at this scale.</p>
+        <div class="cols"><span>id</span><span>source_id</span><span>source_type</span><span>kind</span><span>title</span><span>source_url</span><span>authority</span><span>lang</span><span>last_modified</span><span>rel_path</span><span>ordinal</span><span>heading_path</span><span>content</span><span>text</span><span>line_start</span><span>line_end</span><span class="vec" id="veccol">vector float32[…]</span></div></div>
+      <div class="store"><h4>BM25 <code>data/bm25.json.gz</code></h4><p>Okapi BM25 postings (<code>term → [docIdx, tf, …]</code>) with per-chunk lengths and filter columns, gzipped. Rebuilt from the LanceDB table after every ingest, so the two indexes cannot drift.</p><div class="cols"><span>ids</span><span>lens</span><span>sourceTypes</span><span>kinds</span><span>authorities</span><span>langs</span><span>postings</span></div></div>
+      <div class="store"><h4>Manifest <code>data/manifest.json</code></h4><p>What is indexed: per source id the content hash, chunk count and indexing time, plus the embedding model, dimensions and chunk sizes the index was built with. Written at most every 5 s during ingest, which is what makes an interrupted run resumable.</p><div class="cols"><span>embeddingModel</span><span>embeddingDimensions</span><span>chunking</span><span>docs[source_id]</span></div></div>
+      <div class="store"><h4>Sync state <code>data/sync/&lt;source&gt;.json</code></h4><p>Per-source item fingerprints and connector memory: portal <code>coveredRepos</code> and <code>repoEntities</code>, GitLab <code>projectHeads</code> and <code>projectEnrichment</code>, Confluence space counts.</p><div class="cols"><span>items</span><span>meta</span><span>lastRunAt</span></div></div>
+      <div class="store"><h4>Map <code>data/kb-map.json.gz</code></h4><p>Built by <code>npm run map</code>: every vector random-projected to 256 dims, UMAP to 2-D, k-means clusters named by distinctive terms. Parallel arrays, dictionary-encoded strings, no chunk text: the browser fetches passages on demand.</p><div class="cols"><span>documents</span><span>clusters</span><span>points{x,y,doc,ord,head,cl}</span><span>labels</span></div></div>
+    </div>
+    <h3>HTTP API (Fastify)</h3>
+    <div class="api">
+      <div><span class="m post">POST</span><code>/api/ask</code><span>SSE: status · sources · thinking · token · done · error, with a <code>: ping</code> every 15 s</span></div>
+      <div><span class="m post">POST</span><code>/api/ask/sync</code><span>same, one JSON response</span></div>
+      <div><span class="m post">POST</span><code>/api/search</code><span>retrieval only, used by the probe above and by the map</span></div>
+      <div><span class="m post">POST</span><code>/api/chunk</code><span>chunk text by id (≤ 50), keeps the map payload metadata-only</span></div>
+      <div><span class="m post">POST</span><code>/api/ingest</code><span>incremental re-index, guarded against overlap (409)</span></div>
+      <div><span class="m">GET</span><code>/api/health</code><span>models, chunk count, dimensions</span></div>
+      <div><span class="m">GET</span><code>/api/facets</code><span>distinct source types, kinds, authorities, languages</span></div>
+      <div><span class="m">GET</span><code>/api/map</code><span>the gzipped projection, passed through as-is</span></div>
+    </div>
+  </section>
+
+  <!-- ============================== CODE ============================== -->
+  <section class="block" id="code">
+    <p class="eyebrow"><span class="num">07</span> Where the code lives</p>
+    <h2>One codebase, three pipelines.</h2>
+    <div class="tree">
+      <div class="row"><span class="d">src/sync/</span>        <span class="f">index.ts</span> <span class="c">orchestrator: source + enricher definitions, rules, duplicate-body skip, state, pruning</span></div>
+      <div class="row">                 <span class="f">devportal.ts · gitlab.ts · confluence.ts</span> <span class="c">connectors (Confluence also does the CQL card lookup)</span></div>
+      <div class="row">                 <span class="f">project-card.ts · quality.ts · code.ts</span> <span class="c">the repository card · prose/generated/boilerplate heuristics · languages and symbols</span></div>
+      <div class="row">                 <span class="f">sources-config.ts · kb-writer.ts · html.ts · http.ts · state.ts</span> <span class="c">sources.yaml, globs, rules · frontmatter writer · html→md · client · state files</span></div>
+      <div class="row"><span class="d">src/ingest/</span>      <span class="f">loader.ts · chunker.ts · pipeline.ts · manifest.ts · progress.ts</span> <span class="c">frontmatter and kinds · prose + code chunkers · batched load→chunk→embed→store, BM25 rebuild</span></div>
+      <div class="row"><span class="d">src/llm/</span>         <span class="f">embeddings.ts · chat.ts · ollama.ts</span> <span class="c">instruction-prefixed queries, Matryoshka truncation, streaming chat, mock providers for tests</span></div>
+      <div class="row"><span class="d">src/store/</span>       <span class="f">vector-store.ts · bm25.ts</span> <span class="c">LanceDB wrapper · Okapi BM25</span></div>
+      <div class="row"><span class="d">src/retrieval/</span>   <span class="f">retriever.ts</span> <span class="c">RRF, authority boost, per-document cap, optional LLM rerank</span></div>
+      <div class="row"><span class="d">src/generation/</span>  <span class="f">prompt.ts · ask.ts</span> <span class="c">system prompt, context blocks, deep links · query rewrite and the streaming loop</span></div>
+      <div class="row"><span class="d">src/viz/</span>         <span class="f">map.ts</span> <span class="c">random projection, UMAP, clustering, labels</span></div>
+      <div class="row"><span class="d">src/cli/</span>         <span class="f">sync · ingest · ask · search · eval · doctor · map</span></div>
+      <div class="row"><span class="d">src/server/</span>      <span class="f">index.ts · public/index.html · public/map.html · public/architecture.html</span> <span class="c">Fastify API · chat · 2-D map · this page</span></div>
+      <div class="row"><span class="d">evals/</span>           <span class="f">questions.jsonl</span> <span class="c">retrieval benchmark: hit@k, MRR, optional LLM judge</span></div>
+    </div>
+    <footer class="note">This page is a static file with no build step, like the rest of the UI. Live values come from <code>/api/health</code>, <code>/api/facets</code> and <code>/api/search</code>; everything else mirrors <code>ARCHITECTURE.md</code> and the source.</footer>
+  </section>
+
+</div>
+</main>
+
+<script>
+(() => {
+  const $ = (s) => document.querySelector(s);
+  const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const fmt = (n) => Number(n).toLocaleString("en-US");
+  const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  // Live values shown in the diagram; refreshed by /api/health.
+  const live = { chunks: null, dims: 1024, emb: "qwen3-embedding:0.6b", chat: "qwen3:8b", bm25: null };
+
+  // =====================================================================
+  // 1. Pipeline diagram
+  // =====================================================================
+  const STAGES = {
+    devportal: { lane: "offline", title: "Developer Portal", sub: "TechDocs html → markdown", summary: "Curated documentation, the source of truth. Every catalog entity with TechDocs, plus the OpenAPI/AsyncAPI definitions of API entities. Because CI populates it from GitLab, it also covers repositories the token cannot read, and it knows owner, system and lifecycle for each one.",
+      facts: [["reads", "/api/catalog/entities · /api/techdocs/metadata · /api/techdocs/static/…"], ["filters", "exclude_pages globs (~6 200 generated reference pages), generated-page heuristics, stubs (< 15 prose words)"], ["emits", "kind: doc and kind: api → kb/devportal/<kind>/<name>/…"], ["also", "coveredRepos + repoEntities handed to the GitLab connector"], ["key", "TechDocs etag + hash of the page filters"], ["auth", "DEVPORTAL_TOKEN (Backstage bearer, ~1 h)"]], code: "src/sync/devportal.ts · sources.yaml › devportal" },
+    gitlab: { lane: "offline", title: "GitLab", sub: "raw files, one request each", summary: "Documentation that is not published as TechDocs (READMEs, ADRs, in-repo docs), the API contracts kept in repositories, and one project card per repository so “which repository / team owns X” is answerable. Source code is off by default.",
+      facts: [["reads", "groups/*/projects · repository/branches · repository/tree · files/…/raw, SYNC_CONCURRENCY in parallel (archives return 406)"], ["filters", "exclude_projects (training, demos, PoCs, archived), docs.exclude (licences, changelogs, tests, AI-assistant files), boilerplate READMEs, docs/** of portal-rendered repos"], ["emits", "kind: doc · kind: api · kind: project → kb/gitlab/<group>/<project>/…"], ["key", "head commit per repo, blob sha per file, sha256 per card"], ["auth", "GITLAB_TOKEN (read_api)"]], code: "src/sync/gitlab.ts · src/sync/project-card.ts" },
+    confluence: { lane: "offline", title: "Confluence", sub: "export_view → markdown", summary: "Functional and technical analyses of the core services (TS ID, Policy Manager, Hermes, Metering, Registry, One Back Office) exist only here, buried in spaces that are mostly meeting notes. Hence whole spaces with hard tree filters rather than a curated page list that would go stale.",
+      facts: [["reads", "v2 API: spaces → pages (cursor) → bodies in export_view; folders for the ancestor chain"], ["filters", "exclude_trees (page or any ancestor matches an id or title wildcard), exclude_titles, stubs (< 25 prose words), optional roots and modified_since"], ["emits", "kind: doc → kb/confluence/<SPACE>/<pageId>-<slug>.md with breadcrumb = space › ancestors"], ["enriches", "CQL title~ then text~ lookups put related pages on the project cards"], ["key", "page version + hash of the quality thresholds"], ["auth", "CONFLUENCE_EMAIL + CONFLUENCE_API_TOKEN (scoped tokens routed via api.atlassian.com)"]], code: "src/sync/confluence.ts" },
+    curated: { lane: "offline", title: "Manually curated", sub: "hand-written, never synced", summary: "Hand-written glossary, manifesto, design principles and product catalog. Sync never touches this folder; ingest treats the files like any other document.", facts: [["emits", "kind: doc, source_type: manually-curated"], ["key", "sha256 of the file bytes"]], code: "kb/manually-curated/*.md" },
+    sync: { lane: "offline", title: "Sync orchestrator", sub: "npm run sync · incremental", lines: ["connectors → events", "rules (sources.yaml)", "quality heuristics", "duplicate-body skip", "frontmatter writer", "state + pruning"], summary: "Runs each enabled connector as an async generator of events (doc, unchanged, skip, error, meta), applies the sources.yaml rules (first match wins: e.g. gitlab:oneplatform/adrs:* → source_type adr, authority binding), drops a body already written in the same run, renders frontmatter and writes kb/. Deletes only what a completed connector no longer reports.",
+      facts: [["rules", "authority · source_type · skip by id, URL or title"], ["dedupe", "normalised body identical to one already written → skipped (same README in ten repos)"], ["writes", "kb/<source>/**/*.md, byte-identical when only fetched_at changed"], ["state", "data/sync/<source>.json + <source>.skipped.jsonl"], ["safety", "aborted run deletes nothing · --only never deletes · foreign files need --prune-foreign"], ["knobs", "SYNC_CONCURRENCY (4) · sources.yaml"]], code: "src/sync/index.ts · src/sync/quality.ts · src/sync/kb-writer.ts" },
+    kb: { lane: "offline", title: "kb/", sub: "markdown + frontmatter", lines: ["devportal/<kind>/<name>/", "gitlab/<group>/<project>/", "confluence/<SPACE>/", "manually-curated/", "", "frontmatter · breadcrumb"], summary: "The knowledge base is a plain folder of markdown files, one per document, each with YAML frontmatter. It is the contract between sync and ingest: anything that lands here with (or even without) frontmatter gets indexed.",
+      facts: [["frontmatter", "source_id · source_type · kind · title · source_url · authority · lang · last_modified · fetched_at · fingerprint · breadcrumb"], ["source-specific", "entity · owner · system · project · file_path · blob_sha · api_type · space · ancestors · labels · confluence_pages"], ["fallbacks", "no frontmatter: title from the first #, source type from the folder, kind doc"], ["layout", "kb/devportal/<kind>/<name>/ · kb/gitlab/<group>/<project>/ · kb/confluence/<SPACE>/ · kb/manually-curated/"]], code: "src/ingest/loader.ts" },
+    loader: { lane: "offline", title: "Loader", sub: "frontmatter → Document", summary: "Lists every markdown file, parses the frontmatter, computes the sha256 of the file bytes and compares it with the manifest. Only new or changed documents move on; documents that vanished are deleted from the table by source_id. Duplicate source ids are skipped with a warning.",
+      facts: [["in", "kb/**/*.md"], ["out", "Document { meta: sourceId, sourceType, kind, title, authority, lang, contentHash… , body }"], ["cleanup", "HTML comments stripped, \\_ escapes undone so subject_token stays one BM25 token"], ["order", "project cards, then doc, api, code"]], code: "src/ingest/loader.ts · src/ingest/pipeline.ts" },
+    chunker: { lane: "offline", title: "Chunker", sub: "heading-aware · ~450 tokens", summary: "Parses markdown into blocks while tracking the heading stack, packs blocks up to the target, prefers to break at headings once a chunk has a third of the target, and carries the last small block over as overlap when it breaks mid-section. Oversized tables are split with the header row repeated; oversized code keeps its fences. Source files use a declaration-aware variant.",
+      facts: [["text", "\"Breadcrumb > Title > H2 > H3\" ⏎⏎ content"], ["sizes", "CHUNK_TARGET_TOKENS 450 · CHUNK_MAX_TOKENS 700 · CHUNK_OVERLAP_TOKENS 60 · min = target/3"], ["code", "CODE_CHUNK_TARGET_TOKENS 600 · MAX 900 · cut at top-level declarations, line range kept"], ["estimate", "≈ 3.5 chars/token for prose, 3.2 for code (Qwen tokenizer)"], ["id", "<source_id>::<ordinal>"]], code: "src/ingest/chunker.ts" },
+    embedder: { lane: "offline", title: "Embedder", sub: () => `${live.emb} · ${live.dims} dims`, summary: "Qwen3-Embedding via Ollama, multilingual (Italian and English share one space). Documents are embedded as-is; queries get an instruction prefix, an asymmetry worth several points of recall. The model is Matryoshka-trained, so vectors can be truncated to EMBEDDING_DIMENSIONS and renormalised. Model size is the floor on ingest time: ~24 chunks/s for the 0.6b against ~2.9 for the 8b.",
+      facts: [["batches", "INGEST_BATCH_CHUNKS 256 per pass · EMBED_BATCH_SIZE 16 texts per /api/embed call"], ["query", "Instruct: <task>\\nQuery: <question>"], ["truncation", "first N dims kept, L2-renormalised"], ["knobs", "EMBEDDING_MODEL · EMBEDDING_DIMENSIONS · EMBEDDING_QUERY_INSTRUCTION"], ["resumable", "manifest flushed at most every 5 s between batches"]], code: "src/llm/embeddings.ts · src/llm/ollama.ts" },
+    manifest: { lane: "store", title: "Manifest", sub: "data/manifest.json · what is indexed", summary: "What is indexed, with content hashes and chunk counts per source id, plus the embedding model, dimensions and chunk sizes the index was built with. If any of those differ from the current configuration the index is incompatible and rebuilt from scratch.",
+      facts: [["entry", "{ sourceId, relPath, contentHash, chunkCount, indexedAt }"], ["flush", "at most every 5 s during ingest, once at the end"], ["rebuild when", "embedding model · dimensions · chunk sizes change"]], code: "src/ingest/manifest.ts" },
+    bm25: { lane: "store", title: "BM25 index", sub: () => live.bm25 == null ? "data/bm25.json.gz" : `${fmt(live.bm25)} docs · k1 1.2 · b 0.75 · gzipped JSON`, summary: "A small Okapi BM25 implementation persisted as gzipped JSON. Rebuilt from the LanceDB table after every ingest, so the two indexes describe the same chunks by construction. Keyword search matters for product codes, acronyms and proper nouns where embeddings are weak.",
+      facts: [["tokenizer", "NFKD fold · lower-case · [letters|digits]+ · it/en stopwords · split ADR0010 → adr, 0010"], ["scoring", "idf = ln(1 + (N − df + 0.5)/(df + 0.5)) · tf saturation with k1, length norm with b"], ["filters", "source_type · kind · authority · lang, applied per posting"], ["format", "version 2 · ids · lens · postings term → [docIdx, tf, …]"]], code: "src/store/bm25.ts" },
+    lancedb: { lane: "store", title: "LanceDB", sub: () => live.chunks == null ? "data/lancedb/ · chunks table" : `${fmt(live.chunks)} rows · vector float32[${live.dims}] + metadata`, summary: "Embedded, file-based vector database with Apache Arrow columns. One chunks table holds the vector and every metadata column, so retrieval filters are SQL-like predicates pushed into the scan. No ANN index is built: with tens of thousands of vectors a brute-force cosine scan is exact and takes milliseconds.",
+      facts: [["search", "vectorSearch(v).distanceType('cosine').limit(k).where(\"kind IN ('api')\")"], ["writes", "add(rows) per batch · deleteBySourceIds before re-indexing a changed document · optimize() after a bulk ingest"], ["scans", "scanForKeywordIndex (BM25 rebuild) · scanForMap (npm run map)"], ["facets", "distinct(column) feeds the filter chips and this page"]], code: "src/store/vector-store.ts" },
+    question: { lane: "online", title: "Question", sub: "+ history · filters", summary: "Arrives from the CLI, the web chat or the HTTP API as a list of messages plus optional filters (source types, kinds, authorities, languages), an optional topK (≤ 20) and a think flag. The last user message is the question; everything before it is history.",
+      facts: [["endpoints", "POST /api/ask (SSE) · POST /api/ask/sync · npm run ask"], ["filters", "applied identically to the vector scan (SQL predicate) and to BM25 (per posting)"], ["events", "status → sources → thinking* → token* → done | error"]], code: "src/server/index.ts · src/cli/ask.ts" },
+    rewrite: { lane: "online", title: "Query rewrite", sub: "follow-up → standalone", summary: "A follow-up like “and for M2M tokens?” is useless as a search query. With history present, the chat model rewrites the last question into a self-contained query in the same language, resolving pronouns from the last 4 turns. Skipped when there is no history, when QUERY_REWRITE=false, or with the mock provider; any failure falls back to the raw question.",
+      facts: [["model", () => live.chat], ["settings", "temperature 0 · think false · first line only · < 400 chars"], ["knob", "QUERY_REWRITE (true)"]], code: "src/generation/ask.ts › rewriteQuery" },
+    hybrid: { lane: "online", title: "Hybrid search", sub: "two searches, concurrently", lines: ["vector · embed query → cosine scan", "BM25 · tokenize → postings"], summary: "The query is embedded with the instruction prefix and truncated to the index dimensions, then LanceDB returns the closest chunks by cosine distance; in parallel the same query is tokenised like the documents were and scored against the BM25 postings. Both honour the same filters and each returns 24 candidates. BM25 returns ids only; chunks the vector search did not also return are hydrated from LanceDB afterwards.",
+      facts: [["candidates", "RETRIEVAL_CANDIDATES 24 from each index"], ["weights", "RETRIEVAL_VECTOR_WEIGHT 1.0 · RETRIEVAL_BM25_WEIGHT 1.0"], ["vector", "embedQuery → Instruct: <task>⏎Query: <q> → cosine over data/lancedb/"], ["keyword", "tokenize(q) → Okapi BM25 over data/bm25.json.gz (in memory)"], ["why both", "embeddings get paraphrase, BM25 gets ADR0016, TSPAY, X-Correlation-Id"]], code: "src/retrieval/retriever.ts › retrieve · src/store/vector-store.ts · src/store/bm25.ts" },
+    fuse: { lane: "online", title: "Fusion & ranking", sub: "RRF · boost · cap · top 6", summary: "Reciprocal Rank Fusion (Cormack et al. 2009) merges the two ranked lists using positions only, so no score calibration between cosine distances and BM25 scores is needed. Fused scores are multiplied by an authority boost so ADRs and standards edge out descriptive pages, a per-document cap keeps one long page from filling the whole context, and the top-k survive. Optionally the chat model rescores the top 3·k candidates 0–10.",
+      facts: [["formula", "score = w_vec/(60+rank_vec) + w_bm25/(60+rank_bm25)"], ["boost", "binding ×1.15 · normative ×1.12 · descriptive ×1.0"], ["cap", "RETRIEVAL_MAX_CHUNKS_PER_DOC 3"], ["top-k", "RETRIEVAL_TOP_K 6 (request topK ≤ 20)"], ["rerank", "RERANK=llm, pointwise 0–10, off by default"], ["kept for the UI", "vectorRank and bm25Rank per chunk (see the probe below)"]], code: "src/retrieval/retriever.ts" },
+    prompt: { lane: "online", title: "Prompt builder", sub: "rules + numbered context", summary: "The system prompt states the rules and is followed by the context blocks, each numbered and headed with its heading path, source type, kind, authority and URL (GitLab code chunks get a #L<start>-<end> anchor). The last 6 turns of history are appended, then the new question.",
+      facts: [["rules", "answer only from context · say when it is not covered · cite [n] per claim · prefer binding on conflict · name repo + file · same language as the user"], ["citations", "toCitations() numbers chunks in ranking order; excerpt ≤ 600 chars"], ["history", "last 6 non-system turns"]], code: "src/generation/prompt.ts" },
+    llm: { lane: "online", title: "Chat model", sub: () => `${live.chat} · streaming`, summary: "Ollama /api/chat streams two kinds of delta: thinking and content. Both are forwarded as separate SSE events so the UI can show reasoning live in a collapsible panel and the answer token by token underneath. Qwen3 thinks before answering by default; CHAT_THINK and the per-request flag control it.",
+      facts: [["knobs", "CHAT_MODEL · CHAT_THINK (false) · CHAT_NUM_CTX 16384 · CHAT_TEMPERATURE 0.2"], ["abort", "generation stops when the response socket closes"], ["heartbeat", "\": ping\" SSE comment every 15 s keeps proxies from closing the stream"]], code: "src/llm/chat.ts · src/generation/ask.ts" },
+    answer: { lane: "online", title: "Cited answer", sub: "[n] → source cards", summary: "When the stream ends, the [n] markers the model actually used are extracted (first-use order) so the UI can dim unused sources. The done event carries the answer, the thinking, the used citations and timings for rewrite, retrieval and generation.",
+      facts: [["done", "{ answer, thinking, usedCitations, timings: { rewriteMs, retrieveMs, generateMs, totalMs } }"], ["source card", "title → URL · source type · kind · authority · heading path · passage"], ["eval", "npm run eval: hit@k and MRR over evals/questions.jsonl, optional LLM judge"]], code: "src/generation/prompt.ts › extractCitedNumbers · public/index.html" },
+  };
+
+  // Geometry in viewBox units. Offline lane on top with the store column at the right; the online lane
+  // below reads the store through two dashed "bus" lines that drop into the hybrid-search node.
+  const W = 1420, H = 452;
+  const N = (id, x, y, w, h, lane) => ({ id, x, y, w, h, lane });
+  const nodes = [
+    N("devportal", 24, 58, 170, 40, "offline"), N("gitlab", 24, 106, 170, 40, "offline"), N("confluence", 24, 154, 170, 40, "offline"), N("curated", 24, 202, 170, 40, "offline"),
+    N("sync", 270, 58, 170, 184, "offline"),
+    N("kb", 516, 58, 160, 184, "offline"),
+    N("loader", 752, 58, 170, 46, "offline"), N("chunker", 752, 127, 170, 46, "offline"), N("embedder", 752, 196, 170, 46, "offline"),
+    N("manifest", 1078, 58, 298, 46, "store"), N("bm25", 1078, 127, 298, 46, "store"), N("lancedb", 1078, 196, 298, 54, "store"),
+    N("question", 24, 356, 120, 46, "online"), N("rewrite", 194, 356, 130, 46, "online"),
+    N("hybrid", 420, 332, 240, 94, "online"),
+    N("fuse", 702, 356, 170, 46, "online"), N("prompt", 918, 356, 140, 46, "online"), N("llm", 1104, 356, 140, 46, "online"), { ...N("answer", 1290, 356, 106, 46, "online"), label: "Answer", short: "[n] → sources" },
+  ];
+  const byId = Object.fromEntries(nodes.map((n) => [n.id, n]));
+  const cx = (n) => n.x + n.w / 2, cy = (n) => n.y + n.h / 2;
+  const BUS_A = 292, BUS_B = 308;          // y of the two read buses
+  const DROP_A = byId.hybrid.x + 48, DROP_B = byId.hybrid.x + byId.hybrid.w - 48;
+  // Edges: from, to, label, kind, label placement. kind: flow | flow-v | reads | side
+  const edges = [
+    ["devportal", "sync", "", "flow"], ["gitlab", "sync", "", "flow"], ["confluence", "sync", "", "flow"], ["curated", "kb", "", "side"],
+    ["sync", "kb", "writes *.md", "flow", "mid"],
+    ["kb", "loader", "new hash", "flow", "mid"], ["loader", "chunker", "Document", "flow-v"], ["chunker", "embedder", "Chunk[]", "flow-v"],
+    ["embedder", "lancedb", "rows + vectors", "flow", "mid"], ["lancedb", "bm25", "rebuilt from the table", "flow-v"], ["loader", "manifest", "content hashes", "flow", "mid"],
+    ["question", "rewrite", "history", "flow", "above"], ["rewrite", "hybrid", "query", "flow", "above"],
+    ["hybrid", "fuse", "2 × 24 ranked", "flow", "above"], ["fuse", "prompt", "top 6", "flow", "above"], ["prompt", "llm", "messages", "flow", "above"], ["llm", "answer", "tokens", "flow", "above"],
+    ["lancedb", "hybrid", "cosine scan", "reads"], ["bm25", "hybrid", "postings", "reads"],
+  ];
+  /** Orthogonal polyline with rounded corners. */
+  function orth(pts, r = 9) {
+    let d = `M${pts[0][0]},${pts[0][1]}`;
+    for (let i = 1; i < pts.length - 1; i++) {
+      const [px, py] = pts[i - 1], [x, y] = pts[i], [nx, ny] = pts[i + 1];
+      const dx1 = Math.sign(x - px), dy1 = Math.sign(y - py), dx2 = Math.sign(nx - x), dy2 = Math.sign(ny - y);
+      d += ` L${x - dx1 * r},${y - dy1 * r} Q${x},${y} ${x + dx2 * r},${y + dy2 * r}`;
+    }
+    d += ` L${pts.at(-1)[0]},${pts.at(-1)[1]}`;
+    return d;
+  }
+  function edgePath(a, b, kind) {
+    if (kind === "flow-v") {
+      return a.y < b.y ? `M${cx(a)},${a.y + a.h} L${cx(b)},${b.y}` : `M${cx(a)},${a.y} L${cx(b)},${b.y + b.h}`;
+    }
+    if (kind === "reads") {
+      if (a.id === "lancedb") return orth([[a.x + 44, a.y + a.h], [a.x + 44, BUS_A], [DROP_A, BUS_A], [DROP_A, b.y]]);
+      return orth([[a.x + a.w, cy(a)], [W - 22, cy(a)], [W - 22, BUS_B], [DROP_B, BUS_B], [DROP_B, b.y]]);
+    }
+    const x1 = a.x + a.w, y1 = cy(a), x2 = b.x, y2 = cy(b);
+    const mx = (x1 + x2) / 2;
+    return `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`;
+  }
+  function labelPos(a, b, kind, place) {
+    if (kind === "flow-v") {
+      const top = Math.min(a.y + a.h, b.y + b.h), bottom = Math.max(a.y, b.y);
+      return { x: cx(a) + 8, y: (top + bottom) / 2 + 4, anchor: "start" };
+    }
+    if (kind === "reads") {
+      return a.id === "lancedb" ? { x: DROP_A + 6, y: b.y - 7, anchor: "start" } : { x: DROP_B - 6, y: b.y - 7, anchor: "end" };
+    }
+    const gx = (a.x + a.w + b.x) / 2;
+    if (place === "above") return { x: gx, y: Math.min(a.y, b.y) - 7, anchor: "middle" };
+    return { x: gx, y: (cy(a) + cy(b)) / 2 - 7, anchor: "middle" };
+  }
+  const laneColor = (lane) => lane === "online" ? "var(--lane-online)" : lane === "store" ? "var(--c7)" : "var(--lane-offline)";
+  const subOf = (s) => typeof s.sub === "function" ? s.sub() : s.sub;
+
+  function renderDiagram() {
+    let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Pipeline: sources flow through sync into kb/, then loader, chunker and embedder write the manifest, LanceDB and the BM25 index; online, a question is rewritten, searched in both indexes, fused and ranked, prompted, answered by the chat model with citations.">`;
+    svg += `<defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--border)"/></marker><marker id="arr-lit" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker></defs>`;
+    svg += `<text class="lane-label" x="24" y="34">offline</text><text class="lane-sub" x="92" y="34">npm run sync → npm run ingest · incremental, resumable</text>`;
+    svg += `<text class="lane-label" x="1078" y="34">store</text><text class="lane-sub" x="1134" y="34">data/ · files only, nothing to run</text>`;
+    svg += `<line x1="24" y1="272" x2="${W - 24}" y2="272" stroke="var(--border)" stroke-dasharray="2 6"/>`;
+    svg += `<text class="lane-label" x="24" y="312">online</text><text class="lane-sub" x="88" y="312">npm run ask · /api/ask · web chat · read-only</text>`;
+    edges.forEach(([f, t, label, kind, place], i) => {
+      const a = byId[f], b = byId[t];
+      svg += `<path id="e${i}" class="edge${kind === "reads" ? " reads" : ""}" data-f="${f}" data-t="${t}" d="${edgePath(a, b, kind)}" marker-end="url(#arr)"/>`;
+      if (label) { const p = labelPos(a, b, kind, place); svg += `<text class="elabel" x="${p.x}" y="${p.y}" text-anchor="${p.anchor}">${esc(label)}</text>`; }
+    });
+    for (const n of nodes) {
+      const s = STAGES[n.id];
+      const title = n.label || s.title;
+      svg += `<g class="node" data-id="${n.id}" role="button" tabindex="0" aria-label="${esc(title)}"><title>${esc(s.title)}: ${esc(subOf(s))}</title>`;
+      svg += `<rect class="box" x="${n.x}" y="${n.y}" width="${n.w}" height="${n.h}" rx="9"/>`;
+      svg += `<rect x="${n.x}" y="${n.y + 8}" width="3" height="${n.h - 16}" rx="1.5" fill="${laneColor(n.lane)}"/>`;
+      if (n.h > 60) {
+        svg += `<text class="t" x="${n.x + 14}" y="${n.y + 22}">${esc(title)}</text><text class="s" x="${n.x + 14}" y="${n.y + 39}" data-sub="${n.id}">${esc(subOf(s))}</text>`;
+        (s.lines || []).forEach((l, i) => { if (l) svg += `<text class="file" x="${n.x + 14}" y="${n.y + 60 + i * 17}"><tspan class="dot">▸ </tspan>${esc(l)}</text>`; });
+      } else {
+        svg += `<text class="t" x="${n.x + 14}" y="${n.y + 20}">${esc(title)}</text><text class="s" x="${n.x + 14}" y="${n.y + 36}"${n.short ? "" : ` data-sub="${n.id}"`}>${esc(n.short || subOf(s))}</text>`;
+      }
+      svg += `</g>`;
+    }
+    if (!reduceMotion) {
+      edges.forEach(([f, t, , kind], i) => {
+        if (kind === "side") return;
+        const lane = byId[t].lane === "online" ? "online" : byId[t].lane;
+        const color = kind === "reads" ? "var(--c7)" : laneColor(lane === "store" && byId[f].lane !== "store" ? "offline" : lane);
+        const dur = kind === "flow-v" ? 2.4 : kind === "reads" ? 5.5 : 3;
+        for (let k = 0; k < 2; k++) {
+          svg += `<circle class="particle" r="3" fill="${color}"><animateMotion dur="${dur}s" begin="${-(k * dur / 2 + (i % 5) * 0.41)}s" repeatCount="indefinite"><mpath href="#e${i}"/></animateMotion></circle>`;
+        }
+      });
+    }
+    svg += `</svg>`;
+    $("#stage").innerHTML = svg;
+    $("#stage").querySelectorAll(".node").forEach((g) => {
+      g.addEventListener("click", () => select(g.dataset.id));
+      g.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); select(g.dataset.id); } });
+      g.addEventListener("mouseenter", () => light(g.dataset.id));
+      g.addEventListener("mouseleave", () => light(selected));
+    });
+  }
+  let selected = null;
+  function light(id) {
+    document.querySelectorAll("#stage .edge").forEach((p) => {
+      const lit = Boolean(id && (p.dataset.f === id || p.dataset.t === id));
+      p.classList.toggle("lit", lit);
+      p.setAttribute("marker-end", lit ? "url(#arr-lit)" : "url(#arr)");
+    });
+  }
+  const MONO_KEYS = new Set(["formula", "query", "search", "entry", "done", "text", "id", "format", "reads", "emits", "key", "layout", "frontmatter", "source-specific", "keyword", "vector", "scoring", "tokenizer", "events", "endpoints", "writes", "state"]);
+  function select(id, scroll = false) {
+    selected = id;
+    document.querySelectorAll("#stage .node").forEach((g) => g.classList.toggle("on", g.dataset.id === id));
+    light(id);
+    const s = STAGES[id], n = byId[id];
+    const val = (v) => typeof v === "function" ? v() : v;
+    const order = nodes.map((x) => x.id), i = order.indexOf(id);
+    const prev = order[(i - 1 + order.length) % order.length], next = order[(i + 1) % order.length];
+    $("#detail").innerHTML = `
+      <div>
+        <span class="lane"><i style="background:${laneColor(n.lane)}"></i>${n.lane} · stage ${i + 1} of ${order.length}</span>
+        <h3>${esc(s.title)}</h3>
+        <p class="sum">${esc(s.summary)}</p>
+        <div class="code">${esc(s.code)}</div>
+        <div class="nav-stages"><button data-go="${prev}">← ${esc(STAGES[prev].title)}</button><span style="flex:1"></span><button data-go="${next}">${esc(STAGES[next].title)} →</button></div>
+      </div>
+      <dl>${s.facts.map(([k, v]) => `<dt>${esc(k)}</dt><dd class="${MONO_KEYS.has(k) ? "mono" : ""}">${esc(val(v))}</dd>`).join("")}</dl>`;
+    $("#detail").querySelectorAll("[data-go]").forEach((b) => b.onclick = () => { select(b.dataset.go, true); });
+    if (scroll) $("#detail").scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "nearest" });
+  }
+  function refreshSubs() {
+    document.querySelectorAll("#stage text[data-sub]").forEach((t) => { t.textContent = subOf(STAGES[t.dataset.sub]); });
+    if (selected) select(selected);
+  }
+  renderDiagram();
+  select("hybrid");
+
+  // =====================================================================
+  // 2. Live numbers: /api/health and /api/facets
+  // =====================================================================
+  fetch("/api/health").then((r) => r.json()).then((h) => {
+    live.chunks = h.chunks; live.dims = h.dimensions; live.emb = h.embeddingModel; live.chat = h.chatModel; live.bm25 = h.bm25Docs;
+    $("#meta").textContent = `${fmt(h.chunks)} chunks · ${h.dimensions} dims · ${h.embeddingModel} · ${h.chatModel}`;
+    $("#t-chunks").textContent = fmt(h.chunks);
+    $("#t-chunks-s").innerHTML = `<span class="live"><span class="dot"></span>live from /api/health</span>`;
+    $("#t-dims").textContent = fmt(h.dimensions);
+    $("#t-emb").textContent = h.embeddingModel;
+    $("#t-chat").textContent = h.chatModel;
+    $("#t-chat-s").textContent = h.think ? "thinking on by default (CHAT_THINK)" : "thinking off by default (CHAT_THINK)";
+    $("#t-bm25").textContent = fmt(h.bm25Docs);
+    if (h.bm25Docs === 0 && h.chunks > 0) $("#t-bm25-s").textContent = "no keyword index on disk: it is rebuilt when an ingest finishes";
+    else if (h.bm25Docs !== h.chunks) $("#t-bm25-s").textContent = "differs from the table: an ingest is running or was interrupted";
+    $("#veccol").textContent = `vector float32[${h.dimensions}]`;
+    refreshSubs();
+  }).catch(() => {
+    $("#meta").textContent = "API not reachable: static view";
+    $("#t-chunks-s").innerHTML = `<span class="live off"><span class="dot"></span>/api/health unreachable</span>`;
+  });
+
+  // Fixed colour per known value, so a filter never repaints the survivors. Unknowns take the next free slot.
+  const COLORS = {
+    sourceTypes: { devportal: "--c1", gitlab: "--c2", confluence: "--c3", adr: "--c7", "manually-curated": "--c5" },
+    kinds: { doc: "--c1", api: "--c3", project: "--c4", code: "--c7" },
+    authorities: { binding: "--c7", normative: "--c3", descriptive: "--other", unknown: "--other" },
+    langs: { en: "--c1", it: "--c2", und: "--other" },
+  };
+  const SLOTS = ["--c1", "--c2", "--c3", "--c4", "--c5", "--c6", "--c7", "--c8"];
+  fetch("/api/facets").then((r) => r.json()).then((f) => {
+    let docs = 0;
+    for (const el of document.querySelectorAll(".facet")) {
+      const bar = el.querySelector(".bar"), leg = el.querySelector(".leg"), key = bar.dataset.f;
+      const entries = Object.entries(f[key] || {}).sort((a, b) => b[1] - a[1]);
+      const total = entries.reduce((s, [, n]) => s + n, 0) || 1;
+      const used = new Set(Object.values(COLORS[key] || {}));
+      let free = SLOTS.filter((s) => !used.has(s));
+      const colorOf = (v) => (COLORS[key] || {})[v] || (free.shift() || "--other");
+      bar.innerHTML = ""; leg.innerHTML = "";
+      entries.forEach(([v, n]) => {
+        const pct = (100 * n) / total, c = colorOf(v);
+        const seg = document.createElement("div");
+        seg.className = "seg"; seg.style.flex = `${n} 0 0`; seg.style.background = `var(${c})`;
+        seg.title = `${v}: ${fmt(n)} chunks (${pct.toFixed(1)} %)`;
+        if (pct > 14) seg.innerHTML = `<span class="in">${esc(v)} ${pct.toFixed(0)}%</span>`;
+        bar.appendChild(seg);
+        const li = document.createElement("span");
+        li.innerHTML = `<i style="background:var(${c})"></i>${esc(v)} <em>${fmt(n)}</em>`;
+        leg.appendChild(li);
+      });
+      el.querySelector(".fh span").insertAdjacentHTML("beforeend", ` · ${fmt(total)} chunks`);
+      if (key === "sourceTypes") docs = total;
+    }
+    void docs;
+  }).catch(() => {
+    document.querySelectorAll(".facet .leg").forEach((l) => l.innerHTML = `<span style="color:var(--muted)">/api/facets unreachable</span>`);
+  });
+
+  // The chunk table has no document count; approximate it from the probe-free path: count distinct source ids via the map payload
+  // if present (cheap, gzipped, already built for /map.html), else leave the tile as “—”.
+  fetch("/api/map").then((r) => (r.ok ? r.json() : null)).then((m) => {
+    if (!m) { $("#t-docs").textContent = "—"; $("#t-docs-s").textContent = "run npm run map to count documents"; return; }
+    $("#t-docs").textContent = fmt(m.docs);
+    $("#t-docs-s").textContent = `${m.clusters.length} semantic clusters · from the map built ${new Date(m.generatedAt).toLocaleDateString()}`;
+  }).catch(() => {});
+
+  // =====================================================================
+  // 3. Retrieval probe: POST /api/search, then decompose the RRF score
+  // =====================================================================
+  const RRF_K = 60, BOOST = { binding: 1.15, normative: 1.12 };
+  const probeForm = $("#probeForm"), probeQ = $("#probeQ"), probeGo = $("#probeGo"), rrf = $("#rrf"), note = $("#probeNote");
+  $("#probeEx").querySelectorAll("span").forEach((s) => s.onclick = () => { probeQ.value = s.textContent; probeForm.requestSubmit(); });
+  probeForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const q = probeQ.value.trim(); if (!q) return;
+    probeGo.disabled = true; note.textContent = "Embedding the query and scanning both indexes…"; rrf.innerHTML = "";
+    const t0 = performance.now();
+    try {
+      const r = await fetch("/api/search", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ query: q, topK: 10 }) });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+      const res = j.results || [];
+      const ms = Math.round(performance.now() - t0);
+      if (!res.length) { note.textContent = `No candidates in ${ms} ms.`; return; }
+      const contrib = (rank) => (rank ? 1 / (RRF_K + rank) : 0);
+      const maxC = 1 / (RRF_K + 1);
+      const seenDoc = new Map();
+      const both = res.filter((c) => c.vectorRank && c.bm25Rank).length, vOnly = res.filter((c) => c.vectorRank && !c.bm25Rank).length, kOnly = res.filter((c) => !c.vectorRank && c.bm25Rank).length;
+      note.innerHTML = `${res.length} chunks in ${ms} ms round-trip · found by <b>both</b> indexes: ${both} · vector only: ${vOnly} · BM25 only: ${kOnly}. Bars are the raw 1/(60+rank) terms; the score column is what the retriever returned (after the authority boost).`;
+      $("#rrfLegend").hidden = false;
+      rrf.innerHTML = res.map((c, i) => {
+        const v = contrib(c.vectorRank), k = contrib(c.bm25Rank), boost = BOOST[c.authority] || 1;
+        const first = seenDoc.get(c.sourceId); if (first === undefined) seenDoc.set(c.sourceId, i + 1);
+        const bar = (val, rank, cls, label) => `<div class="b ${cls}" title="${label} rank ${rank ?? "—"} → ${val ? val.toFixed(4) : "0"}"><i style="width:${(100 * val / maxC).toFixed(1)}%"></i><span>${rank ? `#${rank}` : "—"}</span></div>`;
+        const authCls = c.authority === "binding" || c.authority === "normative" ? c.authority : "";
+        return `<div class="row">
+          <div class="n">${i + 1}</div>
+          <div class="who"><div class="t" title="${esc(c.title)}">${esc(c.title)}</div><div class="p" title="${esc(c.headingPath)}">${esc(c.headingPath)}</div>
+            <div class="tags"><span class="tag">${esc(c.sourceType)}</span>${c.kind !== "doc" ? `<span class="tag">${esc(c.kind)}</span>` : ""}<span class="tag ${authCls}">${esc(c.authority)}${boost > 1 ? ` ×${boost}` : ""}</span>${first !== undefined ? `<span class="tag">same doc as #${first}</span>` : ""}</div></div>
+          <div class="bars">${bar(v, c.vectorRank, "v", "vector")}${bar(k, c.bm25Rank, "k", "BM25")}</div>
+          <div class="sc">${c.score.toFixed(4)}<small>${v && k ? "both" : v ? "vector only" : "BM25 only"}</small></div>
+        </div>`;
+      }).join("");
+    } catch (err) {
+      note.textContent = `Retrieval failed: ${err.message}`;
+    } finally { probeGo.disabled = false; }
+  });
+
+  // =====================================================================
+  // 4. BM25 tokenizer, ported verbatim from src/store/bm25.ts
+  // =====================================================================
+  const STOPWORDS = new Set((
+    "a an and are as at be but by for from has have if in into is it its of on or that the their then there these they this to was were will with " +
+    "il lo la i gli le un uno una di del della dei delle dello da dal dalla dai dalle in nel nella nei nelle su sul sulla sui sulle per con e ed o od ma che chi cui non si è al alla ai alle allo come anche più questo questa questi queste quello quella sono essere"
+  ).split(/\s+/));
+  function tokenizeExplained(text) {
+    const folded = text.normalize("NFKD").replace(/[̀-ͯ]/g, "").toLowerCase();
+    const raw = folded.match(/[\p{L}\p{N}]+/gu) ?? [];
+    const out = [];
+    for (const tok of raw) {
+      if (tok.length < 2 || STOPWORDS.has(tok)) { out.push({ t: tok, kind: "stop" }); continue; }
+      out.push({ t: tok, kind: "tok" });
+      const parts = tok.match(/\p{L}+|\p{N}+/gu);
+      if (parts && parts.length > 1) for (const p of parts) if (p.length >= 2 && !STOPWORDS.has(p)) out.push({ t: p, kind: "split" });
+    }
+    return out;
+  }
+  const tokIn = $("#tokIn"), tokOut = $("#tokOut");
+  const renderTok = () => {
+    const toks = tokenizeExplained(tokIn.value);
+    const kept = toks.filter((t) => t.kind !== "stop").length;
+    tokOut.innerHTML = toks.map((t) => `<span class="t ${t.kind}" title="${t.kind === "stop" ? "dropped: stopword or too short" : t.kind === "split" ? "extra token from splitting letters and digits" : "indexed token"}">${esc(t.t)}</span>`).join("") + `<span class="t" style="background:transparent;color:var(--muted)">${kept} indexed</span>`;
+  };
+  tokIn.addEventListener("input", renderTok); renderTok();
+})();
+</script>
+</body>
+</html>

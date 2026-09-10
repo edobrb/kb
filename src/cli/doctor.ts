@@ -4,6 +4,7 @@ import { listModels } from "../llm/ollama.js";
 import { readManifest } from "../ingest/manifest.js";
 import { Retriever } from "../retrieval/retriever.js";
 import { builtinDefinitions, builtinEnrichers } from "../sync/index.js";
+import { loadTaxonomy } from "../citymap.js";
 import { loadSourcesConfig } from "../sync/sources-config.js";
 import { readState } from "../sync/state.js";
 
@@ -71,6 +72,13 @@ try {
   }
 } catch (err) {
   bad(`sources.yaml: ${(err as Error).message}`);
+  failures++;
+}
+try {
+  const tax = await loadTaxonomy(config.sync.taxonomyFile);
+  ok(`taxonomy.yaml: ${tax.rules.length} City Map placement rules, ${Object.keys(tax.nodes).length} extra nodes (${config.sync.taxonomyFile})`);
+} catch (err) {
+  bad(`taxonomy.yaml: ${(err as Error).message}`);
   failures++;
 }
 

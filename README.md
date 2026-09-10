@@ -160,7 +160,7 @@ npm run serve                 # then open http://127.0.0.1:8787
 | `npm run ask -- "question"` | Full pipeline, streams the answer to the terminal, prints cited sources and timings. Flags: `--k 8`, `--source-type adr,confluence`, `--kind doc,api` (api = OpenAPI/AsyncAPI definitions, project = repository cards), `--authority binding`, `--lang en`, `--json` |
 | `npm run search -- "query"` | **Retrieval only** (no LLM): shows fused rank, vector rank, BM25 rank and text of each chunk. The main debugging tool — most RAG problems are retrieval problems. |
 | `npm run serve` | Starts the HTTP API + web UI on `HOST:PORT` (default `127.0.0.1:8787`) |
-| `npm run map` | Projects every chunk vector to 2-D with UMAP, groups the chunks into semantic clusters, and writes `data/kb-map.json.gz`, rendered by the web UI at `/map.html`. Re-run after `ingest`. Flags: `--clusters 8`, `--neighbors 15`, `--min-dist 0.1`, `--epochs 400`, `--project 256`, `--seed 42`, `--out <file>`, `--relabel` (recompute names only, ~1 s) |
+| `npm run map` | Projects every chunk vector to 2-D with UMAP, groups the chunks into semantic clusters, places every document on the City Map (Dev Portal catalog + `taxonomy.yaml`) and writes `data/kb-map.json.gz`, rendered by the web UI at `/map.html`. Re-run after `ingest`. Flags: `--clusters 8`, `--neighbors 15`, `--min-dist 0.1`, `--epochs 400`, `--project 256`, `--seed 42`, `--out <file>`, `--relabel` (recompute names and City Map placements only, ~1 s) |
 | `npm run eval` | Retrieval metrics (hit@k, MRR) over `evals/questions.jsonl`; `--answers` also grades answers by expected keywords |
 | `npm run doctor` | Environment check: Ollama reachable, models pulled, kb/ present, index consistency, facets, sync sources reachable with the configured tokens |
 | `npm test` / `npm run typecheck` | Unit tests (vitest) / `tsc --noEmit` |
@@ -214,13 +214,14 @@ Index size, models in use; distinct `source_type` / `authority` / `lang` values 
 ### `GET /api/map`
 
 The 2-D projection built by `npm run map`, served gzipped straight from disk. 404 with a hint when it has not
-been built yet. Consumed by `/map.html` (see [6.1](#61-knowledge-base-map-maphtml)). Shape:
+been built yet. Consumed by `/map.html` (see [6.2](#62-knowledge-base-map-maphtml)). Shape:
 
 ```jsonc
 {
-  "version": 2, "chunks": 60633, "docs": 7101, "generatedAt": "…", "params": { … },
-  "dict":      { "groups": ["confluence/TeamCore", …], "sourceTypes": […], "langs": […], "authorities": […] },
-  "documents": [{ "id": "<sourceId>", "title": "…", "url": "…", "path": "…", "g": 0, "s": 0, "l": 1, "a": 2 }],
+  "version": 3, "chunks": 60633, "docs": 7101, "generatedAt": "…", "params": { … },
+  "dict":      { "groups": ["confluence/TeamCore", …], "sourceTypes": […], "langs": […], "authorities": […],
+                 "areas": ["Platform", …], "subareas": ["Core Services - Foundation", …], "modules": ["Workspace", …] },
+  "documents": [{ "id": "<sourceId>", "title": "…", "url": "…", "path": "…", "g": 0, "s": 0, "l": 1, "a": 2, "ar": 0, "sa": 3, "mo": 12 }],
   "clusters":  [{ "id": 0, "name": "TSC OpenTelemetry Legacy", "n": 1007, "x": 1.2, "y": -3.4 }],
   "points":    { "x": [], "y": [], "doc": [], "ord": [], "cl": [], "head": [] },
   "labels":    [{ "x": 1.2, "y": -3.4, "text": "…", "n": 1007, "level": 0 }]
@@ -228,7 +229,8 @@ been built yet. Consumed by `/map.html` (see [6.1](#61-knowledge-base-map-maphtm
 ```
 
 Document metadata is stored once and referenced by index from `points.doc`, repeated strings live in `dict`,
-and per-chunk data sits in parallel arrays. Chunk ids are not shipped: a chunk id is `` `${documents[doc].id}::${ord}` ``.
+and per-chunk data sits in parallel arrays. `ar` / `sa` / `mo` are the document's City Map area, sub-area and
+module (see [6.2](#62-knowledge-base-map-maphtml)); a document nobody can place points at the "Not in City Map" entry. Chunk ids are not shipped: a chunk id is `` `${documents[doc].id}::${ord}` ``.
 
 ### `POST /api/chunk`
 
@@ -244,7 +246,18 @@ source cards with title → original URL, source-type and authority badges, expa
 filter chips, multi-turn conversation, and a **Re-index** button. Auto-scroll follows the stream but stops
 as soon as you scroll up to read.
 
-### 6.1 Knowledge base map (`/map.html`)
+### 6.1 Architecture page (`/architecture.html`)
+
+A third static page explains the system itself, for onboarding and for checking that the running index matches
+the description: an **animated pipeline diagram** (offline lane: sources → sync → `kb/` → loader → chunker →
+embedder → LanceDB / BM25 / manifest; online lane: question → rewrite → both searches → RRF → boost/cap → prompt →
+model → cited answer) whose stages open a detail panel with the keys, knobs and code paths; **live composition
+bars** of the chunk table by source type, kind, authority and language (`/api/facets`); the header and stat
+tiles from `/api/health`; a **retrieval probe** that runs `POST /api/search` and splits every result's RRF score
+into its vector and BM25 terms; and a client-side copy of the BM25 tokenizer to try inputs against. Particles
+are disabled under `prefers-reduced-motion`.
+
+### 6.2 Knowledge base map (`/map.html`)
 
 A second static page draws the **whole vector index as a 2-D map**: every chunk (or every document, as the
 centroid of its chunks) is a dot, and dots that are close in embedding space are close on screen. It is the
@@ -258,20 +271,35 @@ npm run map            # ~25 s for 10k chunks; writes data/kb-map.json.gz
 npm run serve          # → http://127.0.0.1:8787/map.html
 ```
 
-Cluster names are recomputed in about a second with `npm run map -- --relabel`, which rewrites the names and
-labels on the existing projection instead of redoing it — worth knowing, because naming is the part you will
-want to iterate on.
+Cluster names and City Map placements are recomputed in about a second with `npm run map -- --relabel`, which
+rewrites them on the existing projection instead of redoing it — worth knowing, because those are the parts you
+will want to iterate on.
 
-**Colours mean meaning, not provenance.** Before UMAP runs, the vectors are grouped with spherical k-means
-(`--clusters`, 8 by default) and each cluster is named after the words that are frequent inside it and rare
-elsewhere (TF-IDF over titles and heading paths, counting each term once per document so one verbose page cannot name a
-whole cluster, and discarding terms that appear in every cluster, which is what stops corpus boilerplate such
-as "Analisi Funzionale" from becoming every label). So a colour is a *topic* — "TSC OpenTelemetry Legacy",
-"Analisi Funzionale Finanza" — and the same names are drawn on the map as labels. The clustering runs on the
-embedding vectors, not on the 2-D coordinates, so it is not distorted by the projection. Colour by space,
-source type, language or authority is still one dropdown away.
+**Colours are the City Map.** Every document is placed on TeamSystem's City Map — `area › sub-area › module`,
+the taxonomy the Dev Portal catalog maintains as `kind: area / module / component` entities — and the map is
+coloured by sub-area by default ("Core Services - Foundation", "Integration", "Tax", …), with the area and the
+module levels one dropdown away; the module level is the product level (*Cassa in Cloud*, *Workspace*, *IAM (TS
+ID)*). Placement is automatic for everything the catalog describes (`src/citymap.ts`): a Dev Portal page belongs
+to its entity's module, a repository to the module of the component whose `catalog-info` points at it, and a
+document whose owning team keeps all its modules in one sub-area inherits that sub-area. `taxonomy.yaml` covers
+the rest — Confluence spaces and GitLab groups without a catalog entry — with a few dozen rules that name the City
+Map node they belong to (`match` on source, path glob, space, ancestor title or owner → `module` / `subarea` /
+`area`). The catalog copy is saved by `npm run sync` in `data/sync/devportal.json`; without it the rules alone
+still run, and a map with no placements falls back to colouring by semantic cluster. Documents nobody can place
+are an explicit *Not in City Map* legend entry, never silently mixed in; `npm run map` prints how many were
+placed and by which route (catalog entity, repository, rule, owner).
 
-**Reading a source.** Hovering a dot shows its title, heading path, cluster and space. Clicking it fills the
+**Semantic clusters are still computed and drawn as labels.** Before UMAP runs, the vectors are grouped with
+spherical k-means (`--clusters`, 8 by default) and each cluster is named after the words that are frequent
+inside it and rare elsewhere (TF-IDF over titles and heading paths, counting each term once per document so one
+verbose page cannot name a whole cluster, and discarding terms that appear in every cluster, which is what stops
+corpus boilerplate such as "Analisi Funzionale" from becoming every label). A cluster name is a *topic* — "TSC
+OpenTelemetry Legacy", "Analisi Funzionale Finanza" — drawn on the map at the cluster's centre, and **colour:
+meaning** colours by it, which is the way to see where the embedding disagrees with the City Map. The
+clustering runs on the embedding vectors, not on the 2-D coordinates, so it is not distorted by the projection.
+Colour by space, source type, language or authority is also available.
+
+**Reading a source.** Hovering a dot shows its title, heading path, module, cluster and space. Clicking it fills the
 **Selected** panel at the top of the sidebar, which loads the chunk's full text from `POST /api/chunk` and
 offers an **Open source ↗** button. Double-clicking a dot opens its Confluence page or repository file
 straight away, and cmd/ctrl-click does the same.
@@ -510,6 +538,7 @@ Everything is an environment variable (`.env`, see `.env.example` for the full a
 | `PORT` / `HOST` | `8787` / `127.0.0.1` | Set `HOST=0.0.0.0` to reach the UI from other machines on the LAN |
 | `EMBEDDING_PROVIDER` / `CHAT_PROVIDER` | `ollama` | `mock` runs the whole pipeline without Ollama (tests/CI) |
 | `SOURCES_FILE` | `./sources.yaml` | Scope, filters and rules for `npm run sync` |
+| `TAXONOMY_FILE` | `./taxonomy.yaml` | City Map placements for sources the Dev Portal catalog does not describe (Confluence spaces, uncatalogued GitLab groups); used by `npm run map` |
 | `DEVPORTAL_BASE_URL` / `DEVPORTAL_TOKEN` | `https://development.teamsystem.com` / — | Backstage bearer token (see 7.0; `./refresh-dev-portal-token.sh`) |
 | `GITLAB_BASE_URL` / `GITLAB_TOKEN` | `https://biosphere.teamsystem.com` / — | PAT with `read_api` |
 | `CONFLUENCE_BASE_URL` / `CONFLUENCE_EMAIL` / `CONFLUENCE_API_TOKEN` | `https://teamsystem.atlassian.net` / — / — | Atlassian API token (classic or scoped): indexes the configured spaces and enriches the project cards |
@@ -658,12 +687,14 @@ ai-wiki/
 │                                by `npm run sync` (gitlab holds docs, API specs and __project.md cards), kb/manually-curated/ by hand
 ├── ARCHITECTURE.md              the knowledge base end to end: sources, filters, kinds, incremental keys, storage
 ├── sources.yaml                 what sync gathers (portal excludes, GitLab groups/globs, Confluence spaces + tree filters) and rules
+├── taxonomy.yaml                City Map placements for what the catalog does not describe (Confluence spaces, uncatalogued GitLab groups)
 ├── refresh-dev-portal-token.sh  prints a fresh Dev Portal bearer token (user tokens last ~1 h)
 ├── data/                        generated index (LanceDB, BM25, manifest, kb-map.json.gz) and data/sync/ state + skipped lists — git-ignored
 ├── evals/questions.jsonl        evaluation set
 ├── scripts/setup-ollama.sh      pulls the two models · scripts/bench/ retrieval and embedding benchmarks
 ├── src/
 │   ├── config.ts                env → typed config
+│   ├── citymap.ts               the City Map (catalog areas › modules › components) + taxonomy.yaml rules → where a document sits
 │   ├── types.ts                 shared types (Chunk, RetrievedChunk, Citation, AskEvent…)
 │   ├── llm/
 │   │   ├── ollama.ts            /api/embed + streaming /api/chat client (no SDK)
@@ -671,7 +702,7 @@ ai-wiki/
 │   │   └── chat.ts              chat provider (Ollama | mock)
 │   ├── sync/
 │   │   ├── index.ts             orchestrator: run connectors, apply rules, skip duplicates, write kb/, prune, persist state
-│   │   ├── devportal.ts         Backstage catalog + TechDocs connector (page excludes, generated/stub gates; emits coveredRepos, repoEntities)
+│   │   ├── devportal.ts         Backstage catalog + TechDocs connector (page excludes, generated/stub gates; emits coveredRepos, repoEntities, citymap)
 │   │   ├── gitlab.ts            GitLab connector: docs, API specs, project cards, optional code (head-commit incremental)
 │   │   ├── confluence.ts        Confluence v2 source connector (spaces, ancestry, tree filters) + the CQL lookup for the cards
 │   │   ├── quality.ts           prose statistics, stub / generated-page / boilerplate-README / duplicate heuristics
@@ -699,7 +730,8 @@ ai-wiki/
 │   └── server/
 │       ├── index.ts             Fastify: /api/ask (SSE), /api/ask/sync, /api/search, /api/map, /api/ingest, …
 │       ├── public/index.html    chat UI
-│       └── public/map.html      2-D map: clusters, labels, density LOD (canvas, no build step)
+│       ├── public/map.html      2-D map: City Map colours, cluster labels, density LOD (canvas, no build step)
+│       └── public/architecture.html  interactive architecture page: animated pipeline, live facets, RRF probe
 └── tests/                       vitest unit tests (chunkers, loader, BM25, prompt, sync connectors with fake fetch)
 ```
 

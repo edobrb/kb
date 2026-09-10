@@ -4,6 +4,7 @@ import { htmlToMarkdown } from "./html.js";
 import { HttpError, mapLimit } from "./http.js";
 import { slugify } from "./kb-writer.js";
 import { detectLang } from "./lang.js";
+import { buildCityMap, CITYMAP_ENTITY_FIELDS, cityMapPath, placeEntity, type CityMap, type CityMapEntity } from "../citymap.js";
 import type { EntitySummary } from "./project-card.js";
 import { isStub, looksGenerated } from "./quality.js";
 import { matchesAny, wildcardToRegExp } from "./sources-config.js";
@@ -38,7 +39,11 @@ interface Entity {
     tags?: string[];
   };
   spec?: Record<string, unknown>;
+  relations?: { type: string; targetRef: string }[];
 }
+
+/** Annotations that tell which GitLab repository an entity lives in, most specific first. */
+const LOCATION_KEYS = ["backstage.io/source-location", "backstage.io/managed-by-location", "backstage.io/techdocs-ref"] as const;
 
 interface TechDocsMetadata {
   site_name?: string;
@@ -68,15 +73,16 @@ const REMOVE = [
   "header",
 ];
 
-async function listEntities(ctx: ConnectorContext, filter: string): Promise<Entity[]> {
+async function listEntities(ctx: ConnectorContext, filter: string, fields?: readonly string[]): Promise<Entity[]> {
   const base = ctx.baseUrl;
   const out: Entity[] = [];
+  const fieldsParam = fields?.length ? `&fields=${encodeURIComponent(fields.join(","))}` : "";
   // Newer Backstage: cursor-based /entities/by-query.
   try {
     let cursor: string | undefined;
     let guard = 0;
     do {
-      const url = `${base}/api/catalog/entities/by-query?filter=${encodeURIComponent(filter)}&limit=500${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
+      const url = `${base}/api/catalog/entities/by-query?filter=${encodeURIComponent(filter)}&limit=500${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}${fieldsParam}`;
       const page = await ctx.http.json<{ items: Entity[]; pageInfo?: { nextCursor?: string } }>(url);
       out.push(...(page.items ?? []));
       cursor = page.pageInfo?.nextCursor;
@@ -87,7 +93,7 @@ async function listEntities(ctx: ConnectorContext, filter: string): Promise<Enti
   }
   // Older Backstage: offset-based /entities.
   for (let offset = 0, guard = 0; guard < 1000; guard++) {
-    const url = `${base}/api/catalog/entities?filter=${encodeURIComponent(filter)}&limit=500&offset=${offset}`;
+    const url = `${base}/api/catalog/entities?filter=${encodeURIComponent(filter)}&limit=500&offset=${offset}${fieldsParam}`;
     const items = await ctx.http.json<Entity[]>(url);
     out.push(...items);
     if (items.length < 500) break;
@@ -184,6 +190,29 @@ export const syncDevPortal: Connector = async function* (ctx): AsyncGenerator<Sy
   const entities = await listEntities(ctx, "metadata.annotations.backstage.io/techdocs-ref");
   ctx.log(`Dev Portal: ${entities.length} entities with TechDocs`);
 
+  // The City Map (area → sub-area → module → component) is what the knowledge-base map and its legend classify
+  // documents by. Three cheap listings; when they fail the previous run's copy is kept rather than aborting.
+  const gitlabHost = ctx.settings?.["gitlabHost"] || undefined;
+  const repoOf = (e: CityMapEntity): string | null => {
+    for (const key of LOCATION_KEYS) {
+      const repo = gitlabProjectFromLocation(e.metadata.annotations?.[key], gitlabHost);
+      if (repo) return repo;
+    }
+    return null;
+  };
+  let cityMap = (ctx.previous.meta["citymap"] as CityMap | undefined) ?? null;
+  try {
+    const [areas, modules, components] = await Promise.all([
+      listEntities(ctx, "kind=area", CITYMAP_ENTITY_FIELDS),
+      listEntities(ctx, "kind=module", CITYMAP_ENTITY_FIELDS),
+      listEntities(ctx, "kind=component", CITYMAP_ENTITY_FIELDS),
+    ]);
+    cityMap = buildCityMap({ areas, modules, components }, repoOf);
+    ctx.log(`Dev Portal: City Map with ${areas.length} areas, ${modules.length} modules, ${Object.keys(cityMap.parts).length} components/APIs placed on it`);
+  } catch (err) {
+    ctx.log(`Dev Portal: City Map not refreshed (${(err as Error).message})${cityMap ? " — keeping the previous copy" : ""}`);
+  }
+
   let entityIndex = 0;
   for (const e of entities) {
     entityIndex++;
@@ -192,12 +221,12 @@ export const syncDevPortal: Connector = async function* (ctx): AsyncGenerator<Sy
     const prefix = `devportal:${ref}/`;
     const ann = e.metadata.annotations ?? {};
 
-    for (const key of ["backstage.io/source-location", "backstage.io/managed-by-location", "backstage.io/techdocs-ref"]) {
-      const repo = gitlabProjectFromLocation(ann[key], ctx.settings?.["gitlabHost"] || undefined);
+    for (const key of LOCATION_KEYS) {
+      const repo = gitlabProjectFromLocation(ann[key], gitlabHost);
       if (!repo) continue;
       coveredRepos.add(repo);
       // Prefer the entity whose docs live in the repo (techdocs-ref) over catalog repos that merely register it.
-      if (!repoEntities[repo] || key === "backstage.io/techdocs-ref") repoEntities[repo] = summarizeEntity(e, base);
+      if (!repoEntities[repo] || key === "backstage.io/techdocs-ref") repoEntities[repo] = summarizeEntity(e, base, cityMap);
     }
 
     if (ctx.only && !ref.includes(ctx.only)) {
@@ -292,6 +321,7 @@ export const syncDevPortal: Connector = async function* (ctx): AsyncGenerator<Sy
               system: spec["system"],
               lifecycle: spec["lifecycle"],
               component_type: spec["type"],
+              ...cityMapFields(cityMap, kind, name),
               tags: e.metadata.tags,
               source_location: sourceLocation,
               techdocs_ref: ann["backstage.io/techdocs-ref"]?.replace(/^url:/, ""),
@@ -351,7 +381,7 @@ export const syncDevPortal: Connector = async function* (ctx): AsyncGenerator<Sy
           lastModified: null,
           body,
           fingerprint,
-          extra: { breadcrumb: `Dev Portal › API › ${e.metadata.title ?? name}`, entity: ref, entity_kind: kind, entity_name: name, owner: e.spec?.["owner"], system: e.spec?.["system"], api_type: apiType, tags: e.metadata.tags },
+          extra: { breadcrumb: `Dev Portal › API › ${e.metadata.title ?? name}`, entity: ref, entity_kind: kind, entity_name: name, owner: e.spec?.["owner"], system: e.spec?.["system"], ...cityMapFields(cityMap, kind, name), api_type: apiType, tags: e.metadata.tags },
         },
       };
     }
@@ -360,6 +390,7 @@ export const syncDevPortal: Connector = async function* (ctx): AsyncGenerator<Sy
   yield { type: "meta", key: "entityBuilds", value: builds };
   yield { type: "meta", key: "coveredRepos", value: [...coveredRepos].sort() };
   yield { type: "meta", key: "repoEntities", value: repoEntities };
+  if (cityMap) yield { type: "meta", key: "citymap", value: cityMap };
   yield { type: "meta", key: "entities", value: entities.length };
 };
 
@@ -369,11 +400,25 @@ export function entityExcluder(patterns: string[]): (kind: string, name: string,
   return (kind, name, ref) => res.some((re) => re.test(`${kind}/${name}`) || re.test(ref));
 }
 
-function summarizeEntity(e: Entity, base: string): EntitySummary {
+/** Frontmatter fields that pin a document to the City Map — only the levels the catalog actually knows. */
+function cityMapFields(cm: CityMap | null, kind: string, name: string): Partial<Record<"module" | "subarea" | "area", string>> {
+  const p = placeEntity(cm, kind, name);
+  const out: Partial<Record<"module" | "subarea" | "area", string>> = {};
+  if (p.module) out.module = p.module;
+  if (p.subarea) out.subarea = p.subarea;
+  if (p.area) out.area = p.area;
+  return out;
+}
+
+function summarizeEntity(e: Entity, base: string, cityMap: CityMap | null = null): EntitySummary {
   const { ns, kind, name, ref } = entityRef(e);
   const spec = e.spec ?? {};
   const str = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
+  const place = cityMapFields(cityMap, kind, name);
+  const breadcrumb = cityMapPath(place, cityMap);
   return {
+    ...place,
+    ...(breadcrumb ? { cityMap: breadcrumb } : {}),
     ref,
     kind,
     title: str(e.metadata.title),

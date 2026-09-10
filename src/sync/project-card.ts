@@ -11,6 +11,12 @@ export interface EntitySummary {
   lifecycle?: string;
   type?: string;
   tags?: string[];
+  /** City Map position (see src/citymap.ts): module the entity belongs to and the levels above it. */
+  module?: string;
+  subarea?: string;
+  area?: string;
+  /** The same as a breadcrumb, "Platform › Core Services - Foundation › Workspace". */
+  cityMap?: string;
   /** Portal URL of the entity page. */
   url?: string;
 }
@@ -76,6 +82,7 @@ export function buildProjectCard(p: ProjectCardInput): { title: string; body: st
       e.tags?.length ? `tags ${e.tags.join(", ")}` : "",
     ].filter(Boolean);
     lines.push(`- Dev Portal: ${bits.join("; ")}`);
+    if (e.cityMap) lines.push(`- City Map: ${e.cityMap}${e.module ? ` (module \`${e.module}\`)` : ""}`);
     if (e.description) lines.push(`- Dev Portal description: ${e.description.trim()}`);
   } else {
     lines.push("- Dev Portal: not catalogued");

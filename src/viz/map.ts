@@ -21,6 +21,10 @@ export interface MapInputRow {
   rel_path: string;
   ordinal: number;
   heading_path: string;
+  /** City Map labels of the document (see src/citymap.ts); absent or "" = not placed. */
+  area?: string;
+  subarea?: string;
+  module?: string;
   vector: ArrayLike<number>;
 }
 
@@ -36,6 +40,10 @@ export interface MapDocument {
   s: number;
   l: number;
   a: number;
+  /** Indices into dict.areas / subareas / modules: the City Map position ("Not in City Map" when unplaced). */
+  ar: number;
+  sa: number;
+  mo: number;
 }
 
 export interface MapCluster {
@@ -59,14 +67,14 @@ export interface MapLabel {
 }
 
 export interface KbMap {
-  version: 2;
+  version: 3;
   generatedAt: string;
   embeddingModel: string;
   dimensions: number;
   chunks: number;
   docs: number;
   params: MapParams;
-  dict: { groups: string[]; sourceTypes: string[]; langs: string[]; authorities: string[] };
+  dict: { groups: string[]; sourceTypes: string[]; langs: string[]; authorities: string[]; areas: string[]; subareas: string[]; modules: string[] };
   documents: MapDocument[];
   /** Semantic groups found in the embedding space; `points.cl` indexes this array. */
   clusters: MapCluster[];
@@ -543,6 +551,9 @@ export async function buildMap(rows: MapInputRow[], opts: BuildMapOptions): Prom
   const sourceTypes: string[] = [];
   const langs: string[] = [];
   const authorities: string[] = [];
+  const areas: string[] = [];
+  const subareas: string[] = [];
+  const modules: string[] = [];
   const intern = (dict: string[], v: string): number => {
     const i = dict.indexOf(v);
     return i >= 0 ? i : dict.push(v) - 1;
@@ -573,6 +584,9 @@ export async function buildMap(rows: MapInputRow[], opts: BuildMapOptions): Prom
         s: intern(sourceTypes, r.source_type),
         l: intern(langs, r.lang),
         a: intern(authorities, r.authority),
+        ar: intern(areas, r.area ?? ""),
+        sa: intern(subareas, r.subarea ?? ""),
+        mo: intern(modules, r.module ?? ""),
       });
     }
     const [px, py] = coords[i] as [number, number];
@@ -614,14 +628,14 @@ export async function buildMap(rows: MapInputRow[], opts: BuildMapOptions): Prom
   ];
 
   return {
-    version: 2,
+    version: 3,
     generatedAt: new Date().toISOString(),
     embeddingModel: opts.embeddingModel,
     dimensions: opts.dimensions,
     chunks: n,
     docs: documents.length,
     params: { ...params, nNeighbors },
-    dict: { groups, sourceTypes, langs, authorities },
+    dict: { groups, sourceTypes, langs, authorities, areas, subareas, modules },
     documents,
     clusters,
     points: { x, y, doc, ord, head, cl },

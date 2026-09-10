@@ -1,0 +1,152 @@
+# Where documents sit on TeamSystem's City Map (area › sub-area › module) when the Dev Portal catalog does not
+# say. The catalog is the source of truth: every Dev Portal page and every repository with a catalog-info is
+# placed from it automatically (component → module → sub-area → area), and so is any document whose owning
+# team keeps all its modules in one place. This file only covers the rest — Confluence spaces and GitLab
+# groups without a catalog entry — by naming the City Map node they belong to. Names are the catalog entity
+# names (`iam`, `core-services-foundation`, `platform`…); `npm run map -- --relabel` re-applies changes in seconds.
+#
+# Rule = match (all listed conditions must hold; a list means "any of") + one target level.
+#   match.source    source type: devportal | gitlab | confluence | manually-curated
+#   match.path      kb-relative path glob(s), `*` also matches `/` — "gitlab/oneplatform/adrs/*"
+#   match.space     Confluence space key(s)
+#   match.ancestor  glob matched against any ancestor page title — "POLICY MANAGER*"
+#   match.owner     catalog owner (team) — "iam"
+#   module | subarea | area   the City Map node to place the document at
+# The first matching rule wins, so specific rules come before broad ones.
+
+# Nodes that exist only here: work that has no module in the catalog but a clear home on the map.
+nodes:
+  architecture:
+    title: Architecture & Governance
+    parent: platform
+  curated:
+    title: OnePlatform · curated notes
+    parent: platform
+
+rules:
+  # ---- Confluence: one space ≈ one team; the tree root inside the space names the module -------------------
+  - match: { source: confluence, space: TeamCore, ancestor: "POLICY MANAGER*" }
+    module: policy-manager
+  - match: { source: confluence, space: TeamCore, ancestor: "GDPR LOG*" }
+    module: gdpr-log
+  - match: { source: confluence, space: TeamCore, ancestor: Hermes }
+    module: hermes
+  - match: { source: confluence, space: TeamCore }
+    module: iam
+  - match: { source: confluence, space: TeamMeteri }
+    module: metering
+  - match: { source: confluence, space: [TeamWorksp, RPDD] }
+    module: workspace
+  - match: { source: confluence, space: OBO }
+    module: backoffice
+  - match: { source: confluence, space: TONEPLAT, ancestor: "Modulo Telematici*" }
+    module: telematici
+  - match: { source: confluence, space: TONEPLAT, ancestor: "Orchestratore Fiscale*" }
+    module: orchestratore-fiscale
+  - match: { source: confluence, space: TONEPLAT, ancestor: "Tax Manager*" }
+    subarea: tax
+  - match: { source: confluence, space: TONEPLAT, ancestor: "Interoperabilit*" }
+    subarea: integration
+  - match: { source: confluence, space: TONEPLAT, ancestor: "API GOVERNANCE" }
+    subarea: architecture
+  - match: { source: confluence, space: TONEPLAT, ancestor: NCS }
+    module: ncs
+  - match: { source: confluence, space: TONEPLAT, ancestor: Foundation }
+    subarea: core-services-foundation
+  - match: { source: confluence, space: TONEPLAT, ancestor: Monetization }
+    subarea: core-services-monetization
+  - match: { source: confluence, space: TONEPLAT, ancestor: Experience }
+    subarea: core-services-experience-ice
+  - match: { source: confluence, space: TONEPLAT }
+    area: platform
+  - match: { source: confluence, space: CTO, ancestor: ["Platform", "Enablement Team"] }
+    subarea: sw-lifecycle
+  - match: { source: confluence, space: CTO, ancestor: "*Security*" }
+    area: security-compliance
+  - match: { source: confluence, space: CTO, ancestor: Quality }
+    module: quality
+  - match: { source: confluence, space: CTO }
+    subarea: architecture
+
+  # ---- GitLab groups without a catalog-info (repositories that have one are placed from the catalog) --------
+  - match: { path: ["gitlab/oneplatform/adrs/*", "gitlab/oneplatform/architecture/*"] }
+    subarea: architecture
+  - match: { path: "gitlab/oneplatform/islands/cybersecurity-trust/*" }
+    area: trust-cybersecurity
+  - match: { path: "gitlab/oneplatform/islands/fiscal-orchestrator/*" }
+    module: orchestratore-fiscale
+  - match: { path: ["gitlab/oneplatform/islands/workspace/*", "gitlab/tsdigital/oneplatform/workspace/*"] }
+    module: workspace
+  - match: { path: "gitlab/oneplatform/islands/comic/*" }
+    module: accounting
+  - match: { path: ["gitlab/oneplatform/islands/microsme/*", "gitlab/oneplatform/islands/scm/*"] }
+    subarea: scm
+  - match: { path: "gitlab/oneplatform/islands/documentale/*" }
+    module: ts-documents
+  - match: { path: "gitlab/oneplatform/islands/devtools/*" }
+    subarea: sw-lifecycle
+  - match: { path: "gitlab/oneplatform/islands/insights/*" }
+    module: insights
+  - match: { path: "gitlab/oneplatform/islands/construction-next/*" }
+    area: construction
+  - match: { path: ["gitlab/oneplatform/onefront/*", "gitlab/oneplatform/experience/*", "gitlab/vapor/*"] }
+    subarea: core-services-experience-ice
+  - match: { path: "gitlab/oneplatform/ereceipt/*" }
+    module: e-receipt
+  - match: { path: ["gitlab/oneplatform/practice-ai/*", "gitlab/tsdigital/oneplatform/ai/*", "gitlab/tsdigital/oneplatform/machine-learning/*"] }
+    subarea: core-services-ai
+  - match: { path: "gitlab/oneplatform/interoperability/*" }
+    subarea: integration
+  - match: { path: ["gitlab/oneplatform/practice-devops-and-sre/*", "gitlab/oneplatform/common/*", "gitlab/oneplatform/PET/*"] }
+    subarea: sw-lifecycle
+  - match: { path: "gitlab/oneplatform/tsdataplatform/*" }
+    subarea: data-bc
+  - match: { path: "gitlab/tsdigital/oneplatform/iam/*" }
+    module: iam
+  - match: { path: "gitlab/tsdigital/oneplatform/government-agency-hub/*" }
+    module: gov-hub
+  - match: { path: ["gitlab/tsdigital/oneplatform/deadlines/*", "gitlab/tsdigital/oneplatform/tax-manager/*"] }
+    subarea: tax
+  - match: { path: "gitlab/tsdigital/oneplatform/business-intelligence/*" }
+    module: business-intelligence
+  - match: { path: "gitlab/tsdigital/oneplatform/hermes*" }
+    module: hermes
+  - match: { path: "gitlab/tsdigital/metering/*" }
+    module: metering
+  - match: { path: "gitlab/tsdigital/business-information/*" }
+    module: business-information
+  - match: { path: "gitlab/tsdigital/signature/*" }
+    module: e-sign
+  - match: { path: ["gitlab/tsdigital/dbox/*", "gitlab/tsdigital/docstore/*"] }
+    subarea: edocuments
+  - match: { path: "gitlab/horeca/*" }
+    area: micro-vertical
+  # ---- Teams whose documents the catalog cannot place: no module of their own, or a module name the City Map ---
+  # ---- does not list ("vapor", "account-pr"). Owner rules also give those phantom modules their sub-area. ------
+  - match: { owner: vapor-ui-library }                       # Vapor design system → the frontend core services
+    subarea: core-services-experience-ice
+  - match: { owner: [ai-platform, ai-acceleration, ai-automation] }
+    subarea: core-services-ai
+  - match: { owner: hr-ai }
+    area: hrs
+  - match: { owner: tse-team }                               # TeamSystem Enterprise documentation
+    subarea: ts-enterprise
+  - match: { owner: [fintech, incassi-e-pagamenti] }          # payments / account-pr
+    subarea: fintech
+  - match: { owner: au-workspace-connessioni }               # Workspace "Connessioni" (company-registry)
+    subarea: core-services-foundation
+  - match: { owner: ipaas-integration-hub }
+    module: integration-hub
+  - match: { owner: documentale-collaboration-digitalbox }
+    subarea: collaboration
+  - match: { owner: certification-authority }
+    subarea: trust-services
+  - match: { owner: one-backoffice-tools-techsupport }
+    module: backoffice
+
+  - match: { path: "gitlab/oneplatform/*" } # anything else under the oneplatform group is platform work
+    area: platform
+
+  # ---- Hand-written notes ---------------------------------------------------------------------------------
+  - match: { source: manually-curated }
+    subarea: curated

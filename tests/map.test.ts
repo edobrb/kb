@@ -159,6 +159,8 @@ describe("label naming", () => {
 describe("buildMap", () => {
   it("projects two separated clusters apart and labels them", async () => {
     const rows = twoClusters(40, 32);
+    // City Map labels come from the caller (src/citymap.ts); the first document is placed, the rest are not.
+    for (const r of rows) if (r.source_id === "doc0") Object.assign(r, { area: "Platform", subarea: "Core Services - Foundation", module: "Workspace" });
     const phases: string[] = [];
     const map = await buildMap(rows, {
       embeddingModel: "mock",
@@ -167,7 +169,7 @@ describe("buildMap", () => {
       onProgress: (p) => phases.push(p.phase),
     });
 
-    expect(map.version).toBe(2);
+    expect(map.version).toBe(3);
     expect(map.chunks).toBe(40);
     expect(map.docs).toBe(14);
     expect(map.points.x).toHaveLength(40);
@@ -181,6 +183,11 @@ describe("buildMap", () => {
     expect(map.documents).toHaveLength(14);
     expect(map.dict.groups.sort()).toEqual(["confluence/A", "gitlab/b"]);
     expect(map.documents.every((d) => d.g >= 0 && d.g < map.dict.groups.length)).toBe(true);
+    // City Map levels are interned the same way; an absent label is the empty string, never undefined.
+    expect(map.dict.subareas.sort()).toEqual(["", "Core Services - Foundation"]);
+    expect(map.dict.modules).toContain("Workspace");
+    expect(map.documents.every((d) => map.dict.areas[d.ar] !== undefined && map.dict.subareas[d.sa] !== undefined && map.dict.modules[d.mo] !== undefined)).toBe(true);
+    expect(map.dict.modules[map.documents.find((d) => d.id === "doc0")!.mo]).toBe("Workspace");
     expect(JSON.stringify(map)).not.toContain("excerpt");
 
     // The two semantic clusters line up with the two vector groups.

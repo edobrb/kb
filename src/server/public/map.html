@@ -8,13 +8,13 @@
   :root {
     --bg: #f6f7f9; --panel: #ffffff; --text: #1c1f26; --muted: #6b7280; --border: #e3e6eb;
     --accent: #2f5bea; --accent-soft: #e8eefc; --code: #f1f3f6; --other: #9a9a94;
-    --c1: #2a78d6; --c2: #eb6834; --c3: #1baf7a; --c4: #eda100; --c5: #e87ba4; --c6: #008300; --c7: #4a3aa7; --c8: #e34948;
+    --c1: #2a78d6; --c2: #eb6834; --c3: #1baf7a; --c4: #eda100; --c5: #e87ba4; --c6: #008300; --c7: #4a3aa7; --c8: #e34948; --c9: #0d9aa6; --c10: #8d6e63; --c11: #6b9b00; --c12: #b23a9c;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #0f1115; --panel: #171a21; --text: #e6e8ee; --muted: #9aa1ad; --border: #262b35;
       --accent: #7c9cff; --accent-soft: #1d2540; --code: #1c2029; --other: #6f6f6a;
-      --c1: #3987e5; --c2: #d95926; --c3: #199e70; --c4: #c98500; --c5: #d55181; --c6: #008300; --c7: #9085e9; --c8: #e66767;
+      --c1: #3987e5; --c2: #d95926; --c3: #199e70; --c4: #c98500; --c5: #d55181; --c6: #008300; --c7: #9085e9; --c8: #e66767; --c9: #22b0bd; --c10: #a1887f; --c11: #8dc21f; --c12: #c95bb5;
     }
   }
   * { box-sizing: border-box; }
@@ -102,6 +102,7 @@
   <span class="meta" id="meta">loading…</span>
   <span class="spacer"></span>
   <a class="nav" href="/">Chat</a>
+  <a class="nav" href="/architecture.html" title="How the knowledge base is gathered, indexed and searched">Architecture</a>
 </header>
 <div class="layout">
   <div class="stage" id="stage">
@@ -126,6 +127,9 @@
       </div>
       <div class="row" style="margin-top:7px">
         <select id="colorBy" title="What the colours mean">
+          <option value="subarea">colour: City Map sub-area</option>
+          <option value="area">colour: City Map area</option>
+          <option value="module">colour: City Map module (product)</option>
           <option value="cluster">colour: meaning (semantic cluster)</option>
           <option value="group">colour: space / folder</option>
           <option value="sourceType">colour: source type</option>
@@ -170,10 +174,12 @@
   // Above this many candidate points in view, draw into a pixel buffer instead of stroking arcs.
   // Arcs stay crisp for normal zoom levels; the buffer keeps a very large map interactive.
   const SPLAT_MIN = 25000;
+  // Categories that get their own colour; the rest share grey (never a cycled hue).
+  const PALETTE = 12;
 
   let D = null;        // payload, expanded into typed arrays
   let V = null;        // current view: chunks or document centroids
-  let view = "chunks", colorBy = "cluster";
+  let view = "chunks", colorBy = "subarea";
   let catNames = [], catCount = [], catColor = [];
   const hidden = new Set();   // hidden category indices, per colorBy
   let query = "", queryHits = null;
@@ -194,9 +200,9 @@
       return false;
     }
     const m = await r.json();
-    if (m.version !== 2) {
+    if (m.version !== 3) {
       $("#empty").hidden = false;
-      $("#empty").innerHTML = `<div><b>Map format v${esc(m.version)} is too old.</b><br/><br/>Re-run <code>npm run map</code>.</div>`;
+      $("#empty").innerHTML = `<div><b>Map format v${esc(m.version)} is too old.</b><br/><br/>Re-run <code>npm run map</code> (or <code>npm run map -- --relabel</code> to upgrade it in place).</div>`;
       return false;
     }
     const p = m.points, n = m.chunks;
@@ -217,6 +223,9 @@
 
     const when = new Date(m.generatedAt);
     $("#meta").textContent = `${fmt(n)} chunks · ${fmt(m.docs)} documents · ${m.clusters.length} clusters · ${m.embeddingModel} → UMAP · ${when.toLocaleDateString()} ${when.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+    // A map built without the City Map (no Dev Portal sync) has a single placeholder sub-area: colour by meaning instead.
+    if (D.dict.subareas.length <= 1) colorBy = "cluster";
+    $("#colorBy").value = colorBy;
     return true;
   }
 
@@ -255,12 +264,12 @@
   function categoryOf(i) {
     if (colorBy === "cluster") return view === "chunks" ? D.cl[i] : D.cl[chunkOf(i)];
     const d = D.documents[docOf(i)];
-    return colorBy === "group" ? d.g : colorBy === "sourceType" ? d.s : colorBy === "lang" ? d.l : d.a;
+    return colorBy === "subarea" ? d.sa : colorBy === "area" ? d.ar : colorBy === "module" ? d.mo : colorBy === "group" ? d.g : colorBy === "sourceType" ? d.s : colorBy === "lang" ? d.l : d.a;
   }
 
   function assignCategories() {
-    const names = colorBy === "cluster" ? D.clusters.map((c) => c.name || `cluster ${c.id + 1}`) : D.dict[{ group: "groups", sourceType: "sourceTypes", lang: "langs", authority: "authorities" }[colorBy]];
-    catNames = names.slice();
+    const names = colorBy === "cluster" ? D.clusters.map((c) => c.name || `cluster ${c.id + 1}`) : D.dict[{ subarea: "subareas", area: "areas", module: "modules", group: "groups", sourceType: "sourceTypes", lang: "langs", authority: "authorities" }[colorBy]];
+    catNames = names.map((s) => s || "—");
     V.cat = new Int32Array(V.n);
     catCount = new Array(catNames.length).fill(0);
     for (let i = 0; i < V.n; i++) {
@@ -268,10 +277,11 @@
       V.cat[i] = c;
       catCount[c] += weightOf(i);
     }
-    // Fixed order by size: the eight largest take the palette, the rest share grey (never a cycled hue).
+    // Fixed order by size: the largest take the palette, the rest share grey (never a cycled hue).
     const order = catNames.map((_, i) => i).filter((i) => catCount[i] > 0).sort((a, b) => catCount[b] - catCount[a]);
     catColor = new Array(catNames.length).fill(css("--other"));
-    order.forEach((ci, rank) => { if (rank < 8) catColor[ci] = css(`--c${rank + 1}`); });
+    // "Not in City Map" is the absence of a category: always grey, never a palette colour.
+    order.filter((ci) => catNames[ci] !== "Not in City Map").forEach((ci, rank) => { if (rank < PALETTE) catColor[ci] = css(`--c${rank + 1}`); });
     D.catRgb = catColor.map(hexToRgb);
     renderLegend(order);
   }
@@ -285,7 +295,8 @@
   function renderLegend(order) {
     const box = $("#legend");
     box.innerHTML = "";
-    const greyed = order.slice(8);
+    const grey = css("--other");
+    const greyed = order.filter((ci) => catColor[ci] === grey && catNames[ci] !== "Not in City Map");
     $("#legendNote").textContent = greyed.length ? `· ${greyed.length} smaller share grey` : "";
     for (const ci of order) {
       const el = document.createElement("div");
@@ -586,6 +597,7 @@
       ${view === "chunks" && D.head[i] ? `<div class="p">${esc(D.head[i])}</div>` : ""}
       <div class="p" style="margin-top:5px">
         <span class="badge">${esc(cluster ? cluster.name : "?")}</span>
+        <span class="badge" title="City Map: area › sub-area › module">${esc(dict.areas[d.ar])} › ${esc(dict.subareas[d.sa])} › ${esc(dict.modules[d.mo])}</span>
         <span class="badge">${esc(dict.groups[d.g])}</span>
         <span class="badge">${esc(dict.langs[d.l])}</span>
         <span class="badge">${esc(dict.authorities[d.a])}</span>
@@ -641,7 +653,7 @@
     const cluster = D.clusters[D.cl[chunkOf(i)]];
     tip.innerHTML = `<b>${esc(d.title)}</b>`
       + (view === "chunks" && D.head[i] ? `<div class="path">${esc(D.head[i])}</div>` : "")
-      + `<div class="path">${esc(cluster ? cluster.name : "")} · ${esc(D.dict.groups[d.g])} · ${esc(D.dict.langs[d.l])}${view === "docs" ? ` · ${fmt(V.size[i])} chunks` : ""}</div>`
+      + `<div class="path">${esc(D.dict.modules[d.mo])} · ${esc(cluster ? cluster.name : "")} · ${esc(D.dict.groups[d.g])} · ${esc(D.dict.langs[d.l])}${view === "docs" ? ` · ${fmt(V.size[i])} chunks` : ""}</div>`
       + `<div class="cta">${d.url ? "click for details · double-click to open the source" : "click for details"}</div>`;
     tip.style.display = "block";
     const tw = tip.offsetWidth, th = tip.offsetHeight;

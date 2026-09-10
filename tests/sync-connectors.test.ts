@@ -114,6 +114,19 @@ describe("Dev Portal connector", () => {
       ],
       pageInfo: {},
     },
+    // The City Map: two areas (one the child of the other), one module owning the API entity below through hasPart.
+    "/api/catalog/entities/by-query?filter=kind%3Darea": {
+      items: [
+        { kind: "Area", metadata: { name: "platform", title: "Platform" }, spec: { children: ["integration"] } },
+        { kind: "Area", metadata: { name: "integration", title: "Integration" }, spec: { children: [] } },
+      ],
+      pageInfo: {},
+    },
+    "/api/catalog/entities/by-query?filter=kind%3Dmodule": {
+      items: [{ kind: "Module", metadata: { name: "hermes", title: "Data Streaming (Hermes)" }, spec: { area: "platform", subarea: "integration", owner: "ipaas-integration" }, relations: [{ type: "hasPart", targetRef: "api:default/workspace-read" }] }],
+      pageInfo: {},
+    },
+    "/api/catalog/entities/by-query?filter=kind%3Dcomponent": { items: [], pageInfo: {} },
     "/api/catalog/entities/by-query?filter=kind%3Dapi": {
       items: [{ kind: "API", metadata: { name: "workspace-read", description: "Read workspaces." }, spec: { type: "openapi", owner: "team-a", definition: "openapi: 3.0.0\ninfo:\n  title: Workspace Read\n" } }],
       pageInfo: {},
@@ -138,6 +151,15 @@ describe("Dev Portal connector", () => {
     const ds = docs(events);
     // The generated reference pages and the empty template are skipped by the quality heuristics.
     expect(ds.map((d) => d.sourceId).sort()).toEqual(["devportal:default/api/workspace-read#definition", "devportal:default/module/hermes/", "devportal:default/module/hermes/consume-records/"]);
+    // City Map: a module page is stamped with its own position; the API definition inherits it through the module's hasPart relation.
+    expect(ds.find((d) => d.sourceId === "devportal:default/module/hermes/")!.extra).toMatchObject({ module: "hermes", subarea: "integration", area: "platform" });
+    expect(ds.find((d) => d.sourceId === "devportal:default/api/workspace-read#definition")!.extra).toMatchObject({ module: "hermes", subarea: "integration", area: "platform" });
+    const citymap = events.find((e) => e.type === "meta" && e.key === "citymap") as { value: { modules: Record<string, unknown>; areas: Record<string, unknown>; parts: Record<string, string> } };
+    expect(citymap.value.modules["hermes"]).toMatchObject({ title: "Data Streaming (Hermes)", subarea: "integration", owner: "ipaas-integration" });
+    expect(citymap.value.areas["integration"]).toEqual({ title: "Integration", parent: "platform" });
+    expect(citymap.value.parts).toEqual({ "workspace-read": "hermes" });
+    const repoEntities = events.find((e) => e.type === "meta" && e.key === "repoEntities") as { value: Record<string, { module?: string; cityMap?: string }> };
+    expect(repoEntities.value["tsdigital/oneplatform/hermes-2.0/docs"]).toMatchObject({ module: "hermes", subarea: "integration", area: "platform", cityMap: "Platform › Integration › Data Streaming (Hermes)" });
     const skips = events.filter((e) => e.type === "skip").map((e) => `${e.sourceId}: ${e.reason}`);
     expect(skips).toContain("devportal:default/module/hermes/reference/Model/: generated reference page");
     expect(skips).toContain("devportal:default/module/hermes/generated/mod/: generated reference page");
@@ -270,7 +292,7 @@ describe("project card", () => {
       lastActivity: "2026-09-01",
       topics: ["registry"],
       languages: { TypeScript: 80.5, Dockerfile: 19.5 },
-      entity: { ref: "default/component/core-registry", kind: "component", title: "Core Registry", owner: "group:team-core", system: "registry", lifecycle: "production", type: "service", description: "The registry." },
+      entity: { ref: "default/component/core-registry", kind: "component", title: "Core Registry", owner: "group:team-core", system: "registry", lifecycle: "production", type: "service", description: "The registry.", module: "item-registry", cityMap: "Platform › Core Services - Foundation › Item Registry" },
       readme: "# Core Registry\n\nStores items.\n\n## Run\n\nnpm start",
       confluence: [{ title: "Registry - Documentazione", url: "https://c/x", space: "RPDD", excerpt: "Il mondo Registry", lastModified: "2026-04-11" }],
       files: { total: 120, code: 90, docs: 5, topDirs: ["src", "docs"] },
@@ -278,6 +300,7 @@ describe("project card", () => {
     expect(title).toBe("Core Registry (oneplatform/islands/registry/core-registry)");
     expect(body.indexOf("Registry of items.")).toBeLessThan(body.indexOf("## Summary"));
     expect(body).toContain("- Dev Portal: Core Registry (component `default/component/core-registry`); owner group:team-core; system registry; lifecycle production; type service");
+    expect(body).toContain("- City Map: Platform › Core Services - Foundation › Item Registry (module `item-registry`)");
     expect(body).toContain("- Languages: TypeScript 81%, Dockerfile 20%");
     expect(body).toContain("- Contents: 90 source files, 5 documentation files; top-level folders: src, docs");
     expect(body).toContain("## README\n\n## Core Registry\n\nStores items.\n\n### Run");
@@ -349,7 +372,7 @@ describe("GitLab connector", () => {
           source: "devportal",
           lastRunAt: null,
           items: {},
-          meta: { coveredRepos: ["oneplatform/hermes-docs"], repoEntities: { "oneplatform/hermes-docs": { ref: "default/module/hermes", kind: "module", owner: "group:platform", system: "oneplatform" } } },
+          meta: { coveredRepos: ["oneplatform/hermes-docs"], repoEntities: { "oneplatform/hermes-docs": { ref: "default/module/hermes", kind: "module", owner: "group:platform", system: "oneplatform", module: "hermes", subarea: "integration", area: "platform", cityMap: "Platform › Integration › Data Streaming (Hermes)" } } },
         }
       : null;
 
@@ -425,6 +448,11 @@ describe("GitLab connector", () => {
     const hermesCard = ds.find((d) => d.sourceId === "gitlab:oneplatform/hermes-docs:__project")!;
     expect(hermesCard.body).toContain("- Dev Portal: default/module/hermes (module `default/module/hermes`); owner group:platform; system oneplatform");
     expect(hermesCard.extra["owner"]).toBe("group:platform");
+    expect(hermesCard.body).toContain("- City Map: Platform › Integration › Data Streaming (Hermes) (module `hermes`)");
+    expect(hermesCard.extra).toMatchObject({ module: "hermes", subarea: "integration", area: "platform" });
+    // Every document of the repository carries the position, not only the card; uncatalogued repositories carry none.
+    expect(ds.find((d) => d.sourceId === "gitlab:oneplatform/hermes-docs:README.md")!.extra).toMatchObject({ module: "hermes" });
+    expect(card.extra["module"]).toBeUndefined();
     // docs/ of a portal-covered repo is skipped; README kept.
     expect(calls.some((c) => c.includes("/projects/2/repository/files/docs%2Findex.md"))).toBe(false);
     expect(calls.some((c) => c.includes("/projects/3/"))).toBe(false);

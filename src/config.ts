@@ -101,6 +101,8 @@ export const config = {
   /** `npm run sync`: where the knowledge base is gathered from. Scope lives in sources.yaml. */
   sync: {
     sourcesFile: path.resolve(root, str("SOURCES_FILE", "./sources.yaml")),
+    /** Hand-written City Map placements for sources the Dev Portal catalog does not describe (see src/citymap.ts). */
+    taxonomyFile: path.resolve(root, str("TAXONOMY_FILE", "./taxonomy.yaml")),
     concurrency: num("SYNC_CONCURRENCY", 4),
     devportal: {
       baseUrl: str("DEVPORTAL_BASE_URL", "https://development.teamsystem.com").replace(/\/$/, ""),

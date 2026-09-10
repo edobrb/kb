@@ -121,6 +121,7 @@ the answer comes from a repository document.
 ## Where the code lives
 
 ```
+src/citymap.ts     the City Map (Dev Portal areas › modules › components, fetched by sync) + taxonomy.yaml → where a document sits; colours the map
 src/sync/          index.ts (orchestrator, source + enricher definitions, duplicate-body skip)
                    devportal.ts · gitlab.ts · confluence.ts (source connector + the CQL card lookup)
                    project-card.ts (the per-repository card) · quality.ts (prose/generated/boilerplate heuristics)
@@ -132,5 +133,5 @@ src/store/         vector-store.ts (LanceDB) · bm25.ts
 src/retrieval/     retriever.ts (RRF, boosts, diversity, optional LLM rerank)
 src/generation/    prompt.ts (system prompt, context blocks, deep links) · ask.ts (streaming loop)
 src/cli/           sync · ingest · ask · search · eval · doctor · map
-src/server/        Fastify API + public/index.html (chat) + public/map.html (2-D map)
+src/server/        Fastify API + public/index.html (chat) + public/map.html (2-D map) + public/architecture.html (this document, interactive)
 ```

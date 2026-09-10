@@ -294,7 +294,16 @@ export const syncGitLab: Connector = async function* (ctx): AsyncGenerator<SyncE
     }
     ctx.log(`  [${projectIndex}/${projects.length}] ${path}: ${files.docs.length} docs, ${files.api.length} API specs${cfg.code.enabled ? `, ${files.code.length} source files` : ""}`);
     const headDate = head.committed_date?.slice(0, 10) ?? p.last_activity_at.slice(0, 10);
-    const common = { project: path, project_url: p.web_url, ref: branch, project_last_activity: p.last_activity_at.slice(0, 10) };
+    // The repository's City Map position travels with every document it yields, so the map can colour them.
+    const common = {
+      project: path,
+      project_url: p.web_url,
+      ref: branch,
+      project_last_activity: p.last_activity_at.slice(0, 10),
+      ...(entity?.module ? { module: entity.module } : {}),
+      ...(entity?.subarea ? { subarea: entity.subarea } : {}),
+      ...(entity?.area ? { area: entity.area } : {}),
+    };
 
     // Side lookups for the project card run while the files download.
     const readmeEntry = tree.find(isReadme) ?? null;
