@@ -126,7 +126,7 @@ export interface AskRequest {
   topK?: number;
   /** Ask the model to emit reasoning tokens. Defaults to CHAT_THINK. */
   think?: boolean;
-  /** Offer the knowledge-base tools (fetch_document). Defaults to CHAT_TOOLS and model support. */
+  /** Offer the knowledge-base tools (search, fetch_document). Defaults to CHAT_TOOLS and model support. */
   tools?: boolean;
 }
 
@@ -156,7 +156,7 @@ export type AskEvent =
   /** A reasoning delta, streamed before/while the answer is produced (thinking models only). */
   | { type: "thinking"; text: string }
   | { type: "token"; text: string }
-  /** The model called a knowledge-base tool; `citation` is set when the result became a new source. */
-  | { type: "tool"; name: string; args: Record<string, unknown>; summary: string; ok: boolean; citation?: number }
+  /** The model called a knowledge-base tool; `citations` are the context blocks its result occupies. */
+  | { type: "tool"; name: string; args: Record<string, unknown>; summary: string; ok: boolean; citations?: number[] }
   | { type: "done"; answer: string; thinking: string; usedCitations: number[]; timings: Record<string, number> }
   | { type: "error"; message: string };

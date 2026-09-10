@@ -90,7 +90,7 @@ export interface ChatOptions {
   signal?: AbortSignal;
   /** Override the configured chat model for this call (e.g. a stronger model as eval judge). */
   model?: string;
-  /** Cap on generated tokens (Ollama `num_predict`). */
+  /** Cap on generated tokens (Ollama `num_predict`); defaults to CHAT_MAX_TOKENS. */
   maxTokens?: number;
   /** Tools the model may call in this turn. Requires a model with tool support. */
   tools?: ToolSpec[];
@@ -172,7 +172,7 @@ export async function* ollamaChatStream(messages: ChatMessage[], opts: ChatOptio
         options: {
           temperature: opts.temperature ?? config.chat.temperature,
           num_ctx: opts.numCtx ?? config.chat.numCtx,
-          ...(opts.maxTokens ? { num_predict: opts.maxTokens } : {}),
+          num_predict: opts.maxTokens ?? config.chat.maxTokens,
         },
       }),
       signal: opts.signal,
@@ -190,10 +190,24 @@ export async function* ollamaChatStream(messages: ChatMessage[], opts: ChatOptio
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let received = 0;
   try {
     while (true) {
-      const { value, done } = await reader.read();
+      let value: Uint8Array | undefined;
+      let done: boolean;
+      try {
+        ({ value, done } = await reader.read());
+      } catch (err) {
+        // undici reports a dropped connection as a bare "terminated"; say what was lost and why.
+        const cause = (err as { cause?: { code?: string; message?: string } }).cause;
+        throw new OllamaError(
+          `Ollama closed the /api/chat stream after ${received} bytes: ${(err as Error).message}` +
+            `${cause?.code ? ` (${cause.code})` : ""}${cause?.message ? ` ${cause.message}` : ""}. ` +
+            `Check \`ollama serve\` logs — a very large prompt (CHAT_NUM_CTX, TOOL_CHAR_BUDGET, RETRIEVAL_TOP_K) can exhaust memory.`,
+        );
+      }
       if (done) break;
+      received += value?.byteLength ?? 0;
       buffer += decoder.decode(value, { stream: true });
       let nl: number;
       while ((nl = buffer.indexOf("\n")) >= 0) {

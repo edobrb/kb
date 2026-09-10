@@ -64,7 +64,7 @@ console.log(
     DIM(
       `embedding=${config.embedding.model}  chat=${config.chat.model}${withJudge ? `  judge=${config.eval.judgeModel}` : ""}  ` +
         `rerank=${config.retrieval.rerank}  weights vector/bm25=${config.retrieval.vectorWeight}/${config.retrieval.bm25Weight}` +
-        (withAnswers ? `  tools=${config.tools.enabled ? `on (${config.tools.maxRounds} rounds, ${config.tools.docMaxChars} chars)` : "off"}` : ""),
+        (withAnswers ? `  tools=${config.tools.enabled ? `on (${config.tools.maxRounds} rounds, ${config.tools.docMaxChars} chars, search ${config.tools.search ? "on" : "off"})` : "off"}` : ""),
     ) + "\n",
 );
 

@@ -20,10 +20,10 @@ export function deepLink(c: Pick<RetrievedChunk, "sourceUrl" | "kind" | "lineSta
   return c.sourceUrl;
 }
 
-/** Turn retrieved chunks into numbered citations (deterministic order = ranking order). */
-export function toCitations(chunks: RetrievedChunk[]): Citation[] {
-  return chunks.map((c, i) => ({
-    n: i + 1,
+/** One retrieved chunk as citation number `n`. */
+export function toCitation(c: RetrievedChunk, n: number): Citation {
+  return {
+    n,
     chunkId: c.id,
     sourceId: c.sourceId,
     title: c.title,
@@ -37,38 +37,101 @@ export function toCitations(chunks: RetrievedChunk[]): Citation[] {
     lineStart: c.lineStart,
     lineEnd: c.lineEnd,
     score: c.score,
-  }));
+  };
 }
 
+/** Turn retrieved chunks into numbered citations (deterministic order = ranking order). */
+export function toCitations(chunks: RetrievedChunk[]): Citation[] {
+  return chunks.map((c, i) => toCitation(c, i + 1));
+}
+
+/** One numbered context block: heading path, kind, authority and URL, then the passage. */
+export function formatBlock(c: RetrievedChunk, n: number): string {
+  const url = deepLink(c);
+  const header = [
+    `[${n}] ${c.headingPath}${c.kind === "code" && c.lineStart ? ` (lines ${c.lineStart}-${c.lineEnd})` : ""}`,
+    `source_type=${c.sourceType} kind=${c.kind} authority=${c.authority}${url ? ` url=${url}` : ""}`,
+  ].join("\n");
+  return `${header}\n${c.content}`;
+}
+
+export const BLOCK_SEPARATOR = "\n\n-----\n\n";
+
 export function formatContext(chunks: RetrievedChunk[]): string {
-  return chunks
-    .map((c, i) => {
-      const url = deepLink(c);
-      const header = [
-        `[${i + 1}] ${c.headingPath}${c.kind === "code" && c.lineStart ? ` (lines ${c.lineStart}-${c.lineEnd})` : ""}`,
-        `source_type=${c.sourceType} kind=${c.kind} authority=${c.authority}${url ? ` url=${url}` : ""}`,
-      ].join("\n");
-      return `${header}\n${c.content}`;
-    })
-    .join("\n\n-----\n\n");
+  return chunks.map((c, i) => formatBlock(c, i + 1)).join(BLOCK_SEPARATOR);
 }
 
 /**
- * Appended to the system prompt when the model is given the `fetch_document` tool: the passages are
- * chunks of larger pages, so it has to be told that the rest of the page is one call away.
+ * Appended to the system prompt when the model is given tools. Imperative and short on purpose: a
+ * local model with thinking off has nowhere to put deliberation, and a prompt that invites it to
+ * weigh whether to call a tool gets that deliberation back as the answer.
  */
-export const TOOL_INSTRUCTIONS = `Tool: fetch_document(source_id, section?) returns a whole knowledge-base document. Each CONTEXT block is only a passage of a larger page.
+export function toolInstructions(tools: string[]): string {
+  const search = tools.includes("search");
+  const fetch = tools.includes("fetch_document");
+  if (!search && !fetch) return "";
+  const lines = [
+    `Tools. Each CONTEXT block is a passage of a larger page, found by one search on the user's question.`,
+  ];
+  if (search) {
+    lines.push(
+      `- search(query): search the knowledge base again. Call it when the CONTEXT does not answer the question, or answers only part of it, and always before saying the knowledge base does not cover something. Use the words the documents would use, not the user's: the service, repository, endpoint, setting or error name; an acronym or its expansion; the Italian or English term; a term you saw in a CONTEXT block. One short query per call.`,
+    );
+  }
+  if (fetch) {
+    lines.push(
+      `- fetch_document(source_id, section?): read a whole page. Call it when a block is the right page but the answer needs what surrounds the passage: the rest of a procedure, a full list or table, exact values, a section the text refers to. Pass that block's source_id, or its number ("3"). A truncated result lists the page outline; call again with one of those sections. Never invent a source_id.`,
+    );
+  }
+  lines.push(
+    `- Otherwise answer straight from the CONTEXT. Do not explain or announce your decision about the tools, and never describe the CONTEXT block by block: either call a tool or write the answer.`,
+    `- Tool results arrive as numbered blocks like the others and are cited the same way.`,
+  );
+  return lines.join("\n");
+}
 
-- Call it when a block is the right page but the answer needs what surrounds the passage: the rest of a procedure, a full list or table, exact values, a section the text refers to. Pass that block's source_id, or its number ("3").
-- A truncated result lists the page outline; call again with one of those sections to read further. Never invent a source_id.
-- Otherwise answer straight from the CONTEXT. Do not explain or announce your decision about the tool, and never describe the CONTEXT block by block: either call the tool or write the answer.
-- A fetched document arrives as a numbered block like the others and is cited the same way.`
+/**
+ * Replaces the tool instructions on the final round, once the rounds or the character budget are
+ * spent and the request goes out with no `tools`. Ollama only parses tool-call syntax into
+ * `tool_calls` when tools are in the request, so a prompt that still invites a call gets the
+ * model's raw `<tool_call>` text streamed into the answer.
+ */
+export const NO_TOOLS_NOTE =
+  `Tools. You have already searched and read what you could; no tool is available now. ` +
+  `Answer from the CONTEXT blocks. Do not write a tool call, and do not mention tools or searching.`;
+
+/**
+ * A model that wants a tool it no longer has writes the call as plain text (`<tool_call>
+ * <function=search> ...`). Ollama does not parse it back into `tool_calls` when the request
+ * carries no tools, so it would otherwise end up in the visible answer.
+ */
+const TOOL_CALL_TEXT = /<tool_call>[\s\S]*?<\/tool_call>|<(?:tool_call|function=|parameter=)[\s\S]*$/g;
+
+export function stripToolCallText(text: string): string {
+  return TOOL_CALL_TEXT.test(text) ? text.replace(TOOL_CALL_TEXT, "").trimEnd() : text;
+}
+
+/**
+ * Last resort when the model answers the final round with a tool call it can no longer make: a
+ * plain user turn stops the pattern where swapping the system prompt does not, because the model
+ * has its own tool calls in the transcript above and keeps imitating them.
+ */
+export const ANSWER_NOW_NOTE =
+  `Stop. No tool is available and no further search will run. Write the full answer now, ` +
+  `from the CONTEXT blocks above, with citations. Do not write a tool call.`;
 
 export interface BuildOptions {
   /** Keep at most this many prior turns. */
   maxHistory?: number;
-  /** Add the tool instructions (only when the model is actually given the tools). */
-  tools?: boolean;
+  /** Names of the tools the model is given (`search`, `fetch_document`); adds their instructions. */
+  tools?: string[];
+  /** Final round: tools were offered earlier but are withdrawn now, so say so (`NO_TOOLS_NOTE`). */
+  toolsExhausted?: boolean;
+}
+
+function toolSection(opts: BuildOptions): string {
+  if (opts.toolsExhausted) return `\n\n${NO_TOOLS_NOTE}`;
+  return opts.tools?.length ? `\n\n${toolInstructions(opts.tools)}` : "";
 }
 
 /**
@@ -84,7 +147,7 @@ export function buildMessages(
   const maxHistory = opts.maxHistory ?? 6;
   const system: ChatMessage = {
     role: "system",
-    content: `${SYSTEM_PROMPT}${opts.tools ? `\n\n${TOOL_INSTRUCTIONS}` : ""}\n\nCONTEXT:\n\n${formatContext(chunks)}`,
+    content: `${SYSTEM_PROMPT}${toolSection(opts)}\n\nCONTEXT:\n\n${formatContext(chunks)}`,
   };
   const prior = history.filter((m) => m.role !== "system").slice(-maxHistory);
   return [...[system], ...prior, { role: "user", content: question }];

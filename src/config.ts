@@ -57,7 +57,12 @@ export const config = {
     provider: oneOf("CHAT_PROVIDER", ["ollama", "mock"] as const, "ollama"),
     model: str("CHAT_MODEL", "qwen3:8b"),
     think: bool("CHAT_THINK", false),
-    numCtx: num("CHAT_NUM_CTX", 16384),
+    numCtx: num("CHAT_NUM_CTX", 32768),
+    /**
+     * Cap on generated tokens (Ollama `num_predict`). Reserved out of CHAT_NUM_CTX: keep
+     * the prompt (passages + tool results) under numCtx - maxTokens or answers get clipped.
+     */
+    maxTokens: num("CHAT_MAX_TOKENS", 4096),
     temperature: num("CHAT_TEMPERATURE", 0.2),
   },
 
@@ -67,6 +72,10 @@ export const config = {
     enabled: bool("CHAT_TOOLS", true),
     /** How many times the model may call tools before it must answer. */
     maxRounds: num("TOOL_MAX_ROUNDS", 3),
+    /** Offer `search(query)`: further knowledge-base searches on queries of the model's choosing. */
+    search: bool("TOOL_SEARCH", true),
+    /** New passages one `search` call returns (passages already in the context are skipped). */
+    searchTopK: num("TOOL_SEARCH_TOP_K", 4),
     /** Character budget for one `fetch_document` result (~4 chars/token). */
     docMaxChars: num("DOC_TOOL_MAX_CHARS", 20000),
     /**

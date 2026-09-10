@@ -249,8 +249,8 @@ absent from the map payload, so the map UI loads a passage only when you select 
 
 `npm run serve` and open <http://127.0.0.1:8787>. Single static file (`src/server/public/index.html`, no build
 step, no framework): answers streamed token by token, a **Reasoning** button that streams the model's
-thinking into a collapsible panel above the answer, a line per whole document the model pulled in with
-`fetch_document`, clickable `[n]` citations that jump to the source,
+thinking into a collapsible panel above the answer, a line per tool call the model made (`search` queries
+and whole documents pulled in with `fetch_document`), clickable `[n]` citations that jump to the source,
 source cards with title → original URL, source-type and authority badges, expandable passage, source-type
 filter chips, multi-turn conversation, and a **Re-index** button. Auto-scroll follows the stream but stops
 as soon as you scroll up to read.
@@ -503,12 +503,27 @@ Documents are embedded in batches of about `INGEST_BATCH_CHUNKS` chunks (`EMBED_
 5. Optional (`RERANK=llm`): ask the chat model to score each of the top 3·k candidates 0–10 and re-sort.
    Slower (one short generation per candidate) but noticeably more precise on ambiguous questions.
 
-### 7.7 Whole-document reads (`src/retrieval/documents.ts`, `src/generation/tools.ts`)
+### 7.7 Tools: search again, read whole documents (`src/generation/tools.ts`, `src/retrieval/documents.ts`)
 
-Chunks are the right unit for ranking and the wrong unit for some answers: the retry table is in the next
+One retrieval pass on the user's question is enough for most answers (hit@6 ≈ 93 % on the eval set), and the
+answering model is given two tools for the rest. Both count against the same `TOOL_MAX_ROUNDS` and
+`TOOL_CHAR_BUDGET`, both come back as numbered context blocks cited with the same `[n]`.
+
+**`search(query)`** runs the same hybrid retrieval on a query of the model's choosing. It is for the first-pass
+misses: the user's words are not the documents' words (an acronym, the other language, the service name the
+docs actually use), or the answer spans two pages and the first search found one. The prompt tells the model to
+search before saying the knowledge base does not cover something, so an unconditional second pass is not
+needed: the extra latency is paid only on the questions that need it.
+
+* Only passages not already in the context come back (`TOOL_SEARCH_TOP_K`, default 4, per call); a document the
+  model already fetched whole is skipped too, so every call adds something or says so.
+* The user's filters (source type, kind) follow the model's searches; the LLM rerank does not run on them.
+* A repeated query (same words modulo case and punctuation) gets a pointer to its earlier blocks instead of a
+  second retrieval. `TOOL_SEARCH=false` leaves only `fetch_document`, which makes A/B evals easy.
+
+**`fetch_document(source_id, section?)`** is for when chunks are the wrong unit: the retry table is in the next
 section, the procedure continues past the passage, the ADR's consequences are one heading below what matched.
-So the answering model is given one tool, `fetch_document(source_id, section?)`, and the passages it received
-tell it which ids exist.
+The passages the model received tell it which ids exist.
 
 * `DocumentStore` maps a `source_id` back to its `kb/*.md` file through `data/manifest.json`, so the tool can
   only ever read documents that are actually indexed (a path from a tool call never reaches the filesystem).
@@ -566,9 +581,10 @@ Everything is an environment variable (`.env`, see `.env.example` for the full a
 | `RETRIEVAL_MAX_CHUNKS_PER_DOC` | `3` | Diversity cap |
 | `RERANK` | `none` | `llm` for the LLM rerank stage |
 | `QUERY_REWRITE` | `true` | Rewrite follow-ups into standalone queries |
-| `CHAT_TOOLS` | `true` | Give the model `fetch_document` (ignored on a model without tool support) |
+| `CHAT_TOOLS` | `true` | Give the model `search` and `fetch_document` (ignored on a model without tool support) |
+| `TOOL_SEARCH` / `TOOL_SEARCH_TOP_K` | `true` / `4` | Offer `search(query)`; new passages per call |
 | `TOOL_MAX_ROUNDS` | `3` | Tool rounds before the model must answer |
-| `DOC_TOOL_MAX_CHARS` / `TOOL_CHAR_BUDGET` | `20000` / `24000` | Cap per document / per answer |
+| `DOC_TOOL_MAX_CHARS` / `TOOL_CHAR_BUDGET` | `20000` / `24000` | Cap per tool result / per answer |
 | `PORT` / `HOST` | `8787` / `127.0.0.1` | Set `HOST=0.0.0.0` to reach the UI from other machines on the LAN |
 | `EMBEDDING_PROVIDER` / `CHAT_PROVIDER` | `ollama` | `mock` runs the whole pipeline without Ollama (tests/CI) |
 | `SOURCES_FILE` | `./sources.yaml` | Scope, filters and rules for `npm run sync` |
@@ -686,8 +702,14 @@ time — the reason the 0.6b is the default. Levers if it is still too slow: `EM
 `CHUNK_TARGET_TOKENS`. The run is resumable, so it is fine to stop it and pick it up later.
 
 **Memory.** `qwen3-embedding:0.6b` (~1.5 GB) and `qwen3:8b` (~6 GB) stay loaded together comfortably. Ollama
-unloads idle models after 5 minutes; the first request after idling pays a few seconds of load time. If you move
-to a 14B chat model, keep `CHAT_NUM_CTX` at 16k or lower.
+unloads idle models after 5 minutes; the first request after idling pays a few seconds of load time. The KV
+cache scales with `CHAT_NUM_CTX`, so 32k costs a couple of GB more than 16k on an 8-9B model; if you move to a
+14B chat model, drop back to 16k.
+
+**Answers stop mid-sentence.** The prompt and the answer share one window: `RETRIEVAL_TOP_K` passages
+(≤ `CHUNK_MAX_TOKENS` each) plus `TOOL_CHAR_BUDGET` of tool results plus `CHAT_MAX_TOKENS` of answer must all
+fit in `CHAT_NUM_CTX`, or Ollama drops the oldest tokens and the answer gets clipped. `npm run doctor` prints
+the worst case and warns when it overflows — raise `CHAT_NUM_CTX` or lower the other three.
 
 **Answers miss things that are in the docs.** Run `npm run search -- "<question>"` and look at the `vec=` /
 `bm25=` ranks. If the right chunk is found by only one retriever, adjust the weights. If it is not found at all,
@@ -703,6 +725,11 @@ is simply not in `kb/`, check `data/sync/<source>.skipped.jsonl`: a filter in `s
 `fetch_document` exists for: check `npm run doctor` says the chat model supports tools, then run
 `npm run ask` and look for the `tool fetch_document(…)` line on stderr. `npm run doc -- "<source-id>"` shows
 what the model would have read.
+
+**The model says the knowledge base does not cover something that is in it.** Check `npm run search -- "…"`
+with the user's wording: if the page only shows up with the documents' own terms, that is what the `search`
+tool is for. Look for a `tool search({"query":…})` line on stderr; if the model never calls it, check
+`TOOL_SEARCH=true` and that `npm run doctor` reports tool support.
 
 **Answers hallucinate.** Lower `CHAT_TEMPERATURE` (0–0.2), reduce `RETRIEVAL_TOP_K` so irrelevant chunks do not
 dilute the context, or enable `RERANK=llm`.

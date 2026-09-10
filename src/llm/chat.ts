@@ -24,12 +24,14 @@ class OllamaChatProvider implements ChatProvider {
 
 /** `FETCH:<source_id>` in a mock question makes the mock model ask for that document once. */
 const MOCK_FETCH_RE = /FETCH:(\S+)/;
+/** `SEARCH:<query>` (underscores for spaces) makes the mock model run that search once. */
+const MOCK_SEARCH_RE = /SEARCH:(\S+)/;
 
 /**
  * Mock chat model for tests: echoes which context blocks it received and cites all of them.
  * Lets the pipeline (prompting, citation parsing, SSE streaming) be exercised without Ollama.
  * With `think: true` it also emits a short fake reasoning stream, and a question containing
- * `FETCH:<source_id>` exercises the tool loop.
+ * `FETCH:<source_id>` or `SEARCH:<query>` exercises the tool loop.
  */
 export class MockChatProvider implements ChatProvider {
   async *stream(messages: ChatMessage[], opts: ChatOptions = {}): AsyncGenerator<ChatDelta> {
@@ -38,11 +40,19 @@ export class MockChatProvider implements ChatProvider {
     const ids = [...system.matchAll(/^\[(\d+)\]/gm)].map((m) => m[1]);
     const question = user.split("\n").at(-1) ?? user;
 
-    // Tool round: ask for the requested document, but only until a tool result comes back.
+    // Tool round: run the requested search / read the requested document, but only until a tool
+    // result comes back.
     const wanted = MOCK_FETCH_RE.exec(question)?.[1];
-    if (wanted && opts.tools?.length && !messages.some((m) => m.role === "tool")) {
-      yield { toolCalls: [{ function: { name: "fetch_document", arguments: { source_id: wanted } } }] };
-      return;
+    const wantedSearch = MOCK_SEARCH_RE.exec(question)?.[1];
+    if (opts.tools?.length && !messages.some((m) => m.role === "tool")) {
+      if (wantedSearch) {
+        yield { toolCalls: [{ function: { name: "search", arguments: { query: wantedSearch.replace(/_/g, " ") } } }] };
+        return;
+      }
+      if (wanted) {
+        yield { toolCalls: [{ function: { name: "fetch_document", arguments: { source_id: wanted } } }] };
+        return;
+      }
     }
     const toolBlocks = messages
       .filter((m) => m.role === "tool")

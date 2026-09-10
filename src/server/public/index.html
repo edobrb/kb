@@ -336,15 +336,16 @@
       await askStream({ messages, filters, think }, {
         status: (ev) => { statusTxt.textContent = ev.message; },
         sources: (ev) => { citations = ev.citations; renderSources(el, citations); scroll(); },
-        // The model read a whole kb document (fetch_document); show what it pulled in.
+        // The model used a kb tool (search again, or read a whole document); show what it pulled in.
         tool: (ev) => {
           const box = el.querySelector(".tools");
           box.hidden = false;
           const line = document.createElement("div");
           line.className = `tool${ev.ok ? "" : " err"}`;
-          line.innerHTML = `${ev.ok ? "read document" : "tool error"} <code>${esc(ev.summary)}</code>`;
+          const isSearch = ev.name === "search";
+          line.innerHTML = `${ev.ok ? (isSearch ? "searched" : "read document") : "tool error"} <code>${esc(ev.summary)}</code>`;
           box.appendChild(line);
-          statusTxt.textContent = ev.ok ? "Reading the document…" : "Tool error";
+          statusTxt.textContent = ev.ok ? (isSearch ? "Searching again…" : "Reading the document…") : "Tool error";
           scroll();
         },
         thinking: (ev) => {

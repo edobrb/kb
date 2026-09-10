@@ -1,4 +1,5 @@
 import { stat } from "node:fs/promises";
+import { totalmem } from "node:os";
 import { config, paths } from "../config.js";
 import { listModels, modelCapabilities } from "../llm/ollama.js";
 import { readManifest } from "../ingest/manifest.js";
@@ -98,25 +99,46 @@ if (config.embedding.provider === "ollama" || config.chat.provider === "ollama")
       }
     }
     if (config.chat.provider === "ollama") {
+      // Ollama reserves the whole KV cache when it loads the model, so an oversized context does
+      // not degrade — the OS kills the runner mid-answer (which surfaces as a dropped stream).
+      const ramGb = totalmem() / 1024 ** 3;
+      if (config.chat.numCtx > 32768 && config.chat.numCtx > ramGb * 2048) {
+        warn(
+          `CHAT_NUM_CTX=${config.chat.numCtx} on ${ramGb.toFixed(0)} GB of RAM: the KV cache is reserved up front ` +
+            `(a 9B model needs ~8.4 GB at 128k) and the embedding model is loaded next to it — keep it near ${Math.round((ramGb * 2048) / 1024) * 1024} here`,
+        );
+      }
       if (models.includes(config.chat.model)) ok(`chat model ${config.chat.model} is pulled`);
       else {
         bad(`chat model missing → run: ollama pull ${config.chat.model}`);
         failures++;
       }
-      // fetch_document is only offered to a model that can call tools (see src/generation/tools.ts).
+      // search / fetch_document are only offered to a model that can call tools (see src/generation/tools.ts).
       const caps = await modelCapabilities();
-      if (!config.tools.enabled) warn(`kb tools disabled (CHAT_TOOLS=false) — the model cannot read whole documents`);
+      if (!config.tools.enabled) warn(`kb tools disabled (CHAT_TOOLS=false) — the model cannot search again or read whole documents`);
       else if (caps.includes("tools")) {
-        ok(`chat model supports tools → fetch_document enabled (max ${config.tools.maxRounds} rounds, ${config.tools.docMaxChars} chars/document)`);
-        // Worst case in one answer: the retrieved passages, the whole tool budget, and the prompt.
-        const need = Math.ceil(config.tools.charBudget / 3.5) + config.retrieval.topK * config.chunking.maxTokens + 600;
-        if (need > config.chat.numCtx * 0.8) {
+        const offered = config.tools.search ? `search (${config.tools.searchTopK} passages/call) + fetch_document` : "fetch_document";
+        // TOOL_CHAR_BUDGET, not TOOL_MAX_ROUNDS, is usually what ends the loop, so say which binds.
+        const reads = Math.floor(config.tools.charBudget / Math.max(1, config.tools.docMaxChars));
+        ok(
+          `chat model supports tools → ${offered} enabled (${config.tools.docMaxChars} chars/result, ` +
+            `stops at ${config.tools.maxRounds} rounds or TOOL_CHAR_BUDGET=${config.tools.charBudget} chars ≈ ${reads} whole document(s))`,
+        );
+        // Worst case in one answer: the retrieved passages, the whole tool budget, the prompt,
+        // and the room the answer itself needs (num_predict) — all of it inside CHAT_NUM_CTX.
+        const need =
+          Math.ceil(config.tools.charBudget / 3.5) +
+          config.retrieval.topK * config.chunking.maxTokens +
+          600 +
+          config.chat.maxTokens;
+        if (need > config.chat.numCtx) {
           warn(
-            `worst case ≈ ${need} tokens (${config.retrieval.topK} passages + TOOL_CHAR_BUDGET=${config.tools.charBudget}) ` +
-              `against CHAT_NUM_CTX=${config.chat.numCtx}; raise the context or lower TOOL_CHAR_BUDGET`,
+            `worst case ≈ ${need} tokens (${config.retrieval.topK} passages + TOOL_CHAR_BUDGET=${config.tools.charBudget} ` +
+              `+ CHAT_MAX_TOKENS=${config.chat.maxTokens}) against CHAT_NUM_CTX=${config.chat.numCtx}; ` +
+              `raise the context, or lower TOOL_CHAR_BUDGET / RETRIEVAL_TOP_K — answers get clipped when it overflows`,
           );
         }
-      } else warn(`chat model ${config.chat.model} has no tool support (capabilities: ${caps.join(", ") || "unknown"}) — fetch_document will stay off`);
+      } else warn(`chat model ${config.chat.model} has no tool support (capabilities: ${caps.join(", ") || "unknown"}) — search / fetch_document will stay off`);
     }
   } catch (err) {
     bad((err as Error).message);

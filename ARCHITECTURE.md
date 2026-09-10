@@ -118,12 +118,16 @@ chunks reach the model. Each context block carries its heading path (breadcrumb 
 and URL; the prompt requires citations, forbids outside knowledge, and asks for the repository and file when
 the answer comes from a repository document.
 
-The model also gets one tool, `fetch_document(source_id, section?)`: a passage is a chunk of a larger page,
-and this is how it reads the rest when the answer needs it (the next section, the full table, the exact
-values). Ids are resolved through `data/manifest.json`, so only indexed documents are reachable; results are
-capped (`DOC_TOOL_MAX_CHARS`, `TOOL_CHAR_BUDGET`) and carry the page outline so a follow-up call can ask for
-one section; the document is appended as one more numbered block and cited like any other. The loop is bounded
-by `TOOL_MAX_ROUNDS` and the last round runs without tools, so an answer always comes out.
+The model also gets two tools. `search(query)` runs the same hybrid retrieval on a query of the model's
+choosing, for when the first pass missed the page: the user's words are not the documents' words, or the
+answer spans pages. It returns only passages not already in the context (`TOOL_SEARCH_TOP_K` per call), the
+user's filters still apply, and the prompt tells the model to search before declaring that the knowledge base
+does not cover something. `fetch_document(source_id, section?)` reads the rest of a page when a passage is a
+chunk of something larger (the next section, the full table, the exact values). Ids are resolved through
+`data/manifest.json`, so only indexed documents are reachable; results are capped (`DOC_TOOL_MAX_CHARS`,
+`TOOL_CHAR_BUDGET`) and carry the page outline so a follow-up call can ask for one section. Both results are
+appended as numbered blocks and cited like any other. The loop is bounded by `TOOL_MAX_ROUNDS` and the last
+round runs without tools, so an answer always comes out.
 
 ## Where the code lives
 
@@ -140,7 +144,7 @@ src/store/         vector-store.ts (LanceDB) · bm25.ts
 src/retrieval/     retriever.ts (RRF, boosts, diversity, optional LLM rerank)
                    documents.ts (source_id → kb file: whole documents and sections for the fetch_document tool)
 src/generation/    prompt.ts (system prompt, context blocks, deep links) · ask.ts (streaming loop + tool loop)
-                   tools.ts (fetch_document: schema, id resolution, result formatting)
+                   tools.ts (search + fetch_document: schemas, dedup against the context, result formatting)
 src/cli/           sync · ingest · ask · doc · search · eval · doctor · map
 src/server/        Fastify API + public/index.html (chat) + public/map.html (2-D map) + public/architecture.html (this document, interactive)
 ```
