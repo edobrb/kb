@@ -181,21 +181,45 @@ curl -N -X POST http://127.0.0.1:8787/api/ask \
 ```
 
 Events, in order: `status` (progress text) → `sources` (numbered citations, sent **before** generation so
-the UI can show them immediately) → `thinking` (many, only when reasoning is on) → `token` (many) →
-`done` (`answer`, `thinking`, `usedCitations`, `timings`) or `error`. Comment frames (`: ping`) are sent
+the UI can show them immediately) → `usage` (token counts, one estimate per round plus the exact figure
+Ollama reports when the round ends) → `thinking` (many, only when reasoning is on) → `token` (many) →
+`done` (`answer`, `thinking`, `usedCitations`, `timings`, `usage`) or `error`. Comment frames (`: ping`) are sent
 every 15 s to keep the connection alive; ignore them. Send the whole conversation in `messages` for
-follow-up questions; the server rewrites the last question into a standalone search query using the history.
+follow-up questions.
+
+A follow-up does **not** search the knowledge base again. Send back the blocks the chat already has, as
+`"context": [{ "n": 1, "chunkId": "…", "section": null, "cited": true }, …]` — the `n` and `chunkId` of the
+previous turn's `sources` event, with `cited` set for the ones that answer's `usedCitations` listed — and the
+conversation continues on those passages instead of standing on a fresh retrieval the user never asked for.
+Only ids travel: the passages are re-read server-side, blocks whose ids no longer exist are dropped, and each
+one keeps the number it had so the `[n]` in the earlier answers still point at the same passage. `search` is
+what covers a question the carried blocks do not reach, and the prompt tells the model to call it — so a
+request that carries `context` but disables tools (`"tools": false`) retrieves as usual, as does one that
+sends no `context` at all. `FOLLOWUP_SEARCH=true` restores a fresh pass on every turn. The `sources` event
+carries `carried: [n, …]` when the context was continued rather than searched for.
 
 Add `"think": true` to stream the model's reasoning as `thinking` events (works with reasoning models such
 as Qwen3); omit it to use the `CHAT_THINK` default. Generation is aborted only when the client actually
 disconnects, so a closed tab stops the model.
+
+Add `"mode": "research"` for a slower, more thorough answer: retrieval returns `RESEARCH_TOP_K` passages
+instead of `RETRIEVAL_TOP_K`, the tool loop gets `RESEARCH_TOOL_MAX_ROUNDS` rounds and
+`RESEARCH_TOOL_CHAR_BUDGET` characters, and the prompt tells the model to search from several angles and
+read the full pages before answering. The three research values are never applied below their plain
+counterparts, so raising `RETRIEVAL_TOP_K` or `TOOL_MAX_ROUNDS` cannot make research mode the narrower of
+the two. The default is `"fast"`.
+
+`usage` events carry `{ promptTokens, completionTokens, numCtx, estimated? }`: `promptTokens` is the last
+round's prompt (what occupies the window right now), `completionTokens` the sum over all rounds, reasoning
+included. The `estimated` one is sent before a round starts — Ollama reports counts only when a round ends,
+which is too late for a live meter — and is a ~4-chars-per-token approximation (within a few % in practice).
 
 ### `POST /api/ask/sync` — same, non-streaming
 
 ```bash
 curl -s -X POST http://127.0.0.1:8787/api/ask/sync -H 'content-type: application/json' \
   -d '{"question":"What are the data store tiers?"}'
-# → { "answer": "...[1]...", "thinking": "", "citations": [...], "usedCitations": [1], "timings": {...} }
+# → { "answer": "...[1]...", "thinking": "", "citations": [...], "usedCitations": [1], "timings": {...}, "usage": {...} }
 ```
 
 ### `POST /api/search` — retrieval only
@@ -248,12 +272,24 @@ absent from the map payload, so the map UI loads a passage only when you select 
 ## 6. Web UI
 
 `npm run serve` and open <http://127.0.0.1:8787>. Single static file (`src/server/public/index.html`, no build
-step, no framework): answers streamed token by token, a **Reasoning** button that streams the model's
-thinking into a collapsible panel above the answer, a line per tool call the model made (`search` queries
-and whole documents pulled in with `fetch_document`), clickable `[n]` citations that jump to the source,
-source cards with title → original URL, source-type and authority badges, expandable passage, source-type
-filter chips, multi-turn conversation, and a **Re-index** button. Auto-scroll follows the stream but stops
-as soon as you scroll up to read.
+step, no framework): answers streamed token by token, a **Fast / Extended research** switch and a
+**Reasoning** toggle next to **Ask** (reasoning streams the model's thinking into a collapsible panel above
+the answer), a live grey token meter — prompt tokens, generated tokens and how full the context window is,
+turning amber past 85% — a line per tool call the model made (`search` queries and whole documents pulled in
+with `fetch_document`), a folded source bar above each answer (`24 passages from 17 documents · 24 cited`)
+that opens into cards with title → original URL, source-type and authority badges and the passage itself —
+clicking a `[n]` in the answer opens that bar and scrolls to the passage — **Copy** and **Export .md** under every answer
+(the markdown carries the question, the answer with its `[n]` markers, and the numbered sources with links —
+cited ones first, the rest folded into a `<details>` block), source-type filter chips and multi-turn
+conversation. Auto-scroll follows the stream but stops as soon as you scroll up to read.
+
+Conversations are saved in the browser's `localStorage` (never on the server, so they stay on the machine
+that asked): the left **Chats** sidebar lists them newest first with **+ New chat** on top, a `×` per chat and
+**Delete all** at the bottom, both asking for confirmation. Opening one redraws the whole conversation —
+answers, tool lines, sources, timings and token counts — and the next question continues it. Each turn keeps
+its sources with excerpts trimmed to 240 characters; the store holds the 50 most recent chats and drops the
+oldest ones if the browser's quota is hit. Under 720 px the sidebar slides over the conversation and closes
+when you pick a chat. Re-indexing has no button: use `npm run ingest` or `POST /api/ingest`.
 
 ### 6.1 Architecture page (`/architecture.html`)
 
@@ -537,6 +573,13 @@ The passages the model received tell it which ids exist.
   run without tools, so a model that keeps calling still has to answer. `CHAT_TOOLS=false` turns it off, and
   it stays off automatically on a chat model without tool support (`npm run doctor` reports which).
 
+**Extended research** (`"mode": "research"`, the switch next to **Ask**) is the same two tools with room to be
+used: `RESEARCH_TOP_K` passages instead of `RETRIEVAL_TOP_K`, `RESEARCH_TOOL_MAX_ROUNDS` rounds,
+`RESEARCH_TOOL_CHAR_BUDGET` characters, and one extra paragraph in the prompt that inverts the default — search
+again with a different wording *before* answering even when the context looks sufficient, read the full page
+behind every block you mean to cite, and only answer once further calls stop adding anything. It is the slow
+lane: several rounds of a local model, minutes rather than seconds. `fast` is the default.
+
 Why a tool and not simply bigger chunks: whole pages in the context would cost 5–10× the tokens on every
 question to help the few that need it, and `CHAT_NUM_CTX` is the scarce resource on a local model.
 
@@ -551,6 +594,13 @@ cover the question, cite `[n]` after each claim, prefer binding sources, name re
 from a repository document, reply in the user's language — followed by the numbered context blocks (each with
 its heading path, source type, kind, authority and URL). Previous turns (last 6) are appended so follow-ups
 work; the new question comes last.
+
+On a follow-up those blocks are the ones the chat already gathered rather than the result of a new search
+(`carriedBlocks` in `ask.ts` re-reads them from the index by chunk id, and re-reads a page an earlier turn
+read whole from the document store). The prompt says so, and says plainly that nothing has looked this
+question up — so if the blocks do not cover it the model has to call `search` first. Retrieval and the query
+rewrite are skipped entirely, which is why a follow-up on the same subject answers in a fraction of the time
+the first question took.
 
 Generation streams from Ollama `/api/chat`, which returns two kinds of delta: `thinking` (reasoning) and
 `content` (the visible answer). Both are forwarded as separate stream events, so the UI can show the
@@ -580,11 +630,15 @@ Everything is an environment variable (`.env`, see `.env.example` for the full a
 | `RETRIEVAL_VECTOR_WEIGHT` / `RETRIEVAL_BM25_WEIGHT` | `1.0` / `1.0` | RRF weights |
 | `RETRIEVAL_MAX_CHUNKS_PER_DOC` | `3` | Diversity cap |
 | `RERANK` | `none` | `llm` for the LLM rerank stage |
-| `QUERY_REWRITE` | `true` | Rewrite follow-ups into standalone queries |
+| `QUERY_REWRITE` | `true` | Rewrite follow-ups into standalone queries (only when the turn retrieves) |
+| `FOLLOWUP_SEARCH` | `false` | `true` retrieves on every turn; by default a follow-up continues on the blocks the chat already gathered |
+| `FOLLOWUP_CARRY_MAX_BLOCKS` / `FOLLOWUP_CARRY_MAX_CHARS` | `24` / `24000` | How much of that context a follow-up carries (cited blocks survive first) |
 | `CHAT_TOOLS` | `true` | Give the model `search` and `fetch_document` (ignored on a model without tool support) |
 | `TOOL_SEARCH` / `TOOL_SEARCH_TOP_K` | `true` / `4` | Offer `search(query)`; new passages per call |
 | `TOOL_MAX_ROUNDS` | `3` | Tool rounds before the model must answer |
 | `DOC_TOOL_MAX_CHARS` / `TOOL_CHAR_BUDGET` | `20000` / `24000` | Cap per tool result / per answer |
+| `RESEARCH_TOP_K` | `RETRIEVAL_TOP_K` × 1.5 | Passages retrieved in "extended research" mode (`"mode":"research"`, the UI switch) |
+| `RESEARCH_TOOL_MAX_ROUNDS` / `RESEARCH_TOOL_CHAR_BUDGET` | `TOOL_MAX_ROUNDS` × 2 / `TOOL_CHAR_BUDGET` × 1.5 | Tool rounds and characters in that mode; never applied below the plain values |
 | `PORT` / `HOST` | `8787` / `127.0.0.1` | Set `HOST=0.0.0.0` to reach the UI from other machines on the LAN |
 | `EMBEDDING_PROVIDER` / `CHAT_PROVIDER` | `ollama` | `mock` runs the whole pipeline without Ollama (tests/CI) |
 | `SOURCES_FILE` | `./sources.yaml` | Scope, filters and rules for `npm run sync` |
@@ -734,8 +788,14 @@ tool is for. Look for a `tool search({"query":…})` line on stderr; if the mode
 **Answers hallucinate.** Lower `CHAT_TEMPERATURE` (0–0.2), reduce `RETRIEVAL_TOP_K` so irrelevant chunks do not
 dilute the context, or enable `RERANK=llm`.
 
-**Follow-ups retrieve the wrong thing.** Check the `Search query:` status line printed by `ask`; if the rewrite
-is poor, disable `QUERY_REWRITE` or improve the prompt in `src/generation/ask.ts`.
+**A follow-up ignores a new topic.** Follow-ups do not retrieve; they continue on the chat's existing blocks
+and rely on the model calling `search`. If it answers from a near-miss block instead, check `TOOL_SEARCH=true`
+and that `npm run doctor` reports tool support — without a search tool the carry is switched off and the turn
+retrieves. `FOLLOWUP_SEARCH=true` goes back to searching every turn, and **New chat** always starts fresh.
+
+**Follow-ups retrieve the wrong thing.** Only turns that actually retrieve go through the rewrite (a first
+question, or a follow-up with `FOLLOWUP_SEARCH=true`). Check the `Search query:` status line printed by `ask`;
+if the rewrite is poor, disable `QUERY_REWRITE` or improve the prompt in `src/generation/ask.ts`.
 
 **Endpoint questions land on prose (or vice versa).** Use the `kind` filter: `--kind api` / the UI chip
 restricts retrieval to OpenAPI/AsyncAPI definitions, `--kind project` to the repository cards ("who owns X",

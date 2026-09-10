@@ -244,6 +244,26 @@ describe("search tool", () => {
     expect(calls[0]?.opts).toMatchObject({ filters: { kinds: ["doc"] }, noRerank: true });
   });
 
+  it("numbers new blocks past the highest number in use, not past the count", async () => {
+    // A follow-up carries the blocks its chat already gathered *with their original numbers*, so a
+    // context of two blocks can be numbered [7][9]. Numbering from the count would hand the new
+    // passage [3] and quietly overwrite a block the earlier answers already cite.
+    const { searcher } = stubSearcher([passage("c1", "devportal:auth", "Client credentials flow.")]);
+    const carried = [citation(7, "adr:client-credentials"), citation(9, "devportal:other")];
+    const found = await runToolCall(call({ query: "client credentials" }, "search"), { store, searcher, citations: carried });
+    expect(found.citationNumbers).toEqual([10]);
+    expect(found.message.content).toContain("[10] Page > c1");
+
+    const read = await runToolCall(call({ source_id: "adr:client-credentials-missing" }), { store, citations: carried });
+    expect(read.ok).toBe(false);   // unknown id, but the numbering above is what this asserts
+    const fetched = await runToolCall(call({ source_id: "adr:client-credentials", section: "Decision" }), {
+      store,
+      citations: [citation(9, "devportal:other")],
+    });
+    expect(fetched.citationNumbers).toEqual([10]);
+    expect(fetched.newCitations?.[0]?.section).toBe("Decision");
+  });
+
   it("skips passages already in the context and documents already fetched whole", async () => {
     const { searcher } = stubSearcher([
       passage("seen", "devportal:auth", "Already shown."),

@@ -93,6 +93,12 @@ export interface ToolContext {
   filters?: RetrievalFilters;
   /** Citations already shown to the model; used to resolve "[3]", to number new blocks and to skip repeats. */
   citations: Citation[];
+  /**
+   * Lowest number a new block may take, minus one. A follow-up carries the numbers its chat already
+   * handed out, and a carried block that no longer resolves is dropped — but its number stays spent,
+   * or a new passage would take it and the `[n]` in the earlier answers would point at both.
+   */
+  numberFloor?: number;
   /** Character cap for this call, so a long answer cannot spend the whole context on tool results. */
   maxChars?: number;
   /**
@@ -158,6 +164,37 @@ export function parseTextToolCalls(text: string): ToolCall[] {
 }
 
 const blockList = (numbers: number[]): string => numbers.map((n) => `[${n}]`).join("");
+
+/**
+ * The number to give the next block. Taken from the highest number in use rather than the count of
+ * citations: a follow-up carries the blocks its chat already gathered *with their original numbers*
+ * (so the `[n]` in the earlier answers keep pointing at the same passage), and those numbers can
+ * run well past the length of the list once trimming has dropped a few.
+ */
+export function nextBlockNumber(citations: Citation[], floor = 0): number {
+  return citations.reduce((max, c) => Math.max(max, c.n), floor) + 1;
+}
+
+/** The citation for a whole document read with `fetch_document`, as block `n`. */
+export function documentCitation(doc: FetchedDocument, n: number): Citation {
+  return {
+    n,
+    chunkId: `${doc.sourceId}#document`,
+    sourceId: doc.sourceId,
+    title: doc.title,
+    sourceUrl: doc.sourceUrl,
+    sourceType: doc.sourceType,
+    kind: doc.kind,
+    authority: doc.authority,
+    headingPath: doc.section ? `${doc.title} > ${doc.section}` : doc.title,
+    relPath: doc.relPath,
+    excerpt: doc.content.length > 600 ? `${doc.content.slice(0, 600)}…` : doc.content,
+    lineStart: null,
+    lineEnd: null,
+    score: 0,
+    section: doc.section,
+  };
+}
 
 const failure = (name: string, msg: string, summary: string): ToolOutcome => ({
   ok: false,
@@ -270,7 +307,7 @@ async function runSearch(call: ToolCall, ctx: ToolContext): Promise<ToolOutcome>
     size += len;
   }
 
-  const start = ctx.citations.length + 1;
+  const start = nextBlockNumber(ctx.citations, ctx.numberFloor);
   const newCitations = kept.map((c, i) => toCitation(c, start + i));
   const numbers = newCitations.map((c) => c.n);
   ctx.searched?.set(key, numbers);
@@ -347,25 +384,8 @@ async function runFetch(call: ToolCall, ctx: ToolContext): Promise<ToolOutcome> 
 
   // A document that is already cited keeps its number, so the answer's [n] stay stable.
   const existing = ctx.citations.find((c) => c.sourceId === doc.sourceId);
-  const n = existing?.n ?? ctx.citations.length + 1;
-  const newCitation: Citation | undefined = existing
-    ? undefined
-    : {
-        n,
-        chunkId: `${doc.sourceId}#document`,
-        sourceId: doc.sourceId,
-        title: doc.title,
-        sourceUrl: doc.sourceUrl,
-        sourceType: doc.sourceType,
-        kind: doc.kind,
-        authority: doc.authority,
-        headingPath: doc.section ? `${doc.title} > ${doc.section}` : doc.title,
-        relPath: doc.relPath,
-        excerpt: doc.content.length > 600 ? `${doc.content.slice(0, 600)}…` : doc.content,
-        lineStart: null,
-        lineEnd: null,
-        score: 0,
-      };
+  const n = existing?.n ?? nextBlockNumber(ctx.citations, ctx.numberFloor);
+  const newCitation: Citation | undefined = existing ? undefined : documentCitation(doc, n);
 
   ctx.fetched?.set(`${doc.sourceId}::${doc.section ?? ""}`, n);
   if (key !== `${doc.sourceId}::${doc.section ?? ""}`) ctx.fetched?.set(key, n);

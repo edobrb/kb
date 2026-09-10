@@ -44,13 +44,16 @@ export class MockChatProvider implements ChatProvider {
     // result comes back.
     const wanted = MOCK_FETCH_RE.exec(question)?.[1];
     const wantedSearch = MOCK_SEARCH_RE.exec(question)?.[1];
+    const promptTokens = Math.ceil(messages.reduce((n, m) => n + m.content.length, 0) / 4);
     if (opts.tools?.length && !messages.some((m) => m.role === "tool")) {
       if (wantedSearch) {
         yield { toolCalls: [{ function: { name: "search", arguments: { query: wantedSearch.replace(/_/g, " ") } } }] };
+        yield { usage: { promptTokens, completionTokens: 8 } };
         return;
       }
       if (wanted) {
         yield { toolCalls: [{ function: { name: "fetch_document", arguments: { source_id: wanted } } }] };
+        yield { usage: { promptTokens, completionTokens: 8 } };
         return;
       }
     }
@@ -69,6 +72,9 @@ export class MockChatProvider implements ChatProvider {
     for (const word of text.split(/(?<=\s)/)) {
       yield { content: word };
     }
+    // Ollama closes a turn with its token counts; the mock reports the same shape (roughly
+    // 4 chars per token) so the usage plumbing is exercised without a model.
+    yield { usage: { promptTokens, completionTokens: Math.ceil(text.length / 4) } };
   }
   async complete(messages: ChatMessage[], opts?: ChatOptions): Promise<string> {
     let out = "";

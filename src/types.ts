@@ -119,15 +119,48 @@ export interface ChatMessage {
   tool_name?: string;
 }
 
+/**
+ * How hard the model works before answering.
+ *
+ * - `fast`: one retrieval pass, tools available but not pushed (the default).
+ * - `research`: more passages, more tool rounds and a bigger tool budget, and the prompt tells the
+ *   model to search from several angles and read whole documents before answering.
+ */
+export type AskMode = "fast" | "research";
+
+/**
+ * A CONTEXT block an earlier turn of the same chat already gathered, as the client saw it. Sent
+ * back with a follow-up question so the conversation can continue on those passages instead of
+ * running a fresh search (see `AskRequest.context`).
+ */
+export interface CarriedBlock {
+  /** The number the block had in the conversation; kept stable so the [n] in earlier answers hold. */
+  n: number;
+  /** Index chunk id, or `<sourceId>#document` for a whole page read with `fetch_document`. */
+  chunkId: string;
+  /** Section of that page, when the block was a section rather than the whole document. */
+  section?: string | null;
+  /** True when an earlier answer cited it: those survive first when the carry has to be trimmed. */
+  cited?: boolean;
+}
+
 export interface AskRequest {
   /** Full conversation; the last user message is the question. */
   messages: ChatMessage[];
+  /**
+   * Context blocks already gathered in this chat, from the previous turn's `sources` event. With
+   * them a follow-up continues on that context instead of re-querying the knowledge base; without
+   * them every turn retrieves (see config.retrieval.followUpSearch).
+   */
+  context?: CarriedBlock[];
   filters?: RetrievalFilters;
   topK?: number;
   /** Ask the model to emit reasoning tokens. Defaults to CHAT_THINK. */
   think?: boolean;
   /** Offer the knowledge-base tools (search, fetch_document). Defaults to CHAT_TOOLS and model support. */
   tools?: boolean;
+  /** Effort level; defaults to `fast`. */
+  mode?: AskMode;
 }
 
 export interface Citation {
@@ -147,16 +180,42 @@ export interface Citation {
   lineStart: number | null;
   lineEnd: number | null;
   score: number;
+  /**
+   * Section of the page the block covers, when it is a whole document read with `fetch_document`
+   * and narrowed to one heading. Carried into the next turn so the same section comes back rather
+   * than the whole page (see `CarriedBlock`).
+   */
+  section?: string | null;
 }
 
 /** Events streamed by the ask pipeline (used by CLI and SSE endpoint). */
+/**
+ * Token accounting for one answer, as reported by the model runtime. `promptTokens` is the last
+ * round's prompt (what actually occupies the context window right now); `completionTokens` is the
+ * sum over every round, reasoning included.
+ */
+export interface TokenUsage {
+  promptTokens: number;
+  completionTokens: number;
+  /** Context window the model is running with (Ollama `num_ctx`), so a UI can show saturation. */
+  numCtx: number;
+  /** True while the prompt size is a ~4-chars-per-token estimate: the round has not finished yet. */
+  estimated?: boolean;
+}
+
 export type AskEvent =
   | { type: "status"; message: string }
-  | { type: "sources"; citations: Citation[] }
+  /** Token counts after a completed round; the UI updates its live meter from these. */
+  | { type: "usage"; usage: TokenUsage }
+  /**
+   * The numbered blocks the answer may cite, re-sent whenever they change. `carried` blocks came
+   * from earlier turns of the chat rather than from a search run for this question.
+   */
+  | { type: "sources"; citations: Citation[]; carried?: number[] }
   /** A reasoning delta, streamed before/while the answer is produced (thinking models only). */
   | { type: "thinking"; text: string }
   | { type: "token"; text: string }
   /** The model called a knowledge-base tool; `citations` are the context blocks its result occupies. */
   | { type: "tool"; name: string; args: Record<string, unknown>; summary: string; ok: boolean; citations?: number[] }
-  | { type: "done"; answer: string; thinking: string; usedCitations: number[]; timings: Record<string, number> }
+  | { type: "done"; answer: string; thinking: string; usedCitations: number[]; timings: Record<string, number>; usage?: TokenUsage }
   | { type: "error"; message: string };

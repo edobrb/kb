@@ -31,6 +31,12 @@ function oneOf<T extends string>(name: string, allowed: readonly T[], fallback: 
 
 const root = process.cwd();
 
+// Base effort knobs, read once: the "extended research" defaults are multiples of them, so raising
+// TOOL_MAX_ROUNDS / TOOL_CHAR_BUDGET / RETRIEVAL_TOP_K lifts research mode with them.
+const toolMaxRounds = num("TOOL_MAX_ROUNDS", 3);
+const toolCharBudget = num("TOOL_CHAR_BUDGET", 24000);
+const retrievalTopK = num("RETRIEVAL_TOP_K", 6);
+
 export const config = {
   kbDir: path.resolve(root, str("KB_DIR", "./kb")),
   dataDir: path.resolve(root, str("DATA_DIR", "./data")),
@@ -71,7 +77,7 @@ export const config = {
     /** Ignored when the chat model has no tool support; `npm run doctor` reports it. */
     enabled: bool("CHAT_TOOLS", true),
     /** How many times the model may call tools before it must answer. */
-    maxRounds: num("TOOL_MAX_ROUNDS", 3),
+    maxRounds: toolMaxRounds,
     /** Offer `search(query)`: further knowledge-base searches on queries of the model's choosing. */
     search: bool("TOOL_SEARCH", true),
     /** New passages one `search` call returns (passages already in the context are skipped). */
@@ -82,7 +88,18 @@ export const config = {
      * Total characters tool results may add to one answer. Keep it well under CHAT_NUM_CTX * 4
      * minus the retrieved passages, or the model's context will overflow mid-answer.
      */
-    charBudget: num("TOOL_CHAR_BUDGET", 24000),
+    charBudget: toolCharBudget,
+    /**
+     * "Extended research" mode: the same tools, given room to be used — more rounds and a larger
+     * budget, plus a prompt that tells the model to keep searching and reading (see
+     * toolInstructions). Never applied below the plain values (see effortFor in generation/ask.ts).
+     * Watch the window: researchTopK passages + researchCharBudget/4 + CHAT_MAX_TOKENS must fit in
+     * CHAT_NUM_CTX.
+     */
+    research: {
+      maxRounds: num("RESEARCH_TOOL_MAX_ROUNDS", toolMaxRounds * 2),
+      charBudget: num("RESEARCH_TOOL_CHAR_BUDGET", Math.round(toolCharBudget * 1.5)),
+    },
   },
 
   chunking: {
@@ -103,13 +120,28 @@ export const config = {
 
   retrieval: {
     candidates: num("RETRIEVAL_CANDIDATES", 24),
-    topK: num("RETRIEVAL_TOP_K", 6),
+    topK: retrievalTopK,
+    /** Passages the first pass returns in "extended research" mode (see tools.research). */
+    researchTopK: num("RESEARCH_TOP_K", Math.round(retrievalTopK * 1.5)),
     vectorWeight: num("RETRIEVAL_VECTOR_WEIGHT", 1.0),
     bm25Weight: num("RETRIEVAL_BM25_WEIGHT", 1.0),
     maxChunksPerDoc: num("RETRIEVAL_MAX_CHUNKS_PER_DOC", 3),
     rerank: oneOf("RERANK", ["none", "llm"] as const, "none"),
     /** Rewrite follow-up questions into standalone search queries using the chat history. */
     queryRewrite: bool("QUERY_REWRITE", true),
+    /**
+     * A follow-up question in an ongoing chat reuses the CONTEXT blocks the chat already gathered
+     * instead of running a fresh retrieval pass: the conversation continues on the passages the
+     * earlier answers were built from, and the model calls `search(query)` itself when the question
+     * moves somewhere they do not cover. Set FOLLOWUP_SEARCH=true to search again on every turn
+     * (the old behaviour); a first question, or a follow-up whose caller carried no context, always
+     * retrieves.
+     */
+    followUpSearch: bool("FOLLOWUP_SEARCH", false),
+    /** Blocks a follow-up may carry over; the cited ones are kept first, then the most recent. */
+    carryMaxBlocks: num("FOLLOWUP_CARRY_MAX_BLOCKS", 24),
+    /** Characters those blocks may occupy, so a long chat cannot fill the window with old context. */
+    carryMaxChars: num("FOLLOWUP_CARRY_MAX_CHARS", toolCharBudget),
   },
 
   server: {

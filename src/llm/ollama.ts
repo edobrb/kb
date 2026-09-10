@@ -100,6 +100,9 @@ interface ChatStreamChunk {
   message?: { role: string; content?: string; thinking?: string; tool_calls?: RawToolCall[] };
   done?: boolean;
   error?: string;
+  /** Token counts, sent by Ollama on the final chunk of a response. */
+  prompt_eval_count?: number;
+  eval_count?: number;
 }
 
 interface RawToolCall {
@@ -113,6 +116,8 @@ export interface ChatDelta {
   thinking?: string;
   /** Tool calls requested in this turn; the caller runs them and continues the conversation. */
   toolCalls?: ToolCall[];
+  /** Final delta of a turn only: what the runtime says the turn cost (prompt + generated tokens). */
+  usage?: { promptTokens: number; completionTokens: number };
 }
 
 /**
@@ -223,7 +228,14 @@ export async function* ollamaChatStream(messages: ChatMessage[], opts: ChatOptio
           const calls = normalizeToolCalls(toolCalls);
           if (calls.length) yield { toolCalls: calls };
         }
-        if (chunk.done) return;
+        if (chunk.done) {
+          // The last chunk carries the turn's token counts; pass them on so the caller can report
+          // how full the context window is.
+          const promptTokens = chunk.prompt_eval_count ?? 0;
+          const completionTokens = chunk.eval_count ?? 0;
+          if (promptTokens || completionTokens) yield { usage: { promptTokens, completionTokens } };
+          return;
+        }
       }
     }
   } finally {

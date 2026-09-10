@@ -1,12 +1,12 @@
 import { ask } from "../generation/ask.js";
-import type { Authority, ChatMessage } from "../types.js";
+import type { AskMode, Authority, ChatMessage } from "../types.js";
 import { flagList, flagString, parseArgs } from "./args.js";
 
 const { flags, positional } = parseArgs();
 const question = positional.join(" ").trim();
 
 if (!question || flags["help"]) {
-  console.log(`Usage: npm run ask -- "your question" [--k 6] [--source-type adr,gitlab] [--kind code,doc] [--authority binding] [--lang en] [--json]
+  console.log(`Usage: npm run ask -- "your question" [--k 6] [--research] [--source-type adr,gitlab] [--kind code,doc] [--authority binding] [--lang en] [--json]
 
 Runs the full pipeline: hybrid retrieval -> Ollama chat model -> answer with [n] citations.`);
   process.exit(question ? 0 : 1);
@@ -16,6 +16,8 @@ const messages: ChatMessage[] = [{ role: "user", content: question }];
 const req = {
   messages,
   topK: flags["k"] ? Number(flagString(flags, "k")) : undefined,
+  // --research: wider retrieval, more tool rounds, and a prompt that says to keep digging.
+  mode: (flags["research"] ? "research" : "fast") as AskMode,
   filters: {
     sourceTypes: flagList(flags, "source-type"),
     kinds: flagList(flags, "kind"),
@@ -62,8 +64,11 @@ for await (const ev of ask(req)) {
         console.log(`  [${s.n}] ${s.headingPath}  (${s.sourceType}, ${s.authority})`);
         console.log(`      ${s.sourceUrl ?? s.relPath}`);
       }
+      const u = ev.usage;
       process.stderr.write(
-        `\x1b[2mretrieve ${ev.timings.retrieveMs ?? 0}ms · generate ${ev.timings.generateMs ?? 0}ms · total ${ev.timings.totalMs ?? 0}ms\x1b[0m\n`,
+        `\x1b[2mretrieve ${ev.timings.retrieveMs ?? 0}ms · generate ${ev.timings.generateMs ?? 0}ms · total ${ev.timings.totalMs ?? 0}ms` +
+          (u ? ` · ${u.promptTokens} in / ${u.completionTokens} out of ${u.numCtx} ctx` : "") +
+          `\x1b[0m\n`,
       );
       break;
     }

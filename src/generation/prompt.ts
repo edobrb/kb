@@ -1,4 +1,4 @@
-import type { ChatMessage, Citation, RetrievedChunk } from "../types.js";
+import type { AskMode, ChatMessage, Citation, RetrievedChunk } from "../types.js";
 
 export const SYSTEM_PROMPT = `You are the internal knowledge assistant for TeamSystem OnePlatform. Your knowledge base contains the Developer Portal documentation (TechDocs pages, API definitions), the OnePlatform GitLab repositories (README and docs, project cards, and the SOURCE CODE itself) and a few hand-written references (glossary, manifesto, ADRs).
 
@@ -40,11 +40,6 @@ export function toCitation(c: RetrievedChunk, n: number): Citation {
   };
 }
 
-/** Turn retrieved chunks into numbered citations (deterministic order = ranking order). */
-export function toCitations(chunks: RetrievedChunk[]): Citation[] {
-  return chunks.map((c, i) => toCitation(c, i + 1));
-}
-
 /** One numbered context block: heading path, kind, authority and URL, then the passage. */
 export function formatBlock(c: RetrievedChunk, n: number): string {
   const url = deepLink(c);
@@ -57,8 +52,33 @@ export function formatBlock(c: RetrievedChunk, n: number): string {
 
 export const BLOCK_SEPARATOR = "\n\n-----\n\n";
 
-export function formatContext(chunks: RetrievedChunk[]): string {
-  return chunks.map((c, i) => formatBlock(c, i + 1)).join(BLOCK_SEPARATOR);
+/**
+ * One numbered CONTEXT block, paired with the citation that describes it.
+ *
+ * Blocks reach an answer from three places — the retrieval pass, a `search`/`fetch_document` call,
+ * and (on a follow-up) the blocks the chat already gathered — so the number cannot be derived from
+ * a position in the list: it is carried explicitly, which is what keeps the `[n]` in earlier
+ * answers pointing at the same passage.
+ */
+export interface ContextBlock {
+  n: number;
+  /** The block as the model reads it, already headed with `[n]`. */
+  text: string;
+  citation: Citation;
+}
+
+/** One retrieved chunk as context block `n`. */
+export function blockFor(c: RetrievedChunk, n: number): ContextBlock {
+  return { n, text: formatBlock(c, n), citation: toCitation(c, n) };
+}
+
+/** Retrieved chunks as consecutive blocks, numbered from `start` (ranking order). */
+export function blocksFor(chunks: RetrievedChunk[], start = 1): ContextBlock[] {
+  return chunks.map((c, i) => blockFor(c, start + i));
+}
+
+export function formatContext(blocks: ContextBlock[]): string {
+  return blocks.map((b) => b.text).join(BLOCK_SEPARATOR);
 }
 
 /**
@@ -66,13 +86,23 @@ export function formatContext(chunks: RetrievedChunk[]): string {
  * local model with thinking off has nowhere to put deliberation, and a prompt that invites it to
  * weigh whether to call a tool gets that deliberation back as the answer.
  */
-export function toolInstructions(tools: string[]): string {
+export function toolInstructions(tools: string[], mode: AskMode = "fast", carried = false): string {
   const search = tools.includes("search");
   const fetch = tools.includes("fetch_document");
   if (!search && !fetch) return "";
   const lines = [
-    `Tools. Each CONTEXT block is a passage of a larger page, found by one search on the user's question.`,
+    carried
+      ? `Tools. Each CONTEXT block is a passage of a larger page, gathered earlier in this conversation: no search was run for this question, so the blocks cover what was asked before and not necessarily what is asked now.`
+      : `Tools. Each CONTEXT block is a passage of a larger page, found by one search on the user's question.`,
   ];
+  // The one thing the model must take from a carried context: nothing has looked this question up,
+  // so if the blocks fall short it has to say so itself. Without the search tool there is no call to
+  // point it at, and the bullet is left out rather than promising one it cannot make.
+  if (carried && search) {
+    lines.push(
+      `- This question has NOT been searched for. If the CONTEXT does not already cover it — a new topic, a service or document it does not mention — call search(query) before you answer, instead of answering from the nearest block.`,
+    );
+  }
   if (search) {
     lines.push(
       `- search(query): search the knowledge base again. Call it when the CONTEXT does not answer the question, or answers only part of it, and always before saying the knowledge base does not cover something. Use the words the documents would use, not the user's: the service, repository, endpoint, setting or error name; an acronym or its expansion; the Italian or English term; a term you saw in a CONTEXT block. One short query per call.`,
@@ -87,8 +117,39 @@ export function toolInstructions(tools: string[]): string {
     `- Otherwise answer straight from the CONTEXT. Do not explain or announce your decision about the tools, and never describe the CONTEXT block by block: either call a tool or write the answer.`,
     `- Tool results arrive as numbered blocks like the others and are cited the same way.`,
   );
+  if (mode === "research") lines.push(researchNote(search, fetch));
   return lines.join("\n");
 }
+
+/**
+ * Extra tool instructions for "extended research" mode. The user asked for a thorough answer, so the
+ * default "answer straight from the CONTEXT when you can" is inverted: search before answering, from
+ * more than one angle, and read the pages the passages were cut from. Kept imperative like the rest
+ * (see the note on toolInstructions).
+ */
+function researchNote(search: boolean, fetch: boolean): string {
+  const steps = [
+    search ? `search again with a different wording (a synonym, the English or Italian term, the service or repository name) before you answer, even when the CONTEXT looks sufficient` : "",
+    fetch ? `read the full page behind every CONTEXT block you intend to cite, with fetch_document` : "",
+  ].filter(Boolean);
+  return (
+    `- EXTENDED RESEARCH is on for this question: the user wants a thorough, well-sourced answer and accepts a slower one. ` +
+    `Before writing it, ${steps.join(", and ")}. Cover every part of a multi-part question, and check whether an ADR or standard ` +
+    `constrains what the descriptive pages say. Only answer once further calls stop adding anything, then answer at length, ` +
+    `citing every source you used.`
+  );
+}
+
+/**
+ * Where the CONTEXT came from, on the rounds that carry no tools (the final round, or a model
+ * without tool support). A follow-up continues on the blocks the chat already gathered rather than
+ * swapping them out under the user, so nothing has looked this question up — and with no tool left
+ * to fix that, the model has to be told to admit the gap instead of stretching a near-miss block
+ * into an answer.
+ */
+export const CARRIED_CONTEXT_NOTE =
+  `Context. The CONTEXT blocks were gathered earlier in this conversation; no search was run for ` +
+  `this question. Answer from them where they cover it, and say plainly what they do not cover.`;
 
 /**
  * Replaces the tool instructions on the final round, once the rounds or the character budget are
@@ -127,11 +188,17 @@ export interface BuildOptions {
   tools?: string[];
   /** Final round: tools were offered earlier but are withdrawn now, so say so (`NO_TOOLS_NOTE`). */
   toolsExhausted?: boolean;
+  /** `research` pushes the model to search and read more before answering. Defaults to `fast`. */
+  mode?: AskMode;
+  /** The context came from earlier turns of the chat, not from a search on this question. */
+  carried?: boolean;
 }
 
 function toolSection(opts: BuildOptions): string {
-  if (opts.toolsExhausted) return `\n\n${NO_TOOLS_NOTE}`;
-  return opts.tools?.length ? `\n\n${toolInstructions(opts.tools)}` : "";
+  const carriedNote = opts.carried ? `\n\n${CARRIED_CONTEXT_NOTE}` : "";
+  if (opts.toolsExhausted) return `\n\n${NO_TOOLS_NOTE}${carriedNote}`;
+  if (!opts.tools?.length) return carriedNote;
+  return `\n\n${toolInstructions(opts.tools, opts.mode, opts.carried)}`;
 }
 
 /**
@@ -141,24 +208,32 @@ function toolSection(opts: BuildOptions): string {
 export function buildMessages(
   history: ChatMessage[],
   question: string,
-  chunks: RetrievedChunk[],
+  blocks: ContextBlock[],
   opts: BuildOptions = {},
 ): ChatMessage[] {
   const maxHistory = opts.maxHistory ?? 6;
   const system: ChatMessage = {
     role: "system",
-    content: `${SYSTEM_PROMPT}${toolSection(opts)}\n\nCONTEXT:\n\n${formatContext(chunks)}`,
+    content: `${SYSTEM_PROMPT}${toolSection(opts)}\n\nCONTEXT:\n\n${formatContext(blocks)}`,
   };
   const prior = history.filter((m) => m.role !== "system").slice(-maxHistory);
   return [...[system], ...prior, { role: "user", content: question }];
 }
 
-/** Extract the [n] citation numbers the model actually used, in first-use order. */
-export function extractCitedNumbers(answer: string, max: number): number[] {
+/**
+ * Extract the `[n]` citation numbers the model actually used, in first-use order.
+ *
+ * `valid` is the numbers the context really has, not a count: a follow-up carries the numbers its
+ * chat handed out, so 24 blocks can be numbered up to `[26]` and a range check would throw away
+ * every citation above the count. Numbers with no block behind them (the model invented one, or its
+ * block was dropped as stale) are left out.
+ */
+export function extractCitedNumbers(answer: string, valid: Iterable<number>): number[] {
+  const known = new Set(valid);
   const seen = new Set<number>();
-  for (const m of answer.matchAll(/\[(\d{1,2})\]/g)) {
+  for (const m of answer.matchAll(/\[(\d{1,3})\]/g)) {
     const n = Number(m[1]);
-    if (n >= 1 && n <= max) seen.add(n);
+    if (known.has(n)) seen.add(n);
   }
   return [...seen];
 }

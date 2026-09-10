@@ -37,8 +37,49 @@
   header button:hover { border-color: var(--accent); }
   header .navlink { border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; font-size: 13px; color: var(--text); text-decoration: none; }
   header .navlink:hover { border-color: var(--accent); color: var(--accent); }
+  header button.on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+  /* Header spans the window; below it the sidebar and the conversation share the rest. */
+  .shell { flex: 1; display: flex; min-height: 0; }
   main { flex: 1; overflow-y: auto; }
-  .wrap { max-width: 900px; margin: 0 auto; padding: 20px 20px 120px; }
+
+  /* ---- saved chats ---- */
+  :root { --sidebar-w: 232px; }
+  .sidebar {
+    width: var(--sidebar-w); flex: 0 0 var(--sidebar-w); border-right: 1px solid var(--border); background: var(--panel);
+    display: flex; flex-direction: column; gap: 8px; padding: 12px 10px; overflow: hidden;
+  }
+  body.no-sidebar { --sidebar-w: 0px; }
+  body.no-sidebar .sidebar { display: none; }
+  .sidebar .new {
+    font: inherit; font-size: 13px; text-align: left; border: 1px solid var(--border); background: transparent;
+    color: var(--text); border-radius: 9px; padding: 7px 10px; cursor: pointer; font-weight: 600;
+  }
+  .sidebar .new:hover { border-color: var(--accent); color: var(--accent); }
+  .sidebar .listlabel { color: var(--muted); font-size: 11.5px; padding: 2px 4px; text-transform: uppercase; letter-spacing: .4px; }
+  .chatlist { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+  .chatlist .row {
+    display: flex; align-items: center; gap: 4px; border-radius: 8px; padding: 6px 6px 6px 9px; cursor: pointer; font-size: 13px;
+  }
+  .chatlist .row:hover { background: var(--user); }
+  .chatlist .row.on { background: var(--accent-soft); color: var(--accent); }
+  .chatlist .row .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chatlist .row .when { color: var(--muted); font-size: 11px; }
+  /* Always present, just faint: a hover-only control cannot be reached by touch or keyboard. */
+  .chatlist .row .del {
+    border: none; background: transparent; color: var(--muted); cursor: pointer; font: inherit; font-size: 14px;
+    line-height: 1; padding: 2px 5px; border-radius: 6px; opacity: .45;
+  }
+  .chatlist .row:hover .del, .chatlist .row.on .del, .chatlist .row .del:focus-visible { opacity: 1; }
+  .chatlist .row .del:hover { color: #dc2626; background: var(--bg); }
+  .chatlist .none { color: var(--muted); font-size: 12.5px; padding: 6px 4px; }
+  .sidebar .clear {
+    font: inherit; font-size: 12px; border: 1px solid var(--border); background: transparent; color: var(--muted);
+    border-radius: 8px; padding: 5px 9px; cursor: pointer;
+  }
+  .sidebar .clear:hover { color: #dc2626; border-color: #dc2626; }
+  /* --composer-h is kept in sync with the real composer height (it grows with the draft and wraps
+     on narrow windows), so the end of the conversation can always be scrolled clear of it. */
+  .wrap { max-width: 900px; margin: 0 auto; padding: 20px 20px calc(var(--composer-h, 140px) + 24px); }
   .filters { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 18px; align-items: center; }
   .filters .label { color: var(--muted); font-size: 12.5px; margin-right: 4px; }
   .chip {
@@ -67,8 +108,17 @@
     display: inline-block; background: var(--accent-soft); color: var(--accent); border-radius: 5px; font-size: 11px;
     padding: 0 5px; margin: 0 1px; vertical-align: super; line-height: 1.4; cursor: pointer; text-decoration: none; font-weight: 600;
   }
-  .sources { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 10px; }
-  .sources summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
+  /* Above the answer, and closed: a couple of dozen passages must not push the answer off screen. */
+  .sources { margin: 0 0 12px; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+  .sources summary {
+    cursor: pointer; color: var(--muted); font-size: 12.5px; list-style: none; display: flex; gap: 8px; align-items: center;
+  }
+  .sources summary::-webkit-details-marker { display: none; }
+  .sources summary::before { content: "\25b8"; font-size: 11px; }
+  .sources details[open] > summary::before { content: "\25be"; }
+  .sources summary:hover { color: var(--accent); }
+  .sources summary .cited { color: var(--accent); }
+  .sources details[open] { padding-bottom: 4px; }
   .src { display: grid; grid-template-columns: 26px 1fr; gap: 6px 8px; padding: 8px 0; border-bottom: 1px dashed var(--border); font-size: 13px; }
   .src:last-child { border-bottom: none; }
   .src .n { color: var(--accent); font-weight: 650; }
@@ -101,32 +151,72 @@
     display: inline-block; width: 7px; height: 13px; background: var(--accent); vertical-align: -2px;
     margin-left: 2px; border-radius: 1px; animation: pulse 1s infinite;
   }
-  header button.on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
   .error { color: #dc2626; }
-  .timing { color: var(--muted); font-size: 11.5px; margin-top: 8px; }
+  .timing { color: var(--muted); font-size: 11.5px; margin-top: 8px; font-variant-numeric: tabular-nums; }
+  .actions { display: flex; gap: 6px; margin-top: 8px; }
+  .actions button {
+    font: inherit; font-size: 11.5px; color: var(--muted); background: transparent; border: 1px solid var(--border);
+    border-radius: 7px; padding: 3px 9px; cursor: pointer;
+  }
+  .actions button:hover { color: var(--accent); border-color: var(--accent); }
   .tools { margin: 2px 0 8px; font-size: 12px; color: var(--muted); }
   .tools .tool { padding: 2px 0; }
   .tools .tool code { background: var(--code); padding: 1px 5px; border-radius: 5px; font-size: 11.5px; }
   .tools .tool.err { color: var(--binding); }
   .composer {
-    position: fixed; bottom: 0; left: 0; right: 0; background: linear-gradient(transparent, var(--bg) 30%); padding: 20px;
+    position: fixed; bottom: 0; left: var(--sidebar-w); right: 0; background: linear-gradient(transparent, var(--bg) 30%); padding: 20px;
+    /* The band is fixed over the conversation and spans the whole width: without this it swallows
+       every wheel and click aimed at the bottom of the thread ("the scroll gets stuck"). */
+    pointer-events: none;
   }
+  .composer form { pointer-events: auto; }
   .composer form {
-    max-width: 900px; margin: 0 auto; display: flex; gap: 8px; background: var(--panel); border: 1px solid var(--border);
-    border-radius: 14px; padding: 8px 8px 8px 14px; box-shadow: 0 6px 24px rgba(0,0,0,.06);
+    max-width: 900px; margin: 0 auto; display: flex; flex-direction: column; gap: 8px; background: var(--panel);
+    border: 1px solid var(--border); border-radius: 14px; padding: 10px 12px; box-shadow: 0 6px 24px rgba(0,0,0,.06);
   }
   .composer form:focus-within { border-color: var(--accent); }
   textarea {
-    flex: 1; border: none; outline: none; resize: none; background: transparent; color: var(--text); font: inherit; max-height: 160px; padding: 6px 0;
+    width: 100%; border: none; outline: none; resize: none; background: transparent; color: var(--text); font: inherit; max-height: 160px; padding: 4px 2px;
   }
+  /* Controls that shape the next answer live next to the button that sends it. */
+  .controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .controls .grow { flex: 1; }
+  .modes { display: inline-flex; border: 1px solid var(--border); border-radius: 999px; padding: 2px; gap: 2px; }
+  .modes button {
+    font: inherit; font-size: 12.5px; border: none; background: transparent; color: var(--muted); cursor: pointer;
+    border-radius: 999px; padding: 3px 11px;
+  }
+  .modes button:hover { color: var(--text); }
+  .modes button.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+  .toggle-btn {
+    font: inherit; font-size: 12.5px; border: 1px solid var(--border); background: transparent; color: var(--muted);
+    border-radius: 999px; padding: 4px 11px; cursor: pointer;
+  }
+  .toggle-btn:hover { color: var(--text); border-color: var(--accent); }
+  .toggle-btn.on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); font-weight: 600; }
+  /* Live token meter: deliberately quiet — it is telemetry, not part of the conversation. */
+  .usage { color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .usage.hot { color: var(--warn); }
   .send {
-    border: none; background: var(--accent); color: white; border-radius: 10px; padding: 0 16px; cursor: pointer; font-weight: 600;
+    border: none; background: var(--accent); color: white; border-radius: 10px; padding: 7px 18px; cursor: pointer; font-weight: 600;
   }
   .send:disabled { opacity: .5; cursor: default; }
   .empty { color: var(--muted); text-align: center; margin-top: 12vh; }
   .empty h2 { font-weight: 600; color: var(--text); font-size: 18px; margin-bottom: 6px; }
   .empty .ex { display: inline-block; margin: 4px; border: 1px solid var(--border); border-radius: 10px; padding: 6px 10px; cursor: pointer; font-size: 13px; background: var(--panel); }
   .empty .ex:hover { border-color: var(--accent); }
+
+  /* Too narrow for the sidebar to have its own column: let it slide over the conversation instead.
+     Last in the sheet so it wins over the .composer / .sidebar rules above. */
+  @media (max-width: 720px) {
+    /* position:fixed takes it out of the flex row, so the conversation gets the full width. */
+    .sidebar { position: fixed; top: 57px; bottom: 0; left: 0; width: 232px; z-index: 3; box-shadow: 0 0 24px rgba(0,0,0,.18); }
+    .composer { left: 0; padding: 12px; }
+    .wrap { padding: 16px 14px calc(var(--composer-h, 160px) + 20px); }
+    header { gap: 8px; padding: 10px 12px; flex-wrap: wrap; }
+    header .meta { display: none; }
+    .wrap { padding: 16px 14px 130px; }
+  }
 </style>
 </head>
 <body>
@@ -136,10 +226,15 @@
   <span class="spacer"></span>
   <a href="/map.html" class="navlink" title="2-D map of every chunk in the index">Map</a>
   <a href="/architecture.html" class="navlink" title="How the knowledge base is gathered, indexed and searched">Architecture</a>
-  <button id="thinkToggle" title="Ask the model to reason step by step and stream its reasoning">Reasoning</button>
-  <button id="newChat" title="Start a new conversation">New chat</button>
-  <button id="reindex" title="Incrementally re-index kb/">Re-index</button>
+  <button id="sidebarToggle" title="Show or hide saved chats">Chats</button>
 </header>
+<div class="shell">
+<aside class="sidebar" id="sidebar">
+  <button class="new" id="newChat" title="Start a new conversation">+ New chat</button>
+  <div class="listlabel">Saved on this browser</div>
+  <div class="chatlist" id="chatList"></div>
+  <button class="clear" id="clearChats" title="Delete every saved chat">Delete all</button>
+</aside>
 <main>
   <div class="wrap">
     <div class="filters" id="filters"><span class="label">Sources:</span></div>
@@ -157,10 +252,20 @@
     </div>
   </div>
 </main>
+</div>
 <div class="composer">
   <form id="form">
     <textarea id="input" rows="1" placeholder="Ask a question… (Enter to send, Shift+Enter for newline)"></textarea>
-    <button class="send" id="send" type="submit">Ask</button>
+    <div class="controls">
+      <div class="modes" id="modes" role="group" aria-label="Answer mode">
+        <button type="button" data-mode="fast" class="on" title="One search, then answer. The model may still look things up when the passages fall short.">Fast</button>
+        <button type="button" data-mode="research" title="Wider retrieval and more rounds: the model searches from several angles and reads whole documents before answering. Slower.">Extended research</button>
+      </div>
+      <button type="button" class="toggle-btn" id="thinkToggle" title="Ask the model to reason step by step and stream its reasoning">Reasoning</button>
+      <span class="grow"></span>
+      <span class="usage" id="usage" title="Tokens in the prompt and generated so far, and how full the model's context window is"></span>
+      <button class="send" id="send" type="submit">Ask</button>
+    </div>
   </form>
 </div>
 
@@ -168,13 +273,26 @@
 (() => {
   const $ = (s) => document.querySelector(s);
   const thread = $("#thread"), input = $("#input"), sendBtn = $("#send"), form = $("#form");
+  const emptyHtml = $("#empty").outerHTML;   // re-inserted whenever a new chat starts
   const messages = [];            // conversation sent to the API
+  // The blocks this chat has already gathered, sent back with the next question so the server
+  // continues on them instead of searching the knowledge base again. `carryFilters` is the filter
+  // set they were gathered under: changing the filters is an instruction about what to look at, so
+  // it drops the carry and the next question retrieves afresh.
+  let carry = [], carryFilters = "";
+  const carryFrom = (citations, used) => {
+    const usedSet = new Set(used || []);
+    return (citations || [])
+      .filter(c => c && c.chunkId && c.n)
+      .map(c => ({ n: c.n, chunkId: c.chunkId, section: c.section ?? null, cited: usedSet.has(c.n) }));
+  };
   const activeTypes = new Set();  // source_type filter
   const activeKinds = new Set();  // kind filter (doc / code / project / api)
 
   // ---- header info + facets --------------------------------------------------
   fetch("/api/health").then(r => r.json()).then(h => {
     $("#meta").textContent = `${h.chunks} chunks · ${h.embeddingModel} · ${h.chatModel}`;
+    if (h.numCtx) { usage.numCtx = h.numCtx; renderUsage(); }
     if (h.think) setThink(true);
   }).catch(() => { $("#meta").textContent = "API not reachable"; });
 
@@ -182,6 +300,50 @@
   let think = false;
   function setThink(on) { think = on; $("#thinkToggle").classList.toggle("on", on); }
   $("#thinkToggle").onclick = () => setThink(!think);
+
+  // ---- live token meter -------------------------------------------------------
+  // The server reports exact counts only when a round ends (that is when Ollama sends them), so
+  // between rounds the generated side is extrapolated from the characters we have streamed
+  // (~4 chars/token) and marked with a "~". `roundOut` is this round's output alone: the prompt of
+  // the next round already contains the previous one, so adding the cumulative total would
+  // double-count it against the window.
+  const usage = { prompt: 0, out: 0, roundOut: 0, numCtx: 0, estimated: false, liveChars: 0 };
+  const fmt = (n) => (n >= 10000 ? `${(n / 1000).toFixed(1)}k` : String(n));
+  function renderUsage() {
+    const el = $("#usage");
+    if (!usage.prompt && !usage.out && !usage.liveChars) { el.textContent = usage.numCtx ? `ctx ${fmt(usage.numCtx)}` : ""; el.classList.remove("hot"); return; }
+    const live = Math.ceil(usage.liveChars / 4);
+    const approx = usage.estimated || live > 0 ? "~" : "";
+    const inWindow = usage.prompt + usage.roundOut + live;
+    const pct = usage.numCtx ? Math.round((inWindow / usage.numCtx) * 100) : null;
+    el.textContent = `${approx}${fmt(usage.prompt)} in · ${approx}${fmt(usage.out + live)} out` + (pct === null ? "" : ` · ctx ${pct}% of ${fmt(usage.numCtx)}`);
+    el.classList.toggle("hot", pct !== null && pct >= 85);
+  }
+  function applyUsage(u) {
+    if (u.estimated) {
+      // A new round is starting: the prompt now carries everything generated so far.
+      usage.prompt = u.promptTokens; usage.roundOut = 0; usage.estimated = true;
+    } else {
+      usage.roundOut = Math.max(0, u.completionTokens - usage.out);
+      usage.prompt = u.promptTokens; usage.out = u.completionTokens; usage.estimated = false;
+    }
+    usage.liveChars = 0;
+    if (u.numCtx) usage.numCtx = u.numCtx;
+    renderUsage();
+  }
+  function resetUsage() {
+    usage.prompt = usage.out = usage.roundOut = usage.liveChars = 0; usage.estimated = false;
+    renderUsage();
+  }
+
+  // ---- answer mode: "fast" (one pass) or "research" (the server widens retrieval and tool rounds) ----
+  let mode = "fast";
+  const modeBtns = [...document.querySelectorAll("#modes button")];
+  modeBtns.forEach(b => b.onclick = () => {
+    mode = b.dataset.mode;
+    modeBtns.forEach(o => o.classList.toggle("on", o === b));
+    input.focus();
+  });
 
   fetch("/api/facets").then(r => r.json()).then(f => {
     const box = $("#filters");
@@ -204,7 +366,8 @@
       .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>")
       .replace(/\[(https?:\/\/[^\]\s]+)\]\((https?:\/\/[^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
       .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
-      .replace(/\[(\d{1,2})\]/g, '<a class="cite" data-n="$1" href="#">$1</a>');
+      // Three digits: a long chat's block numbers keep climbing past the number of blocks it holds.
+      .replace(/\[(\d{1,3})\]/g, '<a class="cite" data-n="$1" href="#">$1</a>');
   }
   function renderMarkdown(md) {
     const lines = esc(md).split("\n");
@@ -243,17 +406,20 @@
     el.innerHTML = `<div class="bubble"></div>`; el.firstChild.textContent = text;
     thread.appendChild(el); scroll();
   }
-  function addAssistant() {
+  /** `quiet` skips the live progress line: a restored turn has nothing to report. */
+  function addAssistant(quiet) {
     const el = document.createElement("div"); el.className = "msg assistant";
-    el.innerHTML = `<div class="status"><span class="dot"></span><span class="txt">Thinking…</span></div>
+    el.innerHTML = `${quiet ? "" : `<div class="status"><span class="dot"></span><span class="txt">Thinking…</span></div>`}
       <div class="bubble">
         <details class="think" hidden><summary><span class="label">Reasoning</span><span class="ttime"></span></summary><div class="think-body"></div></details>
-        <div class="tools" hidden></div><div class="answer"></div><div class="sources" hidden></div><div class="timing"></div>
+        <div class="sources" hidden></div><div class="tools" hidden></div><div class="answer"></div><div class="timing"></div>
+        <div class="actions" hidden><button type="button" class="copy">Copy</button><button type="button" class="export">Export .md</button></div>
       </div>`;
     thread.appendChild(el); scroll();
     return el;
   }
-  function renderSources(el, citations, used) {
+  /** `carried` marks a turn that continued on the chat's existing blocks instead of searching. */
+  function renderSources(el, citations, used, carried) {
     const box = el.querySelector(".sources");
     if (!citations.length) { box.hidden = false; box.innerHTML = `<span class="status">No relevant passages found.</span>`; return; }
     const usedSet = new Set(used || []);
@@ -269,25 +435,276 @@
         <div class="excerpt">${esc(c.excerpt)}</div>
       </div>`;
     }).join("");
+    const docs = new Set(citations.map(c => c.sourceId ?? c.title)).size;
+    const summary =
+      `${citations.length} passage${citations.length === 1 ? "" : "s"} from ${docs} document${docs === 1 ? "" : "s"}` +
+      (carried ? " · carried on from this chat" : "") +
+      (used ? ` · <span class="cited">${usedSet.size} cited</span>` : "");
     box.hidden = false;
-    box.innerHTML = `<details open><summary>${citations.length} sources${used ? ` · ${usedSet.size} cited` : ""}</summary>${items}</details>`;
+    // Closed: the answer is what the reader came for, the passages are there to check it.
+    box.innerHTML = `<details><summary>${summary}</summary>${items}</details>`;
     box.querySelectorAll(".toggle").forEach(t => t.onclick = () => {
       const src = t.closest(".src"); src.classList.toggle("open"); t.textContent = src.classList.contains("open") ? "hide passage" : "show passage";
     });
   }
   const mainEl = document.querySelector("main");
   let stick = true;   // keep following the stream unless the user scrolls up to read
+  let lastTop = 0;
   mainEl.addEventListener("scroll", () => {
-    stick = mainEl.scrollHeight - mainEl.scrollTop - mainEl.clientHeight < 80;
+    const top = mainEl.scrollTop;
+    const fromBottom = mainEl.scrollHeight - top - mainEl.clientHeight;
+    // Any upward move hands control back to the reader — waiting for 80 px of it meant a small
+    // scroll during a stream was yanked straight back to the bottom. Returning to the end re-arms.
+    if (top < lastTop - 2) stick = false;
+    else if (fromBottom < 80) stick = true;
+    lastTop = top;
   });
   function scroll(force) { if (force) stick = true; if (stick) mainEl.scrollTop = mainEl.scrollHeight; }
+
+  // The composer floats over the conversation, so the thread needs a matching gap under it — and it
+  // is not a fixed gap: the box grows with a multi-line draft and wraps its controls on a narrow
+  // window. Measure it instead of guessing.
+  const composerEl = document.querySelector(".composer");
+  const syncComposerHeight = () => {
+    document.documentElement.style.setProperty("--composer-h", `${Math.ceil(composerEl.getBoundingClientRect().height)}px`);
+    scroll();   // a taller composer must not push the last answer out of sight
+  };
+  new ResizeObserver(syncComposerHeight).observe(composerEl);
+  syncComposerHeight();
+
+  // A wheel over the composer card itself would otherwise die there (the band around it is
+  // pointer-events:none, so those wheels reach the conversation on their own).
+  composerEl.addEventListener("wheel", (e) => {
+    const ta = e.target.closest("textarea");
+    if (ta && ta.scrollHeight > ta.clientHeight + 1) return;   // a long draft scrolls itself first
+    const px = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaMode === 2 ? e.deltaY * mainEl.clientHeight : e.deltaY;
+    mainEl.scrollTop += px;
+    e.preventDefault();
+  }, { passive: false });
 
   thread.addEventListener("click", (e) => {
     const a = e.target.closest("a.cite"); if (!a) return;
     e.preventDefault();
     const src = a.closest(".msg").querySelector(`#src-${a.dataset.n}`);
-    if (src) { src.classList.add("open"); src.querySelector(".toggle").textContent = "hide passage"; src.scrollIntoView({ behavior: "smooth", block: "center" }); }
+    if (!src) return;
+    src.closest("details")?.setAttribute("open", "");   // the list is folded away by default
+    src.classList.add("open");
+    src.querySelector(".toggle").textContent = "hide passage";
+    src.scrollIntoView({ behavior: "smooth", block: "center" });
   });
+
+  /** The grey line under an answer: latency, then what the turn cost in tokens. */
+  function timingText(timings, u, roundOut) {
+    const t = timings || {};
+    const base = `retrieval ${t.retrieveMs ?? 0} ms · generation ${t.generateMs ?? 0} ms`;
+    if (!u) return base;
+    const pct = u.numCtx ? ` · ${Math.round(((u.promptTokens + (roundOut || 0)) / u.numCtx) * 100)}% of ${fmt(u.numCtx)} ctx` : "";
+    return `${base} · ${fmt(u.promptTokens)} in / ${fmt(u.completionTokens)} out${pct}`;
+  }
+
+  /** Draw a finished turn (a restored one, or the one just streamed) into an assistant bubble. */
+  function renderTurn(el, turn) {
+    if (turn.tools?.length) {
+      const box = el.querySelector(".tools");
+      box.hidden = false;
+      box.innerHTML = turn.tools.map(t =>
+        `<div class="tool${t.ok ? "" : " err"}">${t.ok ? (t.name === "search" ? "searched" : "read document") : "tool error"} <code>${esc(t.summary)}</code></div>`,
+      ).join("");
+    }
+    if (turn.thinking) {
+      const thinkEl = el.querySelector(".think");
+      thinkEl.hidden = false;
+      el.querySelector(".think-body").textContent = turn.thinking;
+    }
+    el.querySelector(".answer").innerHTML = renderMarkdown(turn.answer);
+    renderSources(el, turn.citations || [], turn.usedCitations, turn.carried);
+    el.querySelector(".timing").textContent = timingText(turn.timings, turn.usage, turn.roundOut);
+    enableActions(el, turn.q, turn.answer, turn.citations || [], turn.usedCitations);
+  }
+
+  // ---- export ------------------------------------------------------------------
+  /**
+   * One answer as a self-contained markdown document: the question, the answer as the model wrote
+   * it (citation markers intact), and the numbered sources those markers point at, with links. The
+   * cited ones are listed first; the rest of the retrieved passages follow, so a reader can tell
+   * what the answer was based on and what it ignored.
+   */
+  function answerMarkdown(question, answer, citations, used) {
+    const usedSet = new Set(used && used.length ? used : citations.map(c => c.n));
+    const ref = (c) => {
+      const where = [c.headingPath, c.lineStart ? `L${c.lineStart}-${c.lineEnd}` : ""].filter(Boolean).join(" · ");
+      const link = c.sourceUrl ? `<${c.sourceUrl}>` : c.relPath;
+      return `- [${c.n}] **${c.title}** — ${where}\n  ${link}  \n  \`${c.sourceType}\`${c.kind && c.kind !== "doc" ? ` \`${c.kind}\`` : ""} \`${c.authority}\``;
+    };
+    const cited = citations.filter(c => usedSet.has(c.n));
+    const rest = citations.filter(c => !usedSet.has(c.n));
+    const out = [`# ${question}`, "", answer.trim(), "", "## Sources", ""];
+    out.push(cited.length ? cited.map(ref).join("\n") : "_No source was cited._");
+    if (rest.length) out.push("", "<details><summary>Retrieved but not cited</summary>", "", rest.map(ref).join("\n"), "", "</details>");
+    out.push("", `---`, `Generated by ai-wiki assistant · ${new Date().toISOString().slice(0, 16).replace("T", " ")}`);
+    return out.join("\n") + "\n";
+  }
+
+  function download(name, text) {
+    const url = URL.createObjectURL(new Blob([text], { type: "text/markdown;charset=utf-8" }));
+    const a = document.createElement("a");
+    a.href = url; a.download = name; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  async function copyText(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // Clipboard API needs a secure context; over plain http:// fall back to a hidden selection.
+      const ta = document.createElement("textarea");
+      ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.select();
+      const ok = document.execCommand?.("copy") ?? false;
+      ta.remove();
+      return ok;
+    }
+  }
+
+  const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 60) || "answer";
+
+  /** Turn on the Copy / Export buttons of a finished answer. */
+  function enableActions(el, question, answer, citations, used) {
+    const box = el.querySelector(".actions");
+    const md = () => answerMarkdown(question, answer, citations, used);
+    box.hidden = false;
+    const copyBtn = box.querySelector(".copy");
+    copyBtn.onclick = async () => {
+      const ok = await copyText(md());
+      copyBtn.textContent = ok ? "Copied" : "Copy failed";
+      setTimeout(() => { copyBtn.textContent = "Copy"; }, 1500);
+    };
+    box.querySelector(".export").onclick = () => {
+      download(`ai-wiki-${slug(question)}.md`, md());
+    };
+  }
+
+  // ---- saved chats (localStorage) ----------------------------------------------
+  // Whole conversations live in the browser, never on the server: one entry per chat, each turn
+  // keeping what it takes to redraw it (answer, sources, tool lines, timings, tokens). Passage
+  // excerpts are trimmed on the way in — 30 sources x 600 chars per turn would fill the 5 MB quota
+  // in a handful of chats.
+  const STORE_KEY = "ai-wiki.chats.v1";
+  const SIDEBAR_KEY = "ai-wiki.sidebar";
+  const MAX_CHATS = 50;
+  const STORED_EXCERPT = 240;
+
+  let chats = [];
+  let currentId = null;
+
+  function readChats() {
+    try {
+      const raw = localStorage.getItem(STORE_KEY);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed.filter(c => c && c.id && Array.isArray(c.turns)) : [];
+    } catch { return []; }   // private window, cleared storage, or a half-written value
+  }
+  /** Write the list back, dropping the oldest chats until it fits the quota. */
+  function persist() {
+    for (let attempt = 0; attempt < 8; attempt++) {
+      try { localStorage.setItem(STORE_KEY, JSON.stringify(chats)); return true; }
+      catch {
+        const oldest = [...chats].sort((a, b) => (a.updatedAt || 0) - (b.updatedAt || 0))[0];
+        if (!oldest || chats.length <= 1) return false;
+        chats = chats.filter(c => c !== oldest);
+      }
+    }
+    return false;
+  }
+  const slimCitation = (c) => ({ ...c, excerpt: (c.excerpt || "").slice(0, STORED_EXCERPT), score: undefined });
+
+  function saveTurn(turn) {
+    const stored = { ...turn, citations: (turn.citations || []).map(slimCitation) };
+    let chat = chats.find(c => c.id === currentId);
+    if (!chat) {
+      chat = { id: `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, title: turn.q, createdAt: Date.now(), turns: [] };
+      chats.unshift(chat);
+      chats = chats.slice(0, MAX_CHATS);
+      currentId = chat.id;
+    }
+    chat.turns.push(stored);
+    chat.updatedAt = Date.now();
+    persist();
+    renderChatList();
+  }
+
+  const when = (ts) => {
+    if (!ts) return "";
+    const d = new Date(ts);
+    const sameDay = new Date().toDateString() === d.toDateString();
+    return sameDay ? d.toTimeString().slice(0, 5) : d.toLocaleDateString(undefined, { day: "numeric", month: "short" });
+  };
+
+  function renderChatList() {
+    const box = $("#chatList");
+    if (!chats.length) { box.innerHTML = `<div class="none">No saved chats yet.</div>`; return; }
+    box.innerHTML = "";
+    for (const c of chats) {
+      const row = document.createElement("div");
+      row.className = `row${c.id === currentId ? " on" : ""}`;
+      row.title = c.title;
+      row.innerHTML = `<span class="name"></span><span class="when">${when(c.updatedAt)}</span><button class="del" title="Delete this chat">×</button>`;
+      row.querySelector(".name").textContent = c.title || "(untitled)";
+      row.onclick = (e) => { if (!e.target.closest(".del")) openChat(c.id); };
+      row.querySelector(".del").onclick = () => deleteChat(c.id);
+      box.appendChild(row);
+    }
+  }
+
+  /** Re-draw a saved conversation and make it the one the next question continues. */
+  function openChat(id) {
+    const chat = chats.find(c => c.id === id);
+    if (!chat || busy) return;
+    currentId = id;
+    messages.length = 0;
+    thread.innerHTML = "";
+    resetUsage();
+    for (const turn of chat.turns) {
+      addUser(turn.q);
+      renderTurn(addAssistant(true), turn);
+      messages.push({ role: "user", content: turn.q }, { role: "assistant", content: turn.answer });
+    }
+    const last = chat.turns[chat.turns.length - 1];
+    carry = carryFrom(last?.citations, last?.usedCitations);
+    carryFilters = last?.filterKey ?? "";
+    if (last?.usage) {
+      applyUsage(last.usage);
+      // completionTokens is the whole conversation-turn; the meter's window figure wants the last
+      // round alone, which was saved with the turn.
+      if (typeof last.roundOut === "number") { usage.roundOut = last.roundOut; renderUsage(); }
+    }
+    renderChatList();
+    scroll(true);
+    closeSidebarIfOverlay();
+    input.focus();
+  }
+
+  function startNewChat() {
+    if (busy) return;
+    currentId = null;
+    messages.length = 0;
+    carry = []; carryFilters = "";
+    thread.innerHTML = emptyHtml;
+    resetUsage();
+    renderChatList();
+    closeSidebarIfOverlay();
+    input.focus();
+  }
+
+  function deleteChat(id) {
+    const chat = chats.find(c => c.id === id);
+    // There is no undo and nothing on the server to recover from, so ask first.
+    if (chat && !confirm(`Delete "${chat.title}"?`)) return;
+    chats = chats.filter(c => c.id !== id);
+    persist();
+    if (id === currentId) startNewChat(); else renderChatList();
+  }
 
   // ---- SSE client -------------------------------------------------------------
   async function askStream(payload, handlers) {
@@ -319,7 +736,8 @@
     const el = addAssistant();
     const statusTxt = el.querySelector(".status .txt"), answerEl = el.querySelector(".answer");
     const thinkEl = el.querySelector(".think"), thinkBody = el.querySelector(".think-body");
-    let answer = "", thinking = "", citations = [], thinkStart = 0, frame = 0;
+    let answer = "", thinking = "", citations = [], thinkStart = 0, frame = 0, carriedNow = false;
+    const toolTrace = [];
 
     // Repaint at most once per animation frame: the model can emit tokens faster than we can
     // re-render markdown, and painting every token makes the answer stutter.
@@ -327,17 +745,21 @@
       frame = 0;
       answerEl.innerHTML = renderMarkdown(answer) + (busy ? '<span class="cursor"></span>' : "");
       if (thinking) { thinkBody.textContent = thinking; thinkBody.scrollTop = thinkBody.scrollHeight; }
+      renderUsage();
       scroll();
     };
     const schedulePaint = () => { if (!frame) frame = requestAnimationFrame(paint); };
 
     const filters = activeTypes.size || activeKinds.size ? { sourceTypes: activeTypes.size ? [...activeTypes] : undefined, kinds: activeKinds.size ? [...activeKinds] : undefined } : undefined;
+    const filterKey = JSON.stringify(filters ?? null);
+    const context = carry.length && filterKey === carryFilters ? carry : undefined;
     try {
-      await askStream({ messages, filters, think }, {
+      await askStream({ messages, context, filters, think, mode }, {
         status: (ev) => { statusTxt.textContent = ev.message; },
-        sources: (ev) => { citations = ev.citations; renderSources(el, citations); scroll(); },
+        sources: (ev) => { citations = ev.citations; carriedNow = Boolean(ev.carried?.length); renderSources(el, citations, null, carriedNow); scroll(); },
         // The model used a kb tool (search again, or read a whole document); show what it pulled in.
         tool: (ev) => {
+          toolTrace.push({ name: ev.name, summary: ev.summary, ok: ev.ok });
           const box = el.querySelector(".tools");
           box.hidden = false;
           const line = document.createElement("div");
@@ -348,17 +770,18 @@
           statusTxt.textContent = ev.ok ? (isSearch ? "Searching again…" : "Reading the document…") : "Tool error";
           scroll();
         },
+        usage: (ev) => { applyUsage(ev.usage); },
         thinking: (ev) => {
           if (!thinking) {                     // first reasoning token: open the panel
             thinkStart = Date.now();
             thinkEl.hidden = false; thinkEl.open = true; thinkEl.classList.add("live");
             statusTxt.textContent = "Reasoning…";
           }
-          thinking += ev.text; schedulePaint();
+          thinking += ev.text; usage.liveChars += ev.text.length; schedulePaint();
         },
         token: (ev) => {
           if (!answer && thinking) thinkEl.open = false;   // reasoning done: fold it away
-          answer += ev.text; schedulePaint();
+          answer += ev.text; usage.liveChars += ev.text.length; schedulePaint();
         },
         done: (ev) => {
           el.querySelector(".status")?.remove();
@@ -367,10 +790,19 @@
             thinkEl.hidden = false; thinkEl.classList.remove("live"); thinkBody.textContent = thinking;
             if (thinkStart) el.querySelector(".ttime").textContent = `${Math.round((Date.now() - thinkStart) / 1000)}s`;
           }
-          renderSources(el, citations, ev.usedCitations);
-          const t = ev.timings || {};
-          el.querySelector(".timing").textContent = `retrieval ${t.retrieveMs ?? 0} ms · generation ${t.generateMs ?? 0} ms`;
+          renderSources(el, citations, ev.usedCitations, carriedNow);
+          if (ev.usage) applyUsage(ev.usage);
+          el.querySelector(".timing").textContent = timingText(ev.timings, ev.usage, usage.roundOut);
           messages.push({ role: "assistant", content: ev.answer });
+          enableActions(el, q, ev.answer, citations, ev.usedCitations);
+          // What the next question continues on: this turn's blocks, the cited ones flagged so they
+          // are the last to be dropped when the carry has to be trimmed.
+          carry = carryFrom(citations, ev.usedCitations);
+          carryFilters = filterKey;
+          saveTurn({
+            q, answer: ev.answer, thinking, citations, usedCitations: ev.usedCitations, carried: carriedNow, filterKey,
+            timings: ev.timings, usage: ev.usage, roundOut: usage.roundOut, tools: toolTrace,
+          });
         },
         error: (ev) => {
           el.querySelector(".status")?.remove(); thinkEl.classList.remove("live");
@@ -397,18 +829,41 @@
   input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); } });
   function autosize() { input.style.height = "auto"; input.style.height = Math.min(160, input.scrollHeight) + "px"; }
   input.addEventListener("input", autosize);
-  document.querySelectorAll(".ex").forEach(ex => ex.onclick = () => { input.value = ex.textContent; submit(); });
+  // Delegated: the example questions come back with the empty state every time a new chat starts.
+  thread.addEventListener("click", (e) => {
+    const ex = e.target.closest(".ex");
+    if (ex) { input.value = ex.textContent; submit(); }
+  });
 
-  $("#newChat").onclick = () => { messages.length = 0; thread.innerHTML = ""; input.focus(); };
-  $("#reindex").onclick = async () => {
-    const b = $("#reindex"); b.disabled = true; b.textContent = "Indexing…";
-    try {
-      const r = await fetch("/api/ingest", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
-      const j = await r.json();
-      b.textContent = r.ok ? `Indexed (+${j.docsAdded} / ~${j.docsUpdated} / -${j.docsRemoved})` : `Error: ${j.error}`;
-    } catch (e) { b.textContent = "Error"; }
-    setTimeout(() => { b.textContent = "Re-index"; b.disabled = false; }, 4000);
+  // ---- sidebar -----------------------------------------------------------------
+  $("#newChat").onclick = startNewChat;
+  $("#clearChats").onclick = () => {
+    if (!chats.length) return;
+    if (!confirm(`Delete all ${chats.length} saved chat${chats.length === 1 ? "" : "s"} from this browser?`)) return;
+    chats = [];
+    persist();
+    startNewChat();
   };
+  const narrow = () => window.matchMedia("(max-width: 720px)").matches;
+  /** On a narrow screen the sidebar covers the conversation, so picking a chat should close it. */
+  function closeSidebarIfOverlay() { if (narrow()) setSidebar(false); }
+
+  function setSidebar(open) {
+    document.body.classList.toggle("no-sidebar", !open);
+    $("#sidebarToggle").classList.toggle("on", open);
+    try { localStorage.setItem(SIDEBAR_KEY, open ? "1" : "0"); } catch {}
+  }
+  $("#sidebarToggle").onclick = () => setSidebar(document.body.classList.contains("no-sidebar"));
+
+  // Open by default on a wide window, closed where it would cover the conversation.
+  let sidebarOpen = !narrow();
+  try {
+    const stored = localStorage.getItem(SIDEBAR_KEY);
+    if (stored !== null) sidebarOpen = stored === "1";
+  } catch {}
+  setSidebar(sidebarOpen);
+  chats = readChats();
+  renderChatList();
   input.focus();
 })();
 </script>

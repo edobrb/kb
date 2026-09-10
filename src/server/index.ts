@@ -8,7 +8,7 @@ import { config, paths } from "../config.js";
 import { ask, askOnce, getRetriever, resetRetriever, toolsAvailable } from "../generation/ask.js";
 import { ingest } from "../ingest/pipeline.js";
 import { DocumentNotFoundError, getDocumentStore, resetDocumentStore } from "../retrieval/documents.js";
-import type { AskRequest, Authority, ChatMessage, RetrievalFilters } from "../types.js";
+import type { AskMode, AskRequest, Authority, CarriedBlock, ChatMessage, RetrievalFilters } from "../types.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -31,6 +31,24 @@ function parseMessages(body: unknown): ChatMessage[] {
   });
 }
 
+/**
+ * Blocks the client says this chat already gathered, from the previous turn's `sources` event. They
+ * are what lets a follow-up continue on that context instead of re-querying the knowledge base;
+ * only ids are trusted — the passages themselves are re-read server-side (see `carriedBlocks`).
+ */
+function parseContext(body: unknown): CarriedBlock[] | undefined {
+  const raw = (body as { context?: unknown })?.context;
+  if (!Array.isArray(raw)) return undefined;
+  const blocks = raw.flatMap((b: unknown) => {
+    const bb = b as { n?: unknown; chunkId?: unknown; chunk_id?: unknown; section?: unknown; cited?: unknown };
+    const chunkId = typeof bb.chunkId === "string" ? bb.chunkId : typeof bb.chunk_id === "string" ? bb.chunk_id : "";
+    const n = typeof bb.n === "number" && Number.isInteger(bb.n) && bb.n > 0 ? bb.n : 0;
+    if (!chunkId || !n) return [];
+    return [{ n, chunkId, section: typeof bb.section === "string" ? bb.section : null, cited: Boolean(bb.cited) }];
+  });
+  return blocks.length ? blocks.slice(0, 200) : undefined;
+}
+
 function parseFilters(body: unknown): RetrievalFilters | undefined {
   const f = (body as { filters?: Record<string, unknown> })?.filters;
   if (!f || typeof f !== "object") return undefined;
@@ -50,7 +68,9 @@ function parseAskRequest(body: unknown): AskRequest {
   const think = typeof thinkRaw === "boolean" ? thinkRaw : undefined;
   const toolsRaw = (body as { tools?: unknown })?.tools;
   const tools = typeof toolsRaw === "boolean" ? toolsRaw : undefined;
-  return { messages: parseMessages(body), filters: parseFilters(body), topK, think, tools };
+  const modeRaw = (body as { mode?: unknown })?.mode;
+  const mode: AskMode | undefined = modeRaw === "research" || modeRaw === "fast" ? modeRaw : undefined;
+  return { messages: parseMessages(body), context: parseContext(body), filters: parseFilters(body), topK, think, tools, mode };
 }
 
 // ---- routes -------------------------------------------------------------------
@@ -62,6 +82,8 @@ app.get("/api/health", async () => {
     ok: true,
     embeddingModel: config.embedding.model,
     chatModel: config.chat.model,
+    /** Context window the chat model runs with; the UI shows saturation against it. */
+    numCtx: config.chat.numCtx,
     think: config.chat.think,
     tools: await toolsAvailable(),
     documents: (await getDocumentStore()).size,
