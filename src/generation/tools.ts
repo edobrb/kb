@@ -1,4 +1,5 @@
 import { config } from "../config.js";
+import { DOC_RELATIONS, relationPhrase, type KbGraph, type Neighbor, type Relation } from "../graph/index.js";
 import type { ToolSpec } from "../llm/ollama.js";
 import { DocumentNotFoundError, type DocumentStore, type FetchedDocument } from "../retrieval/documents.js";
 import type { RetrieveOptions } from "../retrieval/retriever.js";
@@ -17,9 +18,14 @@ import { BLOCK_SEPARATOR, deepLink, formatBlock, toCitation } from "./prompt.js"
  * - `fetch_document(source_id, section?)` reads the whole page a passage came from, for when the
  *   passage is the middle of a procedure, the retry table is in the next section, the ADR's decision
  *   is quoted but not its consequences.
+ * - `related(source_id)` walks the knowledge graph (src/graph): the page this one links to, its
+ *   parent page, the rest of its repository, the ADR that mentions it. It answers what similarity
+ *   cannot — "is there another document about this" — and returns a list of titles and ids, not
+ *   text, so the model then reads the one it wants with `fetch_document`.
  *
- * Both come back as numbered context blocks, citable with the same [n] mechanism, and both count
- * against the same character budget and round limit (see src/generation/ask.ts).
+ * `search` and `fetch_document` come back as numbered context blocks, citable with the same [n]
+ * mechanism; `related` carries no passage, so it adds no block. All three count against the same
+ * character budget and round limit (see src/generation/ask.ts).
  */
 
 export const SEARCH_TOOL: ToolSpec = {
@@ -74,10 +80,46 @@ export const FETCH_DOCUMENT_TOOL: ToolSpec = {
   },
 };
 
-/** Tool specs to send with the chat request; empty when tools are disabled. */
-export function kbTools(): ToolSpec[] {
+export const RELATED_TOOL: ToolSpec = {
+  type: "function",
+  function: {
+    name: "related",
+    description:
+      "List the documents connected to a knowledge-base document: the pages it links to and that link to it, its parent " +
+      "page, the other documents of its repository, space or product module. Use it to find the rest of a topic when a " +
+      "CONTEXT block is clearly about the right thing but does not answer the question, or to check whether an ADR or a " +
+      "sibling page covers what is missing. Returns titles and source_ids only — read one with fetch_document.",
+    parameters: {
+      type: "object",
+      properties: {
+        source_id: {
+          type: "string",
+          description:
+            "The document's source_id as shown in the context block, or just the citation number of a context block (e.g. \"3\").",
+        },
+        scope: {
+          type: "string",
+          enum: ["all", "links", "same_place"],
+          description:
+            "\"links\" for pages linked to or from this one only, \"same_place\" for the rest of its repository / space / " +
+            "module, \"all\" (the default) for both.",
+        },
+      },
+      required: ["source_id"],
+    },
+  },
+};
+
+/**
+ * Tool specs to send with the chat request; empty when tools are disabled. `related` is only
+ * offered when the graph is actually loaded — a tool the prompt promises and the runtime cannot
+ * answer costs a round and teaches the model nothing.
+ */
+export function kbTools(opts: { graph?: boolean } = {}): ToolSpec[] {
   if (!config.tools.enabled) return [];
-  return config.tools.search ? [SEARCH_TOOL, FETCH_DOCUMENT_TOOL] : [FETCH_DOCUMENT_TOOL];
+  const specs = config.tools.search ? [SEARCH_TOOL, FETCH_DOCUMENT_TOOL] : [FETCH_DOCUMENT_TOOL];
+  const graph = opts.graph ?? (config.graph.enabled && config.graph.tool);
+  return graph && config.graph.tool ? [...specs, RELATED_TOOL] : specs;
 }
 
 /** What the `search` tool needs from retrieval; the Retriever satisfies it, tests pass a stub. */
@@ -89,6 +131,8 @@ export interface ToolContext {
   store: DocumentStore;
   /** Where `search` looks; without it the tool reports that it is unavailable. */
   searcher?: Searcher;
+  /** The knowledge graph `related` walks; without it the tool reports that it is unavailable. */
+  graph?: KbGraph | null;
   /** The user's retrieval filters (source_type, kind, …), applied to tool searches as well. */
   filters?: RetrievalFilters;
   /** Citations already shown to the model; used to resolve "[3]", to number new blocks and to skip repeats. */
@@ -109,6 +153,8 @@ export interface ToolContext {
   fetched?: Map<string, number>;
   /** Queries already searched in this answer (normalised) -> the block numbers they produced. */
   searched?: Map<string, number[]>;
+  /** `sourceId::scope` pairs already walked with `related` in this answer. */
+  relatedAsked?: Set<string>;
 }
 
 export interface ToolOutcome {
@@ -234,7 +280,8 @@ export async function runToolCall(call: ToolCall, ctx: ToolContext): Promise<Too
   const name = call.function.name;
   if (name === SEARCH_TOOL.function.name && config.tools.search) return runSearch(call, ctx);
   if (name === FETCH_DOCUMENT_TOOL.function.name) return runFetch(call, ctx);
-  const available = kbTools().map((t) => t.function.name);
+  if (name === RELATED_TOOL.function.name) return runRelated(call, ctx);
+  const available = kbTools({ graph: Boolean(ctx.graph) }).map((t) => t.function.name);
   return failure(
     name,
     `there is no tool called "${name}". Available tools: ${(available.length ? available : [FETCH_DOCUMENT_TOOL.function.name]).join(", ")}.`,
@@ -398,5 +445,121 @@ async function runFetch(call: ToolCall, ctx: ToolContext): Promise<ToolOutcome> 
       `read ${doc.sourceId}${doc.section ? ` § ${doc.section}` : ""}${doc.sectionNotFound ? ` (no section "${doc.sectionNotFound}")` : ""} ` +
       `(${doc.returnedChars}/${doc.totalChars} chars, ~${doc.tokenEstimate} tokens) as [${n}]`,
     message: { role: "tool", tool_name: name, content: formatDocument(doc, n) },
+  };
+}
+
+// ---- related -------------------------------------------------------------------------------------
+
+/** Which relations each `scope` value covers. */
+const SCOPES: Record<string, readonly Relation[] | null> = {
+  all: null,
+  links: DOC_RELATIONS,
+  same_place: ["in_repo", "in_space", "under", "about_entity", "owned_by", "tagged", "in_module", "in_subarea", "in_area"],
+};
+
+/** One neighbour as the model reads it: enough to decide whether to fetch it, and its exact id. */
+const relatedLine = (n: Neighbor): string => `- ${n.title} — ${n.sourceId}`;
+
+/**
+ * `related(source_id, scope?)`: one hop in the knowledge graph. It returns titles and ids, never
+ * text — the graph's job is to say *which* document to read next, and `fetch_document` reads it.
+ * That also keeps the call cheap: a whole neighbourhood costs about as much as one passage.
+ */
+async function runRelated(call: ToolCall, ctx: ToolContext): Promise<ToolOutcome> {
+  const name = call.function.name;
+  const args = call.function.arguments;
+  const requested = asString(args["source_id"]) || asString(args["sourceId"]) || asString(args["id"]);
+  if (!requested) return failure(name, "related needs a source_id.", "related without source_id");
+  if (!ctx.graph) {
+    return failure(
+      name,
+      "the knowledge graph is not available for this answer; use search or fetch_document instead.",
+      "related unavailable",
+    );
+  }
+
+  const scopeArg = (asString(args["scope"]) || "all").toLowerCase();
+  const scope = scopeArg in SCOPES ? scopeArg : "all";
+  const relations = SCOPES[scope] ?? undefined;
+
+  // The model may pass a citation number, a source_id, or a kb path.
+  const byNumber = citationByNumber(requested, ctx.citations);
+  const target = byNumber?.sourceId ?? ctx.store.resolve(requested) ?? requested;
+  const node = ctx.graph.node(target);
+  if (!node || !ctx.graph.has(target)) {
+    const hint = ctx.citations.length
+      ? ` Source ids in the context: ${[...new Set(ctx.citations.map((c) => c.sourceId))].slice(0, 8).join(", ")}.`
+      : "";
+    return failure(name, `"${requested}" is not a document in the knowledge base.${hint}`, `related: unknown ${requested}`);
+  }
+
+  const key = `${target}::${scope}`;
+  if (ctx.relatedAsked?.has(key)) {
+    return {
+      ok: true,
+      summary: `related(${target}) was already listed`,
+      message: {
+        role: "tool",
+        tool_name: name,
+        content: `You already listed the documents related to ${target}. Read one of them with fetch_document, or answer from the CONTEXT.`,
+      },
+    };
+  }
+  ctx.relatedAsked?.add(key);
+
+  const limit = Math.max(1, config.graph.toolLimit);
+  const all = ctx.graph.neighbors(target, { ...(relations ? { relations } : {}), maxHubSize: config.graph.maxHubSize });
+  const kept = all.slice(0, limit);
+
+  // Where the page sits, in words: it lets the model say "part of the Workspace module" without
+  // handing it hub ids that no tool would accept.
+  const hubs = ctx.graph
+    .hubsOf(target)
+    .filter((h) => h.type !== "tag")
+    .slice(0, 4)
+    .map((h) => `${h.label} (${h.type}, ${h.size} documents)`);
+
+  if (!kept.length) {
+    return {
+      ok: true,
+      summary: `related(${target}) → none`,
+      message: {
+        role: "tool",
+        tool_name: name,
+        content:
+          `No documents are linked to ${node.label} (${target})${hubs.length ? `. It sits in: ${hubs.join(", ")}` : ""}. ` +
+          `Use search(query) with different words instead.`,
+      },
+    };
+  }
+
+  // Grouped by how each one is connected, so the list reads as structure rather than as a ranking.
+  const groups = new Map<string, Neighbor[]>();
+  for (const n of kept) {
+    const phrase = n.direction === "sibling" && n.via ? `same ${n.via.type} (${n.via.label}, ${n.via.size} documents)` : relationPhrase(n);
+    const bucket = groups.get(phrase);
+    if (bucket) bucket.push(n);
+    else groups.set(phrase, [n]);
+  }
+
+  const header =
+    `${kept.length} document${kept.length === 1 ? "" : "s"} related to "${node.label}" (${target})` +
+    `${all.length > kept.length ? ` — the ${kept.length} closest of ${all.length}` : ""}.` +
+    `${hubs.length ? ` It sits in: ${hubs.join(", ")}.` : ""}` +
+    ` Read any of them with fetch_document(source_id); the ids below are exact.`;
+
+  const sections = [...groups.entries()].map(([phrase, rows]) => `${phrase}:\n${rows.map(relatedLine).join("\n")}`);
+  let body = sections.join("\n");
+  if (ctx.maxChars !== undefined && header.length + body.length > ctx.maxChars) {
+    // Trim whole lines from the end rather than cutting a source_id in half.
+    const lines = body.split("\n");
+    while (lines.length > 1 && header.length + lines.join("\n").length > ctx.maxChars) lines.pop();
+    body = lines.join("\n");
+  }
+
+  return {
+    ok: true,
+    summary: `related(${node.label}) → ${kept.length} document${kept.length === 1 ? "" : "s"}`,
+    message: { role: "tool", tool_name: name, content: `${header}\n\n${body}` },
   };
 }

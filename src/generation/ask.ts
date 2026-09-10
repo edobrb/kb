@@ -1,4 +1,5 @@
 import { config } from "../config.js";
+import { getGraph } from "../graph/index.js";
 import { getChatProvider } from "../llm/chat.js";
 import { modelSupportsTools } from "../llm/ollama.js";
 import { DocumentNotFoundError, getDocumentStore } from "../retrieval/documents.js";
@@ -181,9 +182,12 @@ export async function* ask(req: AskRequest, signal?: AbortSignal): AsyncGenerato
 
     const think = req.think ?? config.chat.think;
     const useTools = req.tools ?? (await toolsAvailable());
-    const tools = useTools ? kbTools() : undefined;
+    // `related` is only offered when the graph is on disk: see kbTools.
+    const graph = useTools && config.graph.enabled && config.graph.tool ? await getGraph() : null;
+    const tools = useTools ? kbTools({ graph: Boolean(graph) }) : undefined;
     const fetched = new Map<string, number>();
     const searched = new Map<string, number[]>();
+    const relatedAsked = new Set<string>();
 
     // Continuing a chat is not a new question: the blocks it already gathered stay in place and no
     // search is run, so the answers keep building on the same passages instead of standing on a
@@ -335,17 +339,23 @@ export async function* ask(req: AskRequest, signal?: AbortSignal): AsyncGenerato
         if (isSearch) searches += 1;
         yield {
           type: "status",
-          message: isSearch ? `Searching again: ${String(call.function.arguments["query"] ?? "").slice(0, 120)}…` : "Reading the document…",
+          message: isSearch
+            ? `Searching again: ${String(call.function.arguments["query"] ?? "").slice(0, 120)}…`
+            : call.function.name === "related"
+              ? "Following the knowledge graph…"
+              : "Reading the document…",
         };
         const budget = Math.max(0, effort.charBudget - toolChars);
         const outcome = await runToolCall(call, {
           store,
           searcher: retriever,
+          graph,
           filters: req.filters,
           citations,
           numberFloor,
           fetched,
           searched,
+          relatedAsked,
           maxChars: Math.min(config.tools.docMaxChars, budget),
         });
         messages.push(outcome.message);

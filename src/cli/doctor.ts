@@ -1,8 +1,9 @@
 import { stat } from "node:fs/promises";
 import { totalmem } from "node:os";
 import { config, paths } from "../config.js";
-import { listModels, modelCapabilities } from "../llm/ollama.js";
+import { KbGraph } from "../graph/index.js";
 import { readManifest } from "../ingest/manifest.js";
+import { listModels, modelCapabilities } from "../llm/ollama.js";
 import { getDocumentStore } from "../retrieval/documents.js";
 import { Retriever } from "../retrieval/retriever.js";
 import { builtinDefinitions, builtinEnrichers } from "../sync/index.js";
@@ -170,6 +171,19 @@ if (!manifest) {
       if (mapStat.mtimeMs < manifestStat.mtimeMs) warn(`map at ${paths.kbMap} predates the last ingest → re-run: npm run map`);
     } catch {
       /* no map yet: /map.html says so itself */
+    }
+    // The graph is rebuilt by every ingest, so a graph older than the manifest means an ingest that
+    // could not write it (or GRAPH=false), and `related` would then walk stale ids.
+    if (!config.graph.enabled) {
+      console.log(`  knowledge graph   off (GRAPH=false)`);
+    } else {
+      const graph = await KbGraph.load();
+      if (!graph) warn(`no knowledge graph at ${paths.graph} → run: npm run graph`);
+      else {
+        ok(`knowledge graph: ${graph.nodeCount} nodes · ${graph.edgeCount} edges · ${graph.docCount} documents`);
+        if (graph.docCount !== docs) warn(`the graph covers ${graph.docCount} documents, the manifest ${docs} → re-run: npm run graph`);
+        console.log(`  dangling links    ${graph.stats.brokenLinksTotal} internal links point at nothing indexed (npm run graph -- --broken-links)`);
+      }
     }
     const f = await r.facets();
     console.log(`  source types      ${Object.entries(f.sourceTypes).map(([k, v]) => `${k}=${v}`).join(", ")}`);

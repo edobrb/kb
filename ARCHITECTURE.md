@@ -35,11 +35,13 @@ plus a hand-written folder.
                                                        ▼
    qwen3-embedding:0.6b ──► LanceDB data/lancedb (vector + kind, heading_path, line_start/end, …)
                             BM25   data/bm25.json.gz (rebuilt from the table)   manifest data/manifest.json
+                            GRAPH  data/graph.json.gz (frontmatter + body links, rebuilt from the manifest)
                                                        │
                           ASK  (CLI · /api/ask SSE · web UI)
                                                        ▼
    query rewrite → embed query + BM25 → RRF fusion → authority boost → per-doc cap → filters (source_type, kind, lang)
    → prompt with numbered blocks (heading, kind, url, content) → chat model → [n] citations
+                                          tools: search · fetch_document · related (the graph)
 ```
 
 ## Sources
@@ -90,6 +92,7 @@ Everything is incremental, and each stage has its own key. Nothing is redone unl
 | Confluence card enrichment | `confluence.refresh_days` per project | The wiki is searched again for that project |
 | Ingest of a document | sha256 of the file bytes (manifest) | Re-chunked, re-embedded |
 | Whole index | embedding model, dimensions, chunk sizes | Full rebuild |
+| Knowledge graph | nothing — rebuilt from the manifest at the end of every ingest (seconds, no model) | `data/graph.json.gz` is replaced, so it can never point at ids the index no longer has |
 
 Safety rails: a source that aborts (network, expired token) deletes nothing; `--only` never deletes; files
 in `kb/<source>/` that sync does not know about are reported and removed only with `--prune-foreign`; a file
@@ -106,8 +109,46 @@ A page that a new filter now excludes is simply not emitted and its file is dele
   cannot drift. The tokenizer folds accents and splits alphanumeric codes (`ADR0010` → `adr0010`, `adr`, `0010`).
 * **Manifest** `data/manifest.json` — what is indexed, with content hashes and chunk counts. Flushed after
   every batch, which is what makes an interrupted ingest resumable.
+* **Knowledge graph** `data/graph.json.gz` — the structure the chunk index throws away: which document
+  links to which, the Confluence page tree, the project card of a repository, and the repository,
+  space, catalog entity, owning team, tag and City Map node each document belongs to. Nodes are the
+  manifest's documents plus one hub per group; edges are index triples, so ~6.7k nodes and ~23k edges
+  fit in ~185 kB. Built by `src/graph/build.ts` at the end of every ingest — no model, no embedding,
+  a pass over the kb files — and never allowed to outlive the manifest it was built from. See
+  [§ Relations](#relations).
 * **Sync state** `data/sync/<source>.json` — per-source item fingerprints and connector memory
   (`coveredRepos`, `repoEntities`, `projectHeads`, `projectEnrichment`, Confluence space counts).
+
+## Relations
+
+`kind`, `authority` and the breadcrumb say what a document *is*; the graph says what it is *attached
+to*. Both halves are read straight out of what sync already wrote.
+
+| Relation | From → to | Where it comes from |
+|---|---|---|
+| `links_to` | doc → doc | A markdown link in the body whose URL reverse-maps to an indexed `source_id` (`…/wiki/spaces/X/pages/123/…` → `confluence:X:123`, `…/-/blob/main/a.md` → `gitlab:<project>:a.md`, `/docs/<ns>/<kind>/<name>/<page>/` → `devportal:…`), or a relative link resolved against the document's own path |
+| `child_of` | doc → doc | Confluence `parent_id` |
+| `described_by` | doc → doc | Every repository document points at its project card (`project`) |
+| `documents` | doc → doc | A project card points at the Dev Portal tree that renders the repository (`techdocs_ref`) |
+| `related_wiki` | doc → doc | A project card points at the Confluence pages the CQL enricher tied to it (`confluence_pages`) |
+| `in_repo`, `in_space`, `under`, `about_entity`, `owned_by`, `tagged`, `in_area`, `in_subarea`, `in_module` | doc → hub | `project`, `space`, the `ancestors` chain (one hub per prefix, so a subtree is one node), `entity`, `owner`, `tags`, and the City Map placement of `src/citymap.ts` |
+
+Two rules keep it honest. **A target that is not in the manifest is dropped**, never guessed at, so
+every edge points at a page `fetch_document` can actually read. And **a hub bigger than
+`GRAPH_MAX_HUB_SIZE` (60) contributes no siblings**: "same repository" is a real hint in a repository
+of eight documents and noise in one of three hundred — the cap excludes 7 of 230 repositories and 1
+of 133 page trees, which is exactly the diffuse tail.
+
+What that buys, on the current knowledge base: 3,182 real links between documents, and 69 % of
+documents with at least one document-to-document edge (largest connected component 41 %). It is not
+a recall trick — retrieval already finds pages that read alike — it answers the questions similarity
+cannot: what supersedes this ADR, what else is in this repository, which page links here.
+
+A by-product worth its own command: a link whose target *looks* internal and resolves to nothing is
+a dangling reference in the documentation, and `npm run graph -- --broken-links` lists them (2,101
+today, headed by ~325 links to a `policy-manager/overview/*` tree that has since been renamed to
+`concepts/*`). Frontmatter references to pages the sync scope deliberately excludes are counted
+separately, because those are decisions rather than bugs.
 
 ## Answering
 
@@ -126,7 +167,17 @@ does not cover something. `fetch_document(source_id, section?)` reads the rest o
 chunk of something larger (the next section, the full table, the exact values). Ids are resolved through
 `data/manifest.json`, so only indexed documents are reachable; results are capped (`DOC_TOOL_MAX_CHARS`,
 `TOOL_CHAR_BUDGET`) and carry the page outline so a follow-up call can ask for one section. Both results are
-appended as numbered blocks and cited like any other. The loop is bounded by `TOOL_MAX_ROUNDS` and the last
+appended as numbered blocks and cited like any other.
+
+`related(source_id, scope?)` is the third tool, and the only one that is not a search: it walks the
+graph one hop and lists what the page is attached to — what it links to and what links to it, its
+parent page, the rest of its repository or product module — as titles and ids, no text. It is what
+the model reaches for when a block is clearly about the right thing but does not answer the question,
+and it costs about as much as one passage. It adds no citable block on purpose: the model picks a
+page from the list and reads it with `fetch_document`, so what ends up cited is a passage as usual.
+Offered only when `data/graph.json.gz` is actually loaded (`TOOL_RELATED`, `TOOL_RELATED_LIMIT`).
+
+The loop is bounded by `TOOL_MAX_ROUNDS` and the last
 round runs without tools, so an answer always comes out.
 
 ## Where the code lives
@@ -141,10 +192,13 @@ src/sync/          index.ts (orchestrator, source + enricher definitions, duplic
 src/ingest/        loader.ts (frontmatter, kinds) · chunker.ts (prose + code, breadcrumb prefix)
                    pipeline.ts (batched load → chunk → embed → store, BM25 rebuild) · manifest.ts · progress.ts
 src/store/         vector-store.ts (LanceDB) · bm25.ts
+src/graph/         build.ts (frontmatter + body links → nodes and edges, dangling-link report)
+                   resolve.ts (URL / relative link → source_id) · index.ts (in-memory adjacency, neighbours, hubs)
+                   types.ts (relations and their labels)
 src/retrieval/     retriever.ts (RRF, boosts, diversity, optional LLM rerank)
                    documents.ts (source_id → kb file: whole documents and sections for the fetch_document tool)
 src/generation/    prompt.ts (system prompt, context blocks, deep links) · ask.ts (streaming loop + tool loop)
                    tools.ts (search + fetch_document: schemas, dedup against the context, result formatting)
-src/cli/           sync · ingest · ask · doc · search · eval · doctor · map
-src/server/        Fastify API + public/index.html (chat) + public/map.html (2-D map) + public/architecture.html (this document, interactive)
+src/cli/           sync · ingest · ask · doc · search · eval · doctor · map · graph
+src/server/        Fastify API + public/index.html (chat) + public/map.html (2-D map, graph overlay) + public/architecture.html (this document, interactive)
 ```

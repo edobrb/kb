@@ -6,6 +6,7 @@ import fastifyStatic from "@fastify/static";
 import Fastify from "fastify";
 import { config, paths } from "../config.js";
 import { ask, askOnce, getRetriever, resetRetriever, toolsAvailable } from "../generation/ask.js";
+import { getGraph, resetGraph, type Relation } from "../graph/index.js";
 import { ingest } from "../ingest/pipeline.js";
 import { DocumentNotFoundError, getDocumentStore, resetDocumentStore } from "../retrieval/documents.js";
 import type { AskMode, AskRequest, Authority, CarriedBlock, ChatMessage, RetrievalFilters } from "../types.js";
@@ -78,6 +79,7 @@ function parseAskRequest(body: unknown): AskRequest {
 app.get("/api/health", async () => {
   const r = await getRetriever();
   const stats = await r.stats();
+  const graph = config.graph.enabled ? await getGraph() : null;
   return {
     ok: true,
     embeddingModel: config.embedding.model,
@@ -87,6 +89,10 @@ app.get("/api/health", async () => {
     think: config.chat.think,
     tools: await toolsAvailable(),
     documents: (await getDocumentStore()).size,
+    /** Knowledge graph, when it has been built (see src/graph). */
+    graph: graph
+      ? { nodes: graph.nodeCount, edges: graph.edgeCount, docs: graph.docCount, brokenLinks: graph.stats.brokenLinksTotal, generatedAt: graph.generatedAt }
+      : null,
     ...stats,
   };
 });
@@ -131,6 +137,45 @@ app.get("/api/map", async (_req, reply) => {
     }
     return reply.code(500).send({ error: (err as Error).message });
   }
+});
+
+/**
+ * Document-to-document edges of the knowledge graph, for the map overlay. Hub edges ("same
+ * repository") are left out on purpose: drawing them would mean a line between every pair of
+ * documents in a repository. Built once per process — the file only changes on an ingest.
+ */
+let edgePayload: { body: string; generatedAt: string } | null = null;
+app.get("/api/graph", async (_req, reply) => {
+  const graph = await getGraph();
+  if (!graph) {
+    return reply.code(404).send({ error: `No graph yet at ${paths.graph} — run \`npm run graph\` (or \`npm run ingest\`).` });
+  }
+  if (!edgePayload || edgePayload.generatedAt !== graph.generatedAt) {
+    const payload = graph.docEdgesPayload();
+    edgePayload = {
+      generatedAt: graph.generatedAt,
+      body: JSON.stringify({ version: 1, generatedAt: graph.generatedAt, docs: graph.docCount, stats: graph.stats, ...payload }),
+    };
+  }
+  return reply.header("cache-control", "no-cache").type("application/json; charset=utf-8").send(edgePayload.body);
+});
+
+/** What one document is connected to: direct edges, hub siblings, and the hubs themselves. */
+app.post("/api/graph/neighbors", async (req, reply) => {
+  const graph = await getGraph();
+  if (!graph) return reply.code(404).send({ error: "No graph yet — run `npm run graph`." });
+  const body = (req.body ?? {}) as { sourceId?: unknown; source_id?: unknown; limit?: unknown; relations?: unknown };
+  const sourceId = typeof body.sourceId === "string" ? body.sourceId : typeof body.source_id === "string" ? body.source_id : "";
+  if (!sourceId.trim()) return reply.code(400).send({ error: "`sourceId` is required" });
+  const node = graph.node(sourceId);
+  if (!node) return reply.code(404).send({ error: `"${sourceId}" is not in the graph` });
+  const limit = typeof body.limit === "number" ? Math.min(200, Math.max(1, body.limit)) : 40;
+  const relations = Array.isArray(body.relations) ? (body.relations.map(String) as Relation[]) : undefined;
+  return {
+    node,
+    hubs: graph.hubsOf(sourceId),
+    neighbors: graph.neighbors(sourceId, { limit, ...(relations?.length ? { relations } : {}) }),
+  };
 });
 
 /** Chunk text by id, so the map payload can stay metadata-only and load passages on demand. */
@@ -226,6 +271,10 @@ app.post("/api/ingest", async (req, reply) => {
     const report = await ingest({ reset: Boolean(body.reset), log: (m) => app.log.info(m) });
     resetRetriever();
     resetDocumentStore();
+    // The ingest rebuilt the graph on disk; drop the cached one (and the map's edge payload) so the
+    // next `related` call and the next map reload see it.
+    resetGraph();
+    edgePayload = null;
     return report;
   } catch (err) {
     return reply.code(500).send({ error: (err as Error).message });
@@ -241,7 +290,7 @@ try {
   app.log.info(`Chat UI:  http://${config.server.host}:${config.server.port}/`);
   app.log.info(`Map:      http://${config.server.host}:${config.server.port}/map.html (after \`npm run map\`)`);
   app.log.info(`Arch:     http://${config.server.host}:${config.server.port}/architecture.html`);
-  app.log.info(`API:      POST /api/ask (SSE) · POST /api/ask/sync · POST /api/search · POST /api/document · GET /api/map · POST /api/chunk · GET /api/health`);
+  app.log.info(`API:      POST /api/ask (SSE) · POST /api/ask/sync · POST /api/search · POST /api/document · GET /api/map · GET /api/graph · POST /api/graph/neighbors · POST /api/chunk · GET /api/health`);
 } catch (err) {
   app.log.error(err);
   process.exit(1);

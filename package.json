@@ -11,6 +11,7 @@
     "sync": "tsx src/cli/sync.ts",
     "ingest": "tsx src/cli/ingest.ts",
     "map": "tsx src/cli/map.ts",
+    "graph": "tsx src/cli/graph.ts",
     "ask": "tsx src/cli/ask.ts",
     "doc": "tsx src/cli/doc.ts",
     "search": "tsx src/cli/search.ts",

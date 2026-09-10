@@ -502,13 +502,17 @@
     return `${base} · ${fmt(u.promptTokens)} in / ${fmt(u.completionTokens)} out${pct}`;
   }
 
+  /** What a tool line says it did. `related` walks the knowledge graph; it reads nothing itself. */
+  const TOOL_VERB = { search: "searched", fetch_document: "read document", related: "followed links" };
+  const toolVerb = (name) => TOOL_VERB[name] || `called ${name}`;
+
   /** Draw a finished turn (a restored one, or the one just streamed) into an assistant bubble. */
   function renderTurn(el, turn) {
     if (turn.tools?.length) {
       const box = el.querySelector(".tools");
       box.hidden = false;
       box.innerHTML = turn.tools.map(t =>
-        `<div class="tool${t.ok ? "" : " err"}">${t.ok ? (t.name === "search" ? "searched" : "read document") : "tool error"} <code>${esc(t.summary)}</code></div>`,
+        `<div class="tool${t.ok ? "" : " err"}">${t.ok ? toolVerb(t.name) : "tool error"} <code>${esc(t.summary)}</code></div>`,
       ).join("");
     }
     if (turn.thinking) {
@@ -757,17 +761,17 @@
       await askStream({ messages, context, filters, think, mode }, {
         status: (ev) => { statusTxt.textContent = ev.message; },
         sources: (ev) => { citations = ev.citations; carriedNow = Boolean(ev.carried?.length); renderSources(el, citations, null, carriedNow); scroll(); },
-        // The model used a kb tool (search again, or read a whole document); show what it pulled in.
+        // The model used a kb tool (search again, read a whole page, or walk the graph); show what it did.
         tool: (ev) => {
           toolTrace.push({ name: ev.name, summary: ev.summary, ok: ev.ok });
           const box = el.querySelector(".tools");
           box.hidden = false;
           const line = document.createElement("div");
           line.className = `tool${ev.ok ? "" : " err"}`;
-          const isSearch = ev.name === "search";
-          line.innerHTML = `${ev.ok ? (isSearch ? "searched" : "read document") : "tool error"} <code>${esc(ev.summary)}</code>`;
+          line.innerHTML = `${ev.ok ? toolVerb(ev.name) : "tool error"} <code>${esc(ev.summary)}</code>`;
           box.appendChild(line);
-          statusTxt.textContent = ev.ok ? (isSearch ? "Searching again…" : "Reading the document…") : "Tool error";
+          const doing = { search: "Searching again…", fetch_document: "Reading the document…", related: "Following the knowledge graph…" };
+          statusTxt.textContent = ev.ok ? (doing[ev.name] || "Working…") : "Tool error";
           scroll();
         },
         usage: (ev) => { applyUsage(ev.usage); },

@@ -89,7 +89,8 @@ export function formatContext(blocks: ContextBlock[]): string {
 export function toolInstructions(tools: string[], mode: AskMode = "fast", carried = false): string {
   const search = tools.includes("search");
   const fetch = tools.includes("fetch_document");
-  if (!search && !fetch) return "";
+  const related = tools.includes("related");
+  if (!search && !fetch && !related) return "";
   const lines = [
     carried
       ? `Tools. Each CONTEXT block is a passage of a larger page, gathered earlier in this conversation: no search was run for this question, so the blocks cover what was asked before and not necessarily what is asked now.`
@@ -113,11 +114,18 @@ export function toolInstructions(tools: string[], mode: AskMode = "fast", carrie
       `- fetch_document(source_id, section?): read a whole page. Call it when a block is the right page but the answer needs what surrounds the passage: the rest of a procedure, a full list or table, exact values, a section the text refers to. Pass that block's source_id, or its number ("3"). A truncated result lists the page outline; call again with one of those sections. Never invent a source_id.`,
     );
   }
+  if (related) {
+    lines.push(
+      `- related(source_id): list the documents connected to a page — what it links to, what links to it, its parent page, the rest of its repository or product module. Call it when a block is about the right thing but does not answer the question, and when the answer needs a page the CONTEXT only mentions (an ADR, a standard, a sibling page). It returns titles and source_ids, no text: read the one you want with fetch_document.`,
+    );
+  }
   lines.push(
     `- Otherwise answer straight from the CONTEXT. Do not explain or announce your decision about the tools, and never describe the CONTEXT block by block: either call a tool or write the answer.`,
-    `- Tool results arrive as numbered blocks like the others and are cited the same way.`,
+    related
+      ? `- Passages from search and pages from fetch_document arrive as numbered blocks like the others and are cited the same way. A related() list is not a block and cannot be cited: fetch the page you want from it first.`
+      : `- Tool results arrive as numbered blocks like the others and are cited the same way.`,
   );
-  if (mode === "research") lines.push(researchNote(search, fetch));
+  if (mode === "research") lines.push(researchNote(search, fetch, related));
   return lines.join("\n");
 }
 
@@ -127,9 +135,10 @@ export function toolInstructions(tools: string[], mode: AskMode = "fast", carrie
  * more than one angle, and read the pages the passages were cut from. Kept imperative like the rest
  * (see the note on toolInstructions).
  */
-function researchNote(search: boolean, fetch: boolean): string {
+function researchNote(search: boolean, fetch: boolean, related = false): string {
   const steps = [
     search ? `search again with a different wording (a synonym, the English or Italian term, the service or repository name) before you answer, even when the CONTEXT looks sufficient` : "",
+    related ? `call related(source_id) on the block closest to the question, to find the pages around it that the search did not return` : "",
     fetch ? `read the full page behind every CONTEXT block you intend to cite, with fetch_document` : "",
   ].filter(Boolean);
   return (

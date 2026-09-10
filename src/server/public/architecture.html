@@ -475,6 +475,7 @@ POST /oauth2/token with grant_type=client_credentials…</pre>
       <div class="store"><h4>LanceDB <code>data/lancedb/</code></h4><p>One <code>chunks</code> table, embedded and file-based (Apache Arrow columns). Filters are SQL-like predicates such as <code>kind IN ('api')</code>. No ANN index: a brute-force cosine scan is exact and takes milliseconds at this scale.</p>
         <div class="cols"><span>id</span><span>source_id</span><span>source_type</span><span>kind</span><span>title</span><span>source_url</span><span>authority</span><span>lang</span><span>last_modified</span><span>rel_path</span><span>ordinal</span><span>heading_path</span><span>content</span><span>text</span><span>line_start</span><span>line_end</span><span class="vec" id="veccol">vector float32[…]</span></div></div>
       <div class="store"><h4>BM25 <code>data/bm25.json.gz</code></h4><p>Okapi BM25 postings (<code>term → [docIdx, tf, …]</code>) with per-chunk lengths and filter columns, gzipped. Rebuilt from the LanceDB table after every ingest, so the two indexes cannot drift.</p><div class="cols"><span>ids</span><span>lens</span><span>sourceTypes</span><span>kinds</span><span>authorities</span><span>langs</span><span>postings</span></div></div>
+      <div class="store"><h4>Knowledge graph <code>data/graph.json.gz</code></h4><p>What links to what, and where each document belongs: nodes are the manifest's documents plus one hub per repository, space, page-tree, catalog entity, team, tag and City Map node; edges are index triples into that node list, which is what keeps ~6.7k nodes and ~23k edges at a couple of hundred kB. Built from frontmatter and markdown links at the end of every ingest.</p><div class="cols"><span>nodes[{id,type,label}]</span><span>relations</span><span>edges{from,to,rel}</span><span>brokenLinks</span><span>stats</span></div></div>
       <div class="store"><h4>Manifest <code>data/manifest.json</code></h4><p>What is indexed: per source id the content hash, chunk count and indexing time, plus the embedding model, dimensions and chunk sizes the index was built with. Written at most every 5 s during ingest, which is what makes an interrupted run resumable.</p><div class="cols"><span>embeddingModel</span><span>embeddingDimensions</span><span>chunking</span><span>docs[source_id]</span></div></div>
       <div class="store"><h4>Sync state <code>data/sync/&lt;source&gt;.json</code></h4><p>Per-source item fingerprints and connector memory: portal <code>coveredRepos</code> and <code>repoEntities</code>, GitLab <code>projectHeads</code> and <code>projectEnrichment</code>, Confluence space counts.</p><div class="cols"><span>items</span><span>meta</span><span>lastRunAt</span></div></div>
       <div class="store"><h4>Map <code>data/kb-map.json.gz</code></h4><p>Built by <code>npm run map</code>: every vector random-projected to 256 dims, UMAP to 2-D, k-means clusters named by distinctive terms. Parallel arrays, dictionary-encoded strings, no chunk text: the browser fetches passages on demand.</p><div class="cols"><span>documents</span><span>clusters</span><span>points{x,y,doc,ord,head,cl}</span><span>labels</span></div></div>
@@ -504,6 +505,7 @@ POST /oauth2/token with grant_type=client_credentials…</pre>
       <div class="row"><span class="d">src/ingest/</span>      <span class="f">loader.ts · chunker.ts · pipeline.ts · manifest.ts · progress.ts</span> <span class="c">frontmatter and kinds · prose + code chunkers · batched load→chunk→embed→store, BM25 rebuild</span></div>
       <div class="row"><span class="d">src/llm/</span>         <span class="f">embeddings.ts · chat.ts · ollama.ts</span> <span class="c">instruction-prefixed queries, Matryoshka truncation, streaming chat, mock providers for tests</span></div>
       <div class="row"><span class="d">src/store/</span>       <span class="f">vector-store.ts · bm25.ts</span> <span class="c">LanceDB wrapper · Okapi BM25</span></div>
+      <div class="row"><span class="d">src/graph/</span>       <span class="f">build.ts · resolve.ts · index.ts · types.ts</span> <span class="c">frontmatter + body links → nodes/edges · link → source_id · in-memory adjacency, neighbours, hubs</span></div>
       <div class="row"><span class="d">src/retrieval/</span>   <span class="f">retriever.ts</span> <span class="c">RRF, authority boost, per-document cap, optional LLM rerank</span></div>
       <div class="row"><span class="d">src/generation/</span>  <span class="f">prompt.ts · ask.ts</span> <span class="c">system prompt, context blocks, deep links · query rewrite and the streaming loop</span></div>
       <div class="row"><span class="d">src/viz/</span>         <span class="f">map.ts</span> <span class="c">random projection, UMAP, clustering, labels</span></div>
@@ -525,7 +527,7 @@ POST /oauth2/token with grant_type=client_credentials…</pre>
   const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
 
   // Live values shown in the diagram; refreshed by /api/health.
-  const live = { chunks: null, dims: 1024, emb: "qwen3-embedding:0.6b", chat: "qwen3:8b", bm25: null };
+  const live = { chunks: null, dims: 1024, emb: "qwen3-embedding:0.6b", chat: "qwen3:8b", bm25: null, graphNodes: null, graphEdges: null };
 
   // =====================================================================
   // 1. Pipeline diagram
@@ -554,6 +556,8 @@ POST /oauth2/token with grant_type=client_credentials…</pre>
       facts: [["tokenizer", "NFKD fold · lower-case · [letters|digits]+ · it/en stopwords · split ADR0010 → adr, 0010"], ["scoring", "idf = ln(1 + (N − df + 0.5)/(df + 0.5)) · tf saturation with k1, length norm with b"], ["filters", "source_type · kind · authority · lang, applied per posting"], ["format", "version 2 · ids · lens · postings term → [docIdx, tf, …]"]], code: "src/store/bm25.ts" },
     lancedb: { lane: "store", title: "LanceDB", sub: () => live.chunks == null ? "data/lancedb/ · chunks table" : `${fmt(live.chunks)} rows · vector float32[${live.dims}] + metadata`, summary: "Embedded, file-based vector database with Apache Arrow columns. One chunks table holds the vector and every metadata column, so retrieval filters are SQL-like predicates pushed into the scan. No ANN index is built: with tens of thousands of vectors a brute-force cosine scan is exact and takes milliseconds.",
       facts: [["search", "vectorSearch(v).distanceType('cosine').limit(k).where(\"kind IN ('api')\")"], ["writes", "add(rows) per batch · deleteBySourceIds before re-indexing a changed document · optimize() after a bulk ingest"], ["scans", "scanForKeywordIndex (BM25 rebuild) · scanForMap (npm run map)"], ["facets", "distinct(column) feeds the filter chips and this page"]], code: "src/store/vector-store.ts" },
+    graph: { lane: "store", title: "Knowledge graph", sub: () => live.graphEdges == null ? "data/graph.json.gz · what links to what" : `${fmt(live.graphNodes)} nodes · ${fmt(live.graphEdges)} edges · gzipped JSON`, summary: "The structure chunking throws away: which document links to which, the Confluence page tree, the project card of each repository, and the repository, space, catalog entity, owning team, tag and City Map node every document belongs to. Read straight out of the frontmatter and the markdown links sync already wrote — no model, no embedding — and rebuilt from the manifest at the end of every ingest, so it can never point at ids the index no longer has.",
+      facts: [["nodes", "the manifest's documents + one hub per group (repo: · space: · tree: · entity: · team: · tag: · area:/subarea:/module:)"], ["doc → doc", "links_to (a markdown link whose URL reverse-maps to an indexed source_id) · child_of · described_by · documents · related_wiki"], ["dropped", "a target that is not in the manifest, so every edge points at a page fetch_document can read"], ["hub cap", "GRAPH_MAX_HUB_SIZE 60: bigger groups contribute no \"same place\" neighbours"], ["read by", "the related(source_id) tool · GET /api/graph and the links overlay on /map.html"], ["by-product", "npm run graph -- --broken-links: internal links that point at nothing indexed"]], code: "src/graph/build.ts · src/graph/resolve.ts · src/graph/index.ts" },
     question: { lane: "online", title: "Question", sub: "+ history · filters", summary: "Arrives from the CLI, the web chat or the HTTP API as a list of messages plus optional filters (source types, kinds, authorities, languages), an optional topK (≤ 20) and a think flag. The last user message is the question; everything before it is history.",
       facts: [["endpoints", "POST /api/ask (SSE) · POST /api/ask/sync · npm run ask"], ["filters", "applied identically to the vector scan (SQL predicate) and to BM25 (per posting)"], ["events", "status → sources → thinking* → token* → done | error"]], code: "src/server/index.ts · src/cli/ask.ts" },
     rewrite: { lane: "online", title: "Query rewrite", sub: "follow-up → standalone", summary: "A follow-up like “and for M2M tokens?” is useless as a search query. With history present, the chat model rewrites the last question into a self-contained query in the same language, resolving pronouns from the last 4 turns. Skipped when there is no history, when QUERY_REWRITE=false, or with the mock provider; any failure falls back to the raw question.",
@@ -565,28 +569,28 @@ POST /oauth2/token with grant_type=client_credentials…</pre>
     prompt: { lane: "online", title: "Prompt builder", sub: "rules + numbered context", summary: "The system prompt states the rules and is followed by the context blocks, each numbered and headed with its heading path, source type, kind, authority and URL (GitLab code chunks get a #L<start>-<end> anchor). The last 6 turns of history are appended, then the new question.",
       facts: [["rules", "answer only from context · say when it is not covered · cite [n] per claim · prefer binding on conflict · name repo + file · same language as the user"], ["citations", "toCitations() numbers chunks in ranking order; excerpt ≤ 600 chars"], ["history", "last 6 non-system turns"]], code: "src/generation/prompt.ts" },
     llm: { lane: "online", title: "Chat model", sub: () => `${live.chat} · streaming`, summary: "Ollama /api/chat streams two kinds of delta: thinking and content. Both are forwarded as separate SSE events so the UI can show reasoning live in a collapsible panel and the answer token by token underneath. Qwen3 thinks before answering by default; CHAT_THINK and the per-request flag control it.",
-      facts: [["knobs", "CHAT_MODEL · CHAT_THINK (false) · CHAT_NUM_CTX 32768 · CHAT_MAX_TOKENS 4096 · CHAT_TEMPERATURE 0.2"], ["abort", "generation stops when the response socket closes"], ["heartbeat", "\": ping\" SSE comment every 15 s keeps proxies from closing the stream"]], code: "src/llm/chat.ts · src/generation/ask.ts" },
+      facts: [["knobs", "CHAT_MODEL · CHAT_THINK (false) · CHAT_NUM_CTX 32768 · CHAT_MAX_TOKENS 4096 · CHAT_TEMPERATURE 0.2"], ["tools", "search(query) · fetch_document(source_id, section?) · related(source_id) — TOOL_MAX_ROUNDS 3 and a TOOL_CHAR_BUDGET, and the last round always runs without tools so an answer always comes out"], ["abort", "generation stops when the response socket closes"], ["heartbeat", "\": ping\" SSE comment every 15 s keeps proxies from closing the stream"]], code: "src/llm/chat.ts · src/generation/ask.ts · src/generation/tools.ts" },
     answer: { lane: "online", title: "Cited answer", sub: "[n] → source cards", summary: "When the stream ends, the [n] markers the model actually used are extracted (first-use order) so the UI can dim unused sources. The done event carries the answer, the thinking, the used citations and timings for rewrite, retrieval and generation.",
       facts: [["done", "{ answer, thinking, usedCitations, timings: { rewriteMs, retrieveMs, generateMs, totalMs } }"], ["source card", "title → URL · source type · kind · authority · heading path · passage"], ["eval", "npm run eval: hit@k and MRR over evals/questions.jsonl, optional LLM judge"]], code: "src/generation/prompt.ts › extractCitedNumbers · public/index.html" },
   };
 
   // Geometry in viewBox units. Offline lane on top with the store column at the right; the online lane
   // below reads the store through two dashed "bus" lines that drop into the hybrid-search node.
-  const W = 1420, H = 452;
+  const W = 1420, H = 506;
   const N = (id, x, y, w, h, lane) => ({ id, x, y, w, h, lane });
   const nodes = [
     N("devportal", 24, 58, 170, 40, "offline"), N("gitlab", 24, 106, 170, 40, "offline"), N("confluence", 24, 154, 170, 40, "offline"), N("curated", 24, 202, 170, 40, "offline"),
     N("sync", 270, 58, 170, 184, "offline"),
     N("kb", 516, 58, 160, 184, "offline"),
     N("loader", 752, 58, 170, 46, "offline"), N("chunker", 752, 127, 170, 46, "offline"), N("embedder", 752, 196, 170, 46, "offline"),
-    N("manifest", 1078, 58, 298, 46, "store"), N("bm25", 1078, 127, 298, 46, "store"), N("lancedb", 1078, 196, 298, 54, "store"),
-    N("question", 24, 356, 120, 46, "online"), N("rewrite", 194, 356, 130, 46, "online"),
-    N("hybrid", 420, 332, 240, 94, "online"),
-    N("fuse", 702, 356, 170, 46, "online"), N("prompt", 918, 356, 140, 46, "online"), N("llm", 1104, 356, 140, 46, "online"), { ...N("answer", 1290, 356, 106, 46, "online"), label: "Answer", short: "[n] → sources" },
+    N("manifest", 1078, 58, 298, 46, "store"), N("bm25", 1078, 127, 298, 46, "store"), N("lancedb", 1078, 196, 298, 54, "store"), N("graph", 1078, 273, 298, 46, "store"),
+    N("question", 24, 410, 120, 46, "online"), N("rewrite", 194, 410, 130, 46, "online"),
+    N("hybrid", 420, 386, 240, 94, "online"),
+    N("fuse", 702, 410, 170, 46, "online"), N("prompt", 918, 410, 140, 46, "online"), N("llm", 1104, 410, 140, 46, "online"), { ...N("answer", 1290, 410, 106, 46, "online"), label: "Answer", short: "[n] → sources" },
   ];
   const byId = Object.fromEntries(nodes.map((n) => [n.id, n]));
   const cx = (n) => n.x + n.w / 2, cy = (n) => n.y + n.h / 2;
-  const BUS_A = 292, BUS_B = 308;          // y of the two read buses
+  const BUS_A = 346, BUS_B = 362;          // y of the two read buses
   const DROP_A = byId.hybrid.x + 48, DROP_B = byId.hybrid.x + byId.hybrid.w - 48;
   // Edges: from, to, label, kind, label placement. kind: flow | flow-v | reads | side
   const edges = [
@@ -594,6 +598,7 @@ POST /oauth2/token with grant_type=client_credentials…</pre>
     ["sync", "kb", "writes *.md", "flow", "mid"],
     ["kb", "loader", "new hash", "flow", "mid"], ["loader", "chunker", "Document", "flow-v"], ["chunker", "embedder", "Chunk[]", "flow-v"],
     ["embedder", "lancedb", "rows + vectors", "flow", "mid"], ["lancedb", "bm25", "rebuilt from the table", "flow-v"], ["loader", "manifest", "content hashes", "flow", "mid"],
+    ["lancedb", "graph", "from the manifest", "flow-v"],
     ["question", "rewrite", "history", "flow", "above"], ["rewrite", "hybrid", "query", "flow", "above"],
     ["hybrid", "fuse", "2 × 24 ranked", "flow", "above"], ["fuse", "prompt", "top 6", "flow", "above"], ["prompt", "llm", "messages", "flow", "above"], ["llm", "answer", "tokens", "flow", "above"],
     ["lancedb", "hybrid", "cosine scan", "reads"], ["bm25", "hybrid", "postings", "reads"],
@@ -637,12 +642,12 @@ POST /oauth2/token with grant_type=client_credentials…</pre>
   const subOf = (s) => typeof s.sub === "function" ? s.sub() : s.sub;
 
   function renderDiagram() {
-    let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Pipeline: sources flow through sync into kb/, then loader, chunker and embedder write the manifest, LanceDB and the BM25 index; online, a question is rewritten, searched in both indexes, fused and ranked, prompted, answered by the chat model with citations.">`;
+    let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Pipeline: sources flow through sync into kb/, then loader, chunker and embedder write the manifest, LanceDB, the BM25 index and the knowledge graph; online, a question is rewritten, searched in both indexes, fused and ranked, prompted, answered by the chat model with citations.">`;
     svg += `<defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--border)"/></marker><marker id="arr-lit" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker></defs>`;
     svg += `<text class="lane-label" x="24" y="34">offline</text><text class="lane-sub" x="92" y="34">npm run sync → npm run ingest · incremental, resumable</text>`;
     svg += `<text class="lane-label" x="1078" y="34">store</text><text class="lane-sub" x="1134" y="34">data/ · files only, nothing to run</text>`;
-    svg += `<line x1="24" y1="272" x2="${W - 24}" y2="272" stroke="var(--border)" stroke-dasharray="2 6"/>`;
-    svg += `<text class="lane-label" x="24" y="312">online</text><text class="lane-sub" x="88" y="312">npm run ask · /api/ask · web chat · read-only</text>`;
+    svg += `<line x1="24" y1="332" x2="${W - 24}" y2="332" stroke="var(--border)" stroke-dasharray="2 6"/>`;
+    svg += `<text class="lane-label" x="24" y="366">online</text><text class="lane-sub" x="88" y="366">npm run ask · /api/ask · web chat · read-only</text>`;
     edges.forEach(([f, t, label, kind, place], i) => {
       const a = byId[f], b = byId[t];
       svg += `<path id="e${i}" class="edge${kind === "reads" ? " reads" : ""}" data-f="${f}" data-t="${t}" d="${edgePath(a, b, kind)}" marker-end="url(#arr)"/>`;
@@ -723,6 +728,7 @@ POST /oauth2/token with grant_type=client_credentials…</pre>
   // =====================================================================
   fetch("/api/health").then((r) => r.json()).then((h) => {
     live.chunks = h.chunks; live.dims = h.dimensions; live.emb = h.embeddingModel; live.chat = h.chatModel; live.bm25 = h.bm25Docs;
+    if (h.graph) { live.graphNodes = h.graph.nodes; live.graphEdges = h.graph.edges; }
     $("#meta").textContent = `${fmt(h.chunks)} chunks · ${h.dimensions} dims · ${h.embeddingModel} · ${h.chatModel}`;
     $("#t-chunks").textContent = fmt(h.chunks);
     $("#t-chunks-s").innerHTML = `<span class="live"><span class="dot"></span>live from /api/health</span>`;

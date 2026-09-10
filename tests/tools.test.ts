@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import { FETCH_DOCUMENT_TOOL, SEARCH_TOOL, kbTools, parseTextToolCalls, runToolCall, type Searcher } from "../src/generation/tools.js";
+import { KbGraph, RELATIONS, type KbGraphFile } from "../src/graph/index.js";
 import { DocumentStore } from "../src/retrieval/documents.js";
 import type { Citation, RetrievedChunk, ToolCall } from "../src/types.js";
 
@@ -212,9 +213,13 @@ function stubSearcher(results: RetrievedChunk[]) {
 
 describe("search tool", () => {
   it("is offered next to fetch_document, with a query-only schema", () => {
-    expect(kbTools().map((t) => t.function.name)).toEqual(["search", "fetch_document"]);
+    expect(kbTools({ graph: false }).map((t) => t.function.name)).toEqual(["search", "fetch_document"]);
     expect(SEARCH_TOOL.function.parameters.required).toEqual(["query"]);
     expect(Object.keys(SEARCH_TOOL.function.parameters.properties)).toEqual(["query"]);
+  });
+
+  it("is joined by related once the knowledge graph is loaded", () => {
+    expect(kbTools({ graph: true }).map((t) => t.function.name)).toEqual(["search", "fetch_document", "related"]);
   });
 
   it("appends the new passages as numbered blocks after the existing citations", async () => {
@@ -347,5 +352,102 @@ describe("tool calls written as text", () => {
     expect(calls[0]?.query).toBe("relations data model");
     expect(out.ok).toBe(true);
     expect(out.message.content).not.toContain("<");
+  });
+});
+
+// ---- related -----------------------------------------------------------------------------------
+
+/**
+ * A hand-built graph, so the tool's behaviour is tested without a kb on disk: an ADR that
+ * supersedes another, its project card, two more documents in the same repository, and one page
+ * that is in the graph but nowhere near it.
+ */
+function stubGraph(): KbGraph {
+  const nodes = [
+    { id: "adr:client-credentials", type: "doc" as const, label: "ADR0010 Client Credentials" },
+    { id: "adr:m2m-tokens", type: "doc" as const, label: "ADR0007 M2M tokens" },
+    { id: "gitlab:oneplatform/adrs:__project", type: "doc" as const, label: "oneplatform/adrs" },
+    { id: "gitlab:oneplatform/adrs:Platform/other.md", type: "doc" as const, label: "ADR0011 Log types" },
+    { id: "devportal:elsewhere/", type: "doc" as const, label: "Unrelated page" },
+    { id: "repo:oneplatform/adrs", type: "repo" as const, label: "adrs" },
+    { id: "team:platform", type: "team" as const, label: "group:default/Platform" },
+  ];
+  const rel = (r: string): number => RELATIONS.indexOf(r as never);
+  const edges = {
+    from: [1, 0, 1, 3, 0, 1, 3],
+    to: [0, 2, 2, 2, 5, 5, 5],
+    rel: [rel("links_to"), rel("described_by"), rel("described_by"), rel("described_by"), rel("in_repo"), rel("in_repo"), rel("in_repo")],
+  };
+  const file: KbGraphFile = {
+    version: 1,
+    generatedAt: new Date().toISOString(),
+    docs: 5,
+    nodes,
+    relations: [...RELATIONS],
+    edges,
+    brokenLinks: [],
+    stats: { nodes: nodes.length, edges: edges.from.length, byRelation: {}, unresolved: {}, scopeGaps: {}, connectedDocs: 4, largestComponent: 4, brokenLinksTotal: 0, durationMs: 1 },
+  };
+  return new KbGraph(file);
+}
+
+describe("related tool", () => {
+  const graph = stubGraph();
+
+  it("groups the neighbourhood by how each document is connected, and gives exact ids", async () => {
+    const out = await runToolCall(call({ source_id: "adr:m2m-tokens" }, "related"), { store, graph, citations: [] });
+    expect(out.ok).toBe(true);
+    expect(out.message.content).toContain("related to \"ADR0007 M2M tokens\"");
+    expect(out.message.content).toContain("links to:\n- ADR0010 Client Credentials — adr:client-credentials");
+    expect(out.message.content).toContain("same repo (adrs, 3 documents):");
+    expect(out.message.content).toContain("fetch_document(source_id)");
+    // A page in the graph but unconnected must not show up.
+    expect(out.message.content).not.toContain("devportal:elsewhere/");
+    // The list is navigation, not evidence: it adds no citable block.
+    expect(out.newCitations).toBeUndefined();
+    expect(out.citationNumbers).toBeUndefined();
+  });
+
+  it("accepts a context block's number in place of a source_id", async () => {
+    const citations = [citation(1, "adr:m2m-tokens")];
+    const out = await runToolCall(call({ source_id: "[1]" }, "related"), { store, graph, citations });
+    expect(out.ok).toBe(true);
+    expect(out.message.content).toContain("ADR0010 Client Credentials");
+  });
+
+  it("narrows to real links when asked, leaving the repository out", async () => {
+    const out = await runToolCall(call({ source_id: "adr:m2m-tokens", scope: "links" }, "related"), { store, graph, citations: [] });
+    expect(out.message.content).toContain("adr:client-credentials");
+    expect(out.message.content).not.toContain("same repo");
+  });
+
+  it("says plainly when a document is connected to nothing", async () => {
+    const out = await runToolCall(call({ source_id: "devportal:elsewhere/" }, "related"), { store, graph, citations: [] });
+    expect(out.ok).toBe(true);
+    expect(out.message.content).toContain("No documents are linked to");
+    expect(out.message.content).toContain("search(query)");
+  });
+
+  it("answers a repeated walk with a pointer instead of the same list", async () => {
+    const relatedAsked = new Set<string>();
+    const first = await runToolCall(call({ source_id: "adr:m2m-tokens" }, "related"), { store, graph, citations: [], relatedAsked });
+    expect(first.message.content).toContain("ADR0010");
+    const second = await runToolCall(call({ source_id: "adr:m2m-tokens" }, "related"), { store, graph, citations: [], relatedAsked });
+    expect(second.message.content).toContain("already listed");
+    expect(second.message.content).not.toContain("ADR0010 Client Credentials —");
+  });
+
+  it("rejects an id that is not a document, and offers the ids in the context", async () => {
+    const citations = [citation(1, "adr:m2m-tokens")];
+    const out = await runToolCall(call({ source_id: "repo:oneplatform/adrs" }, "related"), { store, graph, citations });
+    expect(out.ok).toBe(false);
+    expect(out.message.content).toContain("not a document");
+    expect(out.message.content).toContain("adr:m2m-tokens");
+  });
+
+  it("reports itself unavailable when the graph has not been built", async () => {
+    const out = await runToolCall(call({ source_id: "adr:m2m-tokens" }, "related"), { store, citations: [] });
+    expect(out.ok).toBe(false);
+    expect(out.message.content).toContain("knowledge graph is not available");
   });
 });

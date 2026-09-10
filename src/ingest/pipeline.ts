@@ -1,5 +1,6 @@
 import { stat } from "node:fs/promises";
 import { config, paths } from "../config.js";
+import { buildGraph, KbGraph, loadPlaces } from "../graph/index.js";
 import { getEmbedder } from "../llm/embeddings.js";
 import { Bm25Index } from "../store/bm25.js";
 import { VectorStore } from "../store/vector-store.js";
@@ -31,6 +32,8 @@ export interface IngestReport {
   chunksWritten: number;
   totalChunks: number;
   durationMs: number;
+  /** Knowledge graph rebuilt at the end of the run (absent when GRAPH=false or it failed). */
+  graph?: { nodes: number; edges: number; brokenLinks: number; bytes: number };
 }
 
 function toStored(doc: Document, chunk: Chunk, vector: number[]): StoredChunk {
@@ -279,6 +282,25 @@ export async function ingest(opts: IngestOptions = {}): Promise<IngestReport> {
   await bm25.save(paths.bm25Index);
   await writeManifest(paths.manifest, manifest);
   log(`Keyword index rebuilt over ${bm25.size} chunks`);
+
+  // 6. Rebuild the knowledge graph from the manifest, for the same reason BM25 is rebuilt here: a
+  // graph whose ids no longer exist in the index would send `related` and the map at nothing. Cheap
+  // (a pass over the kb files, no embedding), and a failure must not fail the ingest.
+  if (config.graph.enabled) {
+    try {
+      const docs = Object.values(manifest.docs).map((d) => ({ sourceId: d.sourceId, relPath: d.relPath }));
+      const places = await loadPlaces(docs.map((d) => d.relPath), kbDir);
+      const graph = await buildGraph({ kbDir, docs, places });
+      const bytes = await KbGraph.save(graph);
+      report.graph = { nodes: graph.stats.nodes, edges: graph.stats.edges, brokenLinks: graph.stats.brokenLinksTotal, bytes };
+      log(
+        `Knowledge graph rebuilt: ${graph.stats.nodes.toLocaleString("en-US")} nodes, ${graph.stats.edges.toLocaleString("en-US")} edges ` +
+          `(${Math.round(bytes / 1024)} kB); ${graph.stats.brokenLinksTotal.toLocaleString("en-US")} dangling internal links`,
+      );
+    } catch (err) {
+      log(`  ! knowledge graph not rebuilt: ${(err as Error).message}`);
+    }
+  }
 
   report.chunksWritten = written;
   report.totalChunks = await store.count();

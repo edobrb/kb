@@ -141,6 +141,10 @@
         <label class="check"><input type="checkbox" id="showLabels" /> cluster labels</label>
         <label class="check"><input type="checkbox" id="forceDensity" checked /> density</label>
       </div>
+      <div class="row" style="margin-top:7px">
+        <label class="check" title="Links between documents from the knowledge graph: markdown links, Confluence page trees, project cards"><input type="checkbox" id="showLinks" /> links</label>
+        <span class="small" id="linksNote"></span>
+      </div>
     </section>
     <section>
       <h2>Legend <span class="small" id="legendNote"></span></h2>
@@ -171,6 +175,8 @@
   const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   const fmt = (n) => n.toLocaleString("en-US");
 
+  // Zoom (relative to the fitted view) below which thewhole link web is not drawn: see drawEdges.
+  const LINKS_MIN_ZOOM = 2;
   // Above this many candidate points in view, draw into a pixel buffer instead of stroking arcs.
   // Arcs stay crisp for normal zoom levels; the buffer keeps a very large map interactive.
   const SPLAT_MIN = 25000;
@@ -185,7 +191,11 @@
   let query = "", queryHits = null;
   let probe = null, probeByPoint = null;
   let selected = null, focusDoc = null, hover = null;
-  let showLabels = false, forceDensity = true;
+  let showLabels = false, forceDensity = true, showLinks = false;
+  // Knowledge graph (/api/graph): document-to-document edges, loaded the first time they are needed.
+  let GR = null, grLoading = null, grFail = null;
+  // Neighbours of the selected document, as `docIndex -> {relation, direction}`.
+  let neighbourDocs = null;
   const T = { k: 1, tx: 0, ty: 0 };
   let W = 0, H = 0, dpr = 1, baseK = null, splatBuf = null;
 
@@ -220,6 +230,17 @@
     for (let i = 0; i < n; i++) items[cursor[D.doc[i]]++] = i;
     D.docStart = start; D.docItems = items;
     D.bySourceId = new Map(D.documents.map((d, i) => [d.id, i]));
+    // One representative chunk per document (its first), so an edge between two documents can be
+    // drawn in the chunk view as well as in the document view.
+    D.docRep = new Int32Array(nd);
+    for (let d = 0; d < nd; d++) {
+      let best = -1, bestOrd = Infinity;
+      for (let j = start[d]; j < start[d + 1]; j++) {
+        const i = items[j];
+        if (D.ord[i] < bestOrd) { bestOrd = D.ord[i]; best = i; }
+      }
+      D.docRep[d] = best;
+    }
 
     const when = new Date(m.generatedAt);
     $("#meta").textContent = `${fmt(n)} chunks · ${fmt(m.docs)} documents · ${m.clusters.length} clusters · ${m.embeddingModel} → UMAP · ${when.toLocaleDateString()} ${when.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
@@ -433,14 +454,21 @@
     const wx0 = worldX(0), wy0 = worldY(0), wx1 = worldX(W), wy1 = worldY(H);
     const inView = countInRect(wx0, wy0, wx1, wy1);
     const dimming = Boolean(query) || Boolean(probe) || focusDoc !== null;
-    if (forceDensity || inView > SPLAT_MIN) drawSplat(wx0, wy0, wx1, wy1, surface, dimming);
+    const density = forceDensity || inView > SPLAT_MIN;
+    // The density path paints the whole canvas from a pixel buffer, which would wipe anything drawn
+    // before it; with individual dots the edges belong underneath them.
+    if (!density) drawEdges();
+    if (density) drawSplat(wx0, wy0, wx1, wy1, surface, dimming);
     else drawArcs(wx0, wy0, wx1, wy1, surface, dimming);
-
+    if (density) drawEdges();
     if (showLabels) drawLabels();
     drawRings(surface);
-    $("#hint").textContent = inView > SPLAT_MIN || forceDensity
+    const linksHint = !showLinks || !GR ? "" : zoomLevel() >= LINKS_MIN_ZOOM
+      ? ` · ${fmt(GR.a.length)} document links`
+      : ` · ${fmt(GR.a.length)} document links — zoom in to draw them, or click a dot for its own`;
+    $("#hint").textContent = (inView > SPLAT_MIN || forceDensity
       ? `${fmt(inView)} points in view · density shading · zoom in for individual dots`
-      : "drag to pan · wheel to zoom · click a dot for details · double-click a dot to open the source";
+      : "drag to pan · wheel to zoom · click a dot for details · double-click a dot to open the source") + linksHint;
   }
 
   function drawArcs(wx0, wy0, wx1, wy1, surface, dimming) {
@@ -513,6 +541,75 @@
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
 
+  // ---- knowledge graph -------------------------------------------------------
+  /**
+   * Document-to-document edges, fetched once. Only edges whose two documents are both on this map
+   * are kept: the map is projected from one ingest and the graph from another, so a document can be
+   * in the graph and not in the payload.
+   */
+  function loadGraph() {
+    if (GR || grLoading) return grLoading;
+    grLoading = fetch("/api/graph")
+      .then(async (r) => {
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.error || r.statusText);
+        const docIdx = j.nodes.map((n) => { const d = D.bySourceId.get(n.id); return d === undefined ? -1 : d; });
+        const a = [], b = [], rel = [];
+        for (const [i, k, t] of j.edges) {
+          const da = docIdx[i], db = docIdx[k];
+          if (da < 0 || db < 0 || da === db) continue;
+          a.push(da); b.push(db); rel.push(t);
+        }
+        // Adjacency over documents, for "what is this connected to" without a round trip.
+        const adj = new Map();
+        for (let e = 0; e < a.length; e++) {
+          if (!adj.has(a[e])) adj.set(a[e], []);
+          if (!adj.has(b[e])) adj.set(b[e], []);
+          adj.get(a[e]).push(e); adj.get(b[e]).push(e);
+        }
+        GR = { a, b, rel, relations: j.relations, adj, generatedAt: j.generatedAt, offMap: j.nodes.length - docIdx.filter((d) => d >= 0).length };
+        $("#linksNote").textContent = `${fmt(a.length)} links`;
+        return GR;
+      })
+      .catch((err) => { grFail = err.message; $("#linksNote").textContent = `no graph (${err.message})`; return null; })
+      .finally(() => { grLoading = null; });
+    return grLoading;
+  }
+
+  /** Screen position of a document in the current view (its dot, or its first chunk's dot). */
+  const docPoint = (d) => (view === "docs" ? d : D.docRep[d]);
+
+  function drawEdges() {
+    if (!GR) return;
+    const pad = 40;
+    // The whole web over the fitted map covers the dots it is supposed to explain; it becomes
+    // readable once a region is zoomed in. The selected document's own links are always drawn.
+    const web = showLinks && zoomLevel() >= LINKS_MIN_ZOOM;
+    for (const highlight of [false, true]) {
+      // Highlighted edges last, so a neighbour's line is never covered by the haystack.
+      ctx.lineWidth = highlight ? 1.4 : 0.6;
+      ctx.strokeStyle = highlight ? css("--accent") : css("--muted");
+      ctx.globalAlpha = highlight ? 0.9 : 0.09;
+      ctx.beginPath();
+      for (let e = 0; e < GR.a.length; e++) {
+        const da = GR.a[e], db = GR.b[e];
+        const hot = selected !== null && (docOf(selected) === da || docOf(selected) === db);
+        if (hot !== highlight) continue;
+        if (!highlight && !web) continue;
+        // In the chunk view an edge is drawn between the documents' first chunks — except at the
+        // selected end, where it starts from the dot the user actually clicked.
+        const ia = hot && view === "chunks" && docOf(selected) === da ? selected : docPoint(da);
+        const ib = hot && view === "chunks" && docOf(selected) === db ? selected : docPoint(db);
+        if (ia < 0 || ib < 0 || !isVisible(ia) || !isVisible(ib)) continue;
+        const x1 = sx(ia), y1 = sy(ia), x2 = sx(ib), y2 = sy(ib);
+        if ((x1 < -pad && x2 < -pad) || (x1 > W + pad && x2 > W + pad) || (y1 < -pad && y2 < -pad) || (y1 > H + pad && y2 > H + pad)) continue;
+        ctx.moveTo(x1, y1); ctx.lineTo(x2, y2);
+      }
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+
   /** Cluster names on the map, biggest first, skipping any that would collide with one already drawn. */
   function drawLabels() {
     const z = zoomLevel();
@@ -578,12 +675,63 @@
     return Boolean(u);
   }
 
+  /**
+   * The selected document's neighbourhood in the knowledge graph, listed under the passage and
+   * drawn on the map. Server-side (/api/graph/neighbors) rather than from the edge payload, because
+   * hub siblings — the rest of the repository, space or module — are not in it.
+   */
+  let relatedToken = 0;
+  async function loadRelated(sourceId) {
+    const token = ++relatedToken;
+    neighbourDocs = null;
+    const note = () => $("#relatedNote"), listEl = () => $("#relatedList");
+    if (!note()) return;
+    await loadGraph();
+    if (token !== relatedToken || !note()) return;
+    if (grFail) { note().textContent = "no graph"; return; }
+    let data;
+    try {
+      const r = await fetch("/api/graph/neighbors", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sourceId, limit: 24 }) });
+      data = await r.json();
+      if (!r.ok) throw new Error(data.error || r.statusText);
+    } catch (err) {
+      if (token === relatedToken && note()) note().textContent = `unavailable (${err.message})`;
+      return;
+    }
+    if (token !== relatedToken || !note() || !listEl()) return;
+
+    const hubs = (data.hubs || []).filter((h) => h.type !== "tag").slice(0, 3);
+    note().textContent = `${data.neighbors.length} document${data.neighbors.length === 1 ? "" : "s"}` + (hubs.length ? ` · ${hubs.map((h) => `${h.label} (${h.size})`).join(" · ")}` : "");
+    listEl().innerHTML = "";
+    neighbourDocs = new Map();
+    for (const n of data.neighbors) {
+      const d = D.bySourceId.get(n.sourceId);
+      if (d !== undefined) neighbourDocs.set(d, n);
+      const el = document.createElement("div");
+      el.className = "hit";
+      const how = n.direction === "sibling" && n.via ? `same ${n.via.type}` : n.direction === "in" ? `← ${n.relation.replace(/_/g, " ")}` : `→ ${n.relation.replace(/_/g, " ")}`;
+      el.innerHTML = `<div class="t"><span>${esc(n.title)}</span></div><div class="p">${esc(how)}${d === undefined ? " · not on this map" : ""}</div>`;
+      el.title = n.sourceId;
+      if (d !== undefined) {
+        el.onclick = () => {
+          const target = view === "docs" ? d : D.docRep[d];
+          if (target >= 0) select(target, { center: true });
+        };
+      } else {
+        el.style.opacity = "0.55";
+      }
+      listEl().appendChild(el);
+    }
+    draw();
+  }
+
   let detailToken = 0;
   function select(i, opts = {}) {
     selected = i;
     const box = $("#detail");
     if (i === null) {
       focusDoc = null;
+      neighbourDocs = null;
       box.innerHTML = `<span class="placeholder">Click a dot on the map. Double-click it to open the source page directly.</span>`;
       draw();
       return;
@@ -606,8 +754,11 @@
       <div class="p">${esc(d.path)}</div>
       ${hit ? `<div class="p" style="margin-top:4px">retrieval rank <b>${hit.rank}</b> · score ${hit.score.toFixed(3)} · vector #${hit.vectorRank ?? "–"} · bm25 #${hit.bm25Rank ?? "–"}</div>` : ""}
       <div class="body" id="detailBody">loading passage…</div>
-      <div class="actions">${link}<button id="focusBtn">${focusDoc === docOf(i) ? "Show all" : "Highlight this document"}</button></div>`;
+      <div class="actions">${link}<button id="focusBtn">${focusDoc === docOf(i) ? "Show all" : "Highlight this document"}</button></div>
+      <div class="h" style="margin-top:10px;font-size:12.5px">Related <span class="small" id="relatedNote">…</span></div>
+      <div class="hits" id="relatedList"></div>`;
     $("#focusBtn").onclick = () => { focusDoc = focusDoc === docOf(i) ? null : docOf(i); select(i); };
+    loadRelated(d.id);
 
     // Chunk text is not in the map payload (it dominated the file size); fetch just this one.
     const token = ++detailToken;
@@ -698,6 +849,14 @@
   $("#colorBy").addEventListener("change", (e) => { colorBy = e.target.value; hidden.clear(); assignCategories(); draw(); });
   $("#showLabels").addEventListener("change", (e) => { showLabels = e.target.checked; draw(); });
   $("#forceDensity").addEventListener("change", (e) => { forceDensity = e.target.checked; draw(); });
+  $("#showLinks").addEventListener("change", async (e) => {
+    showLinks = e.target.checked;
+    if (showLinks) {
+      $("#linksNote").textContent = "loading…";
+      await loadGraph();
+    }
+    draw();
+  });
   let qTimer = null;
   $("#q").addEventListener("input", (e) => {
     clearTimeout(qTimer);

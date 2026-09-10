@@ -113,6 +113,25 @@ export const config = {
     },
   },
 
+  /**
+   * The knowledge graph over kb/ (src/graph): what links a document to another and which
+   * repository, space, entity, team, tag or City Map node it belongs to. Built from frontmatter and
+   * body links at the end of every ingest, so it never drifts from the index.
+   */
+  graph: {
+    /** Build it during ingest, load it for the `related` tool and the map overlay. */
+    enabled: bool("GRAPH", true),
+    /** Offer `related(source_id)` to the answering model. */
+    tool: bool("TOOL_RELATED", true),
+    /** Related documents one `related` call may list. */
+    toolLimit: num("TOOL_RELATED_LIMIT", 12),
+    /**
+     * Hubs bigger than this contribute no "same repository / space / module" neighbours: in a repo
+     * of eight documents that is a real hint, in one of three hundred it is noise.
+     */
+    maxHubSize: num("GRAPH_MAX_HUB_SIZE", 60),
+  },
+
   /** Documents are embedded in batches of about this many chunks; the manifest is flushed after each batch. */
   ingest: {
     batchChunks: num("INGEST_BATCH_CHUNKS", 256),
@@ -187,6 +206,8 @@ export const paths = {
   manifest: path.join(config.dataDir, "manifest.json"),
   /** 2-D UMAP projection of the vector index, built by `npm run map`, rendered at /map.html. */
   kbMap: path.join(config.dataDir, "kb-map.json.gz"),
+  /** Knowledge graph over the indexed documents, rebuilt at the end of every ingest. */
+  graph: path.join(config.dataDir, "graph.json.gz"),
   /** Per-source sync state (data/sync/<source>.json). */
   syncState: path.join(config.dataDir, "sync"),
 };

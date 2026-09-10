@@ -66,8 +66,10 @@ on top of this — the two approaches compose.
  │ LanceDB table  data/lancedb/  (vectors+text) │   │        boost + per-document cap → top-k       │
  │ BM25 index     data/bm25.json.gz             │   │                                     │         │
  │ Manifest       data/manifest.json (hashes)   │   │   prompt = rules + numbered context + history  │
- └──────────────────────────────────────────────┘   │        └► Ollama /api/chat (qwen3:8b, stream)  │
-                                                    │ answer with [n] citations + sources           │
+ │   │  frontmatter + body links → nodes, edges │   │        └► Ollama /api/chat (qwen3:8b, stream)  │
+ │   ▼                                          │   │           tools: search · fetch_document ·     │
+ │ Graph          data/graph.json.gz            │◄──┤                  related (walks the graph)     │
+ └──────────────────────────────────────────────┘   │ answer with [n] citations + sources           │
                                                     └───────────────────────────────────────────────┘
 ```
 
@@ -81,7 +83,10 @@ Three pipelines share one codebase:
   reference), the **GitLab** repositories (markdown documentation, OpenAPI/AsyncAPI contracts and one
   *project card* per repository; no source code), and the technical **Confluence** spaces (whole spaces minus
   meeting notes, ceremonies, drafts and archives). See [7.0 Gathering](#70-gathering-the-sources-srcsync-npm-run-sync).
-* **Ingest** (offline, idempotent, incremental): reads `kb/`, chunks by headings, embeds, writes the index.
+* **Ingest** (offline, idempotent, incremental): reads `kb/`, chunks by headings, embeds, writes the index —
+  and, at the end, rebuilds the **knowledge graph**: what links to what, and which repository, space, entity,
+  team or product module each document belongs to, all read out of the frontmatter and the links sync already
+  wrote. See [7.9 The knowledge graph](#79-the-knowledge-graph-srcgraph-npm-run-graph).
 * **Ask** (online): retrieves the best chunks with *hybrid* search and streams an answer.
   It is exposed three ways — CLI, HTTP/SSE API, and a small web chat UI — all using the same
   `ask()` generator in `src/generation/ask.ts`.
@@ -162,6 +167,7 @@ npm run serve                 # then open http://127.0.0.1:8787
 | `npm run doc -- "<source-id>"` | Prints a whole kb document by `source_id` (or `kb/` path) — exactly what the model's `fetch_document` tool returns. Flags: `--section "Heading"`, `--outline` (headings only), `--max-chars 20000`, `--json` |
 | `npm run serve` | Starts the HTTP API + web UI on `HOST:PORT` (default `127.0.0.1:8787`) |
 | `npm run map` | Projects every chunk vector to 2-D with UMAP, groups the chunks into semantic clusters, places every document on the City Map (Dev Portal catalog + `taxonomy.yaml`) and writes `data/kb-map.json.gz`, rendered by the web UI at `/map.html`. Re-run after `ingest`. Flags: `--clusters 8`, `--neighbors 15`, `--min-dist 0.1`, `--epochs 400`, `--project 256`, `--seed 42`, `--out <file>`, `--relabel` (recompute names and City Map placements only, ~1 s) |
+| `npm run graph` | Rebuilds the knowledge graph `data/graph.json.gz` from the ingest manifest (frontmatter + body links; no model, a couple of seconds) and reports what it found. `npm run ingest` already does this at the end, so this is for iterating on the rules. Inspection flags read the existing file instead: `--neighbors "<source-id>"` (what one document is connected to, `--relations links_to,in_repo` to narrow), `--members "repo:oneplatform/adrs"`, `--hubs repo\|tree\|entity\|space\|team\|tag\|area\|subarea\|module`, `--broken-links` (internal links that point at nothing indexed), `--top 25`, `--json` |
 | `npm run eval` | Retrieval metrics (hit@k, MRR) over `evals/questions.jsonl`; `--answers` also grades answers by expected keywords |
 | `npm run doctor` | Environment check: Ollama reachable, models pulled, kb/ present, index consistency, facets, sync sources reachable with the configured tokens |
 | `npm test` / `npm run typecheck` | Unit tests (vitest) / `tsc --noEmit` |
@@ -269,6 +275,27 @@ module (see [6.2](#62-knowledge-base-map-maphtml)); a document nobody can place 
 `{"id":"<chunkId>"}` or `{"ids":[…]}` (max 50) → `{ chunks: RetrievedChunk[] }`. Chunk text is deliberately
 absent from the map payload, so the map UI loads a passage only when you select its dot.
 
+### `GET /api/graph`, `POST /api/graph/neighbors`
+
+The knowledge graph (§ [7.9](#79-the-knowledge-graph-srcgraph-npm-run-graph)). `GET /api/graph` returns the
+**document-to-document** edges for the map overlay — hub edges are left out, since "same repository" would be
+an edge between every pair — as index triples into a compact node list:
+
+```jsonc
+{
+  "version": 1, "generatedAt": "…", "docs": 5516, "stats": { … },
+  "nodes":     [{ "id": "<sourceId>", "title": "…" }],
+  "edges":     [[12, 87, 0]],                     // [fromIndex, toIndex, relationIndex]
+  "relations": ["links_to", "child_of", "described_by", "documents", "related_wiki"]
+}
+```
+
+`POST /api/graph/neighbors` `{"sourceId":"…","limit":40}` → `{ node, hubs, neighbors }`: what one document is
+connected to, ranked (direct links first, then documents sharing a small hub), each neighbour carrying its
+`relation`, its `direction` (`out` / `in` / `sibling`) and, for a sibling, the `via` hub with its size. This is
+what the map's side panel and `npm run graph -- --neighbors` show. Both 404 with a hint when the graph has not
+been built.
+
 ## 6. Web UI
 
 `npm run serve` and open <http://127.0.0.1:8787>. Single static file (`src/server/public/index.html`, no build
@@ -319,6 +346,15 @@ npm run serve          # → http://127.0.0.1:8787/map.html
 Cluster names and City Map placements are recomputed in about a second with `npm run map -- --relabel`, which
 rewrites them on the existing projection instead of redoing it — worth knowing, because those are the parts you
 will want to iterate on.
+
+**Links.** The **links** checkbox draws the knowledge graph's document-to-document edges (§ 7.9) over the
+dots: markdown links, Confluence page trees, the project card of each repository. Two deliberate limits keep it
+readable — hub edges ("same repository") are never drawn, and the whole web appears only once the view is
+zoomed past the fitted map, where it stops covering the dots it is meant to explain. Selecting a dot always
+draws *its own* links, whatever the zoom, and lists its neighbourhood under the passage: each row says how the
+two are connected (`→ links to`, `← child of`, `same repo`) and clicking one flies to that document. It is the
+quickest way to see something UMAP cannot show — two pages that cite each other but land far apart because
+they are written in different languages.
 
 **Colours are the City Map.** Every document is placed on TeamSystem's City Map — `area › sub-area › module`,
 the taxonomy the Dev Portal catalog maintains as `kind: area / module / component` entities — and the map is
@@ -527,6 +563,10 @@ Documents are embedded in batches of about `INGEST_BATCH_CHUNKS` chunks (`EMBED_
 * **BM25** (`data/bm25.json.gz`): a ~150-line Okapi BM25 implementation. Tokeniser lower-cases, folds accents
   (`perché` → `perche`), drops Italian/English stopwords and splits alphanumeric codes so `ADR0010`, `ADR 0010`
   and `adr-0010` all match. It is rebuilt from the LanceDB table after every ingest, so the two can never drift.
+* **Knowledge graph** (`data/graph.json.gz`, `src/graph/`): the structure chunking throws away — 6.7k nodes and
+  23k edges over the current knowledge base, ~185 kB. See [7.9](#79-the-knowledge-graph-srcgraph-npm-run-graph).
+  Rebuilt from the manifest at the end of every ingest, for the same reason BM25 is: a graph pointing at ids the
+  index no longer has would send the `related` tool and the map overlay at nothing.
 
 ### 7.6 Hybrid retrieval (`src/retrieval/retriever.ts`)
 
@@ -542,8 +582,9 @@ Documents are embedded in batches of about `INGEST_BATCH_CHUNKS` chunks (`EMBED_
 ### 7.7 Tools: search again, read whole documents (`src/generation/tools.ts`, `src/retrieval/documents.ts`)
 
 One retrieval pass on the user's question is enough for most answers (hit@6 ≈ 93 % on the eval set), and the
-answering model is given two tools for the rest. Both count against the same `TOOL_MAX_ROUNDS` and
-`TOOL_CHAR_BUDGET`, both come back as numbered context blocks cited with the same `[n]`.
+answering model is given three tools for the rest. All three count against the same `TOOL_MAX_ROUNDS` and
+`TOOL_CHAR_BUDGET`; `search` and `fetch_document` come back as numbered context blocks cited with the same
+`[n]`, while `related` returns a list of ids to read next and no block at all.
 
 **`search(query)`** runs the same hybrid retrieval on a query of the model's choosing. It is for the first-pass
 misses: the user's words are not the documents' words (an acronym, the other language, the service name the
@@ -573,11 +614,27 @@ The passages the model received tell it which ids exist.
   run without tools, so a model that keeps calling still has to answer. `CHAT_TOOLS=false` turns it off, and
   it stays off automatically on a chat model without tool support (`npm run doctor` reports which).
 
-**Extended research** (`"mode": "research"`, the switch next to **Ask**) is the same two tools with room to be
+**`related(source_id, scope?)`** is the one tool that is not a search: it walks the knowledge graph one hop
+(§ 7.9) and lists what the page is attached to — what it links to and what links to it, its parent page, the
+rest of its repository or product module — grouped by how each one is connected. It is for the case neither
+other tool covers: the context is clearly about the right thing but does not answer the question, and no
+rewording of the query will find the page that does, because what connects them is a link and not a
+similarity.
+
+* It returns **titles and `source_id`s only, never text**, so a whole neighbourhood costs about as much as one
+  passage. It therefore adds no citable block on purpose: the model picks a page and reads it with
+  `fetch_document`, and what ends up cited is a passage as usual.
+* `TOOL_RELATED_LIMIT` (12) documents per call, direct links first and "the rest of this repository" last;
+  `scope: "links"` or `"same_place"` narrows it. A repeated walk gets a pointer instead of the same list.
+* Offered only when the graph is actually on disk, so the prompt never promises a tool that cannot answer
+  (`TOOL_RELATED=false` turns it off, `GRAPH=false` skips building it at all).
+
+**Extended research** (`"mode": "research"`, the switch next to **Ask**) is the same three tools with room to be
 used: `RESEARCH_TOP_K` passages instead of `RETRIEVAL_TOP_K`, `RESEARCH_TOOL_MAX_ROUNDS` rounds,
 `RESEARCH_TOOL_CHAR_BUDGET` characters, and one extra paragraph in the prompt that inverts the default — search
-again with a different wording *before* answering even when the context looks sufficient, read the full page
-behind every block you mean to cite, and only answer once further calls stop adding anything. It is the slow
+again with a different wording *before* answering even when the context looks sufficient, call `related` on the
+block closest to the question, read the full page behind every block you mean to cite, and only answer once
+further calls stop adding anything. It is the slow
 lane: several rounds of a local model, minutes rather than seconds. `fast` is the default.
 
 Why a tool and not simply bigger chunks: whole pages in the context would cost 5–10× the tokens on every
@@ -609,6 +666,56 @@ answering by default; `CHAT_THINK=false` disables it for speed, and the per-requ
 **Reasoning** button in the UI) overrides it. After the stream ends we extract which `[n]` the model
 actually cited so the UI can dim unused sources.
 
+### 7.9 The knowledge graph (`src/graph/`, `npm run graph`)
+
+Chunking keeps what a page *says* and throws away what it is *attached to*. The graph puts that back, from
+what sync already wrote — no model, no extra pass over the vectors, a couple of seconds over the whole
+knowledge base.
+
+**Nodes** are the documents in `data/manifest.json`, plus one hub per group they belong to (`repo:…`,
+`space:…`, `tree:<SPACE>/<ancestor path>`, `entity:…`, `team:…`, `tag:…`, and `area:` / `subarea:` /
+`module:` from the City Map placement of `src/citymap.ts`). **Edges** come from two places:
+
+* **Frontmatter** — `project` (and the project card of that repository), `space` + `parent_id` + the
+  `ancestors` chain, `entity`, `owner`, `tags`, `techdocs_ref`, `confluence_pages`.
+* **Body links** — every markdown link, reverse-mapped into a `source_id` the same way sync built it:
+  `…/wiki/spaces/X/pages/123/Slug` → `confluence:X:123` (by page id, so a renamed page still resolves),
+  `…/-/blob/main/docs/a.md` → `gitlab:<project>:docs/a.md`, `/docs/<ns>/<kind>/<name>/<page>/` →
+  `devportal:…`, and relative links resolved against the document's own path.
+
+Two rules make the result trustworthy. **A target that is not in the manifest is dropped** rather than
+guessed, so every edge points at a page `fetch_document` can read. And **a hub bigger than
+`GRAPH_MAX_HUB_SIZE` (60) contributes no siblings**: "same repository" is a real hint in a repository of eight
+documents and noise in one of three hundred. Beyond that, a neighbour's weight falls with the size of the hub
+it came through (`0.6 / log2(size)`), so a real link always outranks a shared folder.
+
+On the current knowledge base: 6,677 nodes, 23,210 edges, 185 kB gzipped — of which 3,182 are real links
+between documents. 69 % of documents have at least one document-to-document edge; the largest connected
+component is 41 %. It is not a recall trick (retrieval already finds pages that read alike, hit@6 ≈ 93 %) —
+it answers the questions similarity cannot: what supersedes this ADR, what else is in this repository, which
+page links here.
+
+```bash
+npm run graph -- --neighbors "gitlab:oneplatform/adrs:Platform/ADR0007_m2m_authenticated_only_tokens.md"
+# ADR0007 Machine to Machine (M2M) Authenticated-Only Tokens
+# Belongs to: repo:oneplatform/adrs (25) · subarea:architecture (249) · area:platform (357)
+#   0.95  described by       oneplatform/adrs
+#   0.90  links to           ADR0010 Client Credentials and Token Management for M2M and User Access
+#   0.13  same repo          ADR0001 CQRS With Hasura and Postgres  (via repo:oneplatform/adrs, 25 docs)
+```
+
+**Dangling links, for free.** A link whose target looks internal and resolves to nothing is a bug in the
+documentation, and `npm run graph -- --broken-links` groups them by reason and by most-repeated target
+(2,101 today; the top entry is ~325 links to a `module/policy-manager/overview/*` tree that has since been
+renamed to `concepts/*`). Frontmatter references to pages the sync scope deliberately excludes are counted
+apart, because those are decisions, not bugs.
+
+**Two consumers.** The `related` tool (§ 7.7), and the map: `/map.html` has a **links** toggle that draws the
+document-to-document edges, and selecting a dot always draws its own links and lists its neighbourhood in the
+side panel (`GET /api/graph`, `POST /api/graph/neighbors`). Hub edges are deliberately not drawn — "same
+repository" would be a line between every pair — and the whole web is only drawn once the view is zoomed past
+the fitted map, where it stops covering the dots it is meant to explain.
+
 ## 8. Configuration
 
 Everything is an environment variable (`.env`, see `.env.example` for the full annotated list).
@@ -633,8 +740,11 @@ Everything is an environment variable (`.env`, see `.env.example` for the full a
 | `QUERY_REWRITE` | `true` | Rewrite follow-ups into standalone queries (only when the turn retrieves) |
 | `FOLLOWUP_SEARCH` | `false` | `true` retrieves on every turn; by default a follow-up continues on the blocks the chat already gathered |
 | `FOLLOWUP_CARRY_MAX_BLOCKS` / `FOLLOWUP_CARRY_MAX_CHARS` | `24` / `24000` | How much of that context a follow-up carries (cited blocks survive first) |
-| `CHAT_TOOLS` | `true` | Give the model `search` and `fetch_document` (ignored on a model without tool support) |
+| `CHAT_TOOLS` | `true` | Give the model `search`, `fetch_document` and `related` (ignored on a model without tool support) |
 | `TOOL_SEARCH` / `TOOL_SEARCH_TOP_K` | `true` / `4` | Offer `search(query)`; new passages per call |
+| `GRAPH` | `true` | Build `data/graph.json.gz` at the end of every ingest (§ 7.9) |
+| `TOOL_RELATED` / `TOOL_RELATED_LIMIT` | `true` / `12` | Offer `related(source_id)`; related documents per call |
+| `GRAPH_MAX_HUB_SIZE` | `60` | A repository / space / module bigger than this contributes no "same place" neighbours |
 | `TOOL_MAX_ROUNDS` | `3` | Tool rounds before the model must answer |
 | `DOC_TOOL_MAX_CHARS` / `TOOL_CHAR_BUDGET` | `20000` / `24000` | Cap per tool result / per answer |
 | `RESEARCH_TOP_K` | `RETRIEVAL_TOP_K` × 1.5 | Passages retrieved in "extended research" mode (`"mode":"research"`, the UI switch) |
@@ -815,7 +925,7 @@ ai-wiki/
 ├── sources.yaml                 what sync gathers (portal excludes, GitLab groups/globs, Confluence spaces + tree filters) and rules
 ├── taxonomy.yaml                City Map placements for what the catalog does not describe (Confluence spaces, uncatalogued GitLab groups)
 ├── refresh-dev-portal-token.sh  prints a fresh Dev Portal bearer token (user tokens last ~1 h)
-├── data/                        generated index (LanceDB, BM25, manifest, kb-map.json.gz) and data/sync/ state + skipped lists — git-ignored
+├── data/                        generated index (LanceDB, BM25, manifest, kb-map.json.gz, graph.json.gz) and data/sync/ state + skipped lists — git-ignored
 ├── evals/questions.jsonl        evaluation set
 ├── scripts/setup-ollama.sh      pulls the two models · scripts/bench/ retrieval and embedding benchmarks
 ├── src/
@@ -843,20 +953,26 @@ ai-wiki/
 │   │   ├── loader.ts            file walk, frontmatter parsing, metadata (kind), cleaning
 │   │   ├── chunker.ts           markdown block parser + heading-aware packing (breadcrumb prefix); declaration-aware code chunking
 │   │   ├── manifest.ts          incremental-ingest bookkeeping
-│   │   └── pipeline.ts          orchestrates load → chunk → embed → store → BM25 rebuild, in batches
+│   │   └── pipeline.ts          orchestrates load → chunk → embed → store → BM25 rebuild → graph rebuild, in batches
 │   ├── store/
 │   │   ├── vector-store.ts      LanceDB table (schema, add/delete/search/filters)
 │   │   └── bm25.ts              tokenizer + Okapi BM25 + gzip persistence
+│   ├── graph/
+│   │   ├── build.ts             frontmatter + body links → nodes/edges, dangling-link report (npm run graph)
+│   │   ├── resolve.ts           URL / relative link → source_id, per source system
+│   │   ├── index.ts             in-memory adjacency: neighbours, hubs, the map's edge payload
+│   │   └── types.ts             relations, node kinds, the on-disk shape
 │   ├── retrieval/retriever.ts   hybrid search, RRF, boosts, diversity cap, LLM rerank
 │   ├── viz/map.ts               random projection, k-means clusters, UMAP → 2-D map (npm run map)
 │   ├── generation/
 │   │   ├── prompt.ts            system prompt, context formatting, citation extraction
+│   │   ├── tools.ts             search · fetch_document · related (schemas, dedup, formatting)
 │   │   └── ask.ts               the streaming RAG loop shared by CLI and API
-│   ├── cli/                     sync · ingest · ask · search · eval · doctor · map
+│   ├── cli/                     sync · ingest · ask · search · eval · doctor · map · graph
 │   └── server/
-│       ├── index.ts             Fastify: /api/ask (SSE), /api/ask/sync, /api/search, /api/document, /api/map, /api/ingest, …
+│       ├── index.ts             Fastify: /api/ask (SSE), /api/ask/sync, /api/search, /api/document, /api/map, /api/graph, /api/ingest, …
 │       ├── public/index.html    chat UI
-│       ├── public/map.html      2-D map: City Map colours, cluster labels, density LOD (canvas, no build step)
+│       ├── public/map.html      2-D map: City Map colours, cluster labels, density LOD, graph links (canvas, no build step)
 │       └── public/architecture.html  interactive architecture page: animated pipeline, live facets, RRF probe
 └── tests/                       vitest unit tests (chunkers, loader, BM25, prompt, sync connectors with fake fetch)
 ```
@@ -886,6 +1002,8 @@ pipeline — ingest, storage, retrieval, API, UI — runs in tests and CI withou
 | Ingest interrupted (Ctrl-C, sleep) | Just run `npm run ingest` again; it resumes from the manifest |
 | Answers in the wrong language | The prompt mirrors the question's language; ask in the language you want |
 | `vector and keyword index sizes differ` in doctor | `npm run ingest` (rebuilds BM25 from the table) |
+| `related` answers "the knowledge graph is not available", or `/map.html` says "no graph" | `data/graph.json.gz` has not been built: `npm run graph` (or any `npm run ingest`). Check `GRAPH` / `TOOL_RELATED` are not `false` |
+| `related` returns "No documents are linked to …" for a page that clearly cites others | Its links point outside the index (excluded trees, renamed portal pages, unindexed repositories): `npm run graph -- --broken-links` shows which, `npm run graph -- --neighbors "<source-id>"` what did resolve |
 | Slow first answer after idle | Ollama reloading the model into memory; raise `keep_alive` in `src/llm/ollama.ts` if it bothers you |
 
 ## 13. Roadmap / ideas
@@ -894,6 +1012,15 @@ pipeline — ingest, storage, retrieval, API, UI — runs in tests and CI withou
   ids and ADR file names have been remapped where the mapping was mechanical; the `git-md:` cases have not).
 * **Cross-encoder reranker** (e.g. `bge-reranker-v2-m3` through a small Python sidecar or ONNX) instead of the
   LLM rerank — better precision at lower latency.
+* **Graph-based expansion in retrieval** (§ 7.9): after fusion, pull the 1-hop neighbours of the top hits into
+  the candidate set at a score discount. Deliberately *not* done yet: hit@6 is already ~93 %, and a quarter of
+  the documents have no document-to-document edge, so this has to earn its place on the eval set rather than on
+  the idea. The graph is exposed as a tool the model chooses to call instead.
+* **Concept nodes** on top of the graph (GraphRAG-style): entities and concepts extracted per chunk by the chat
+  model, linked to the documents that mention them. That is the expensive layer — an extraction pass over the
+  corpus, orders of magnitude slower than the ~24 chunks/s embedding pass — and the contextual-retrieval
+  experiment already showed that expensive preprocessing has to prove itself first. Worth trying on the
+  `binding`/`normative` documents and the glossary alone, measured against `npm run eval`.
 * **More sources**: the loader only needs markdown + frontmatter, so anything exported as such (Jira, tickets,
   PDFs converted with Docling/MarkItDown) plugs in unchanged. Legacy Confluence spaces (TPAAS, TSDIGITAL) are one
   `spaces.include` entry away if their PaaS-era content turns out to be needed.
