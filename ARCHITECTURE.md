@@ -71,7 +71,7 @@ orchestrator also drops a document whose normalised body is identical to one alr
 | `code` | One fenced block with the language tag, the file verbatim. **Off by default** (`gitlab.code.enabled`) | `gitlab:<project>:<path>` → `kb/gitlab/<project>/<path>.md` | top-level declarations, ~600 tokens |
 
 Frontmatter every document carries: `source_id`, `source_type`, `kind`, `title`, `source_url`, `authority`,
-`lang`, `last_modified`, `fetched_at`, `fingerprint`, and `breadcrumb` — a short "where this lives" path
+`lang`, `last_modified`, `fetched_at`, and `breadcrumb` — a short "where this lives" path
 (`Dev Portal › Hermes`, `GitLab › oneplatform/adrs`, `Confluence › TeamCore › TS ID - Feature`) that the
 chunker prepends to every chunk's heading path, so a chunk says which system and which tree it comes from in
 both indexes. Plus source-specific fields (`entity`, `owner`, `system`, `project`, `file_path`, `blob_sha`,
@@ -90,7 +90,9 @@ Everything is incremental, and each stage has its own key. Nothing is redone unl
 | Project card | sha256 of the rendered card | The card document is rewritten |
 | Confluence page | page version number + hash of the quality thresholds | The page body is fetched again; the listing itself is one paginated request per space |
 | Confluence card enrichment | `confluence.refresh_days` per project | The wiki is searched again for that project |
-| Ingest of a document | sha256 of the file bytes (manifest) | Re-chunked, re-embedded |
+| kb document format | `KB_DOC_VERSION` in `src/sync/kb-writer.ts` | Every document is re-rendered once, so a change to what sync writes also reaches the documents the source itself reports as unchanged |
+| Ingest of a document | sha256 of the file bytes (manifest `contentHash`) | Re-chunked |
+| Embedding of a document | sha256 of kind + title + breadcrumb + project + body (manifest `embedHash`), confirmed against the chunk text already in the table | Re-embedded. When only the metadata moved — a fresh `fetched_at`, a new City Map field, a renamed owner — the stored vectors are reused and the rows are simply rewritten |
 | Whole index | embedding model, dimensions, chunk sizes | Full rebuild |
 | Knowledge graph | nothing — rebuilt from the manifest at the end of every ingest (seconds, no model) | `data/graph.json.gz` is replaced, so it can never point at ids the index no longer has |
 
@@ -107,8 +109,9 @@ A page that a new filter now excludes is simply not emitted and its file is dele
   (`kind IN ('api')`); no ANN index, a brute-force cosine scan at this scale is exact and fast.
 * **BM25** `data/bm25.json.gz` — Okapi BM25 rebuilt from the table after every ingest, so the two indexes
   cannot drift. The tokenizer folds accents and splits alphanumeric codes (`ADR0010` → `adr0010`, `adr`, `0010`).
-* **Manifest** `data/manifest.json` — what is indexed, with content hashes and chunk counts. Flushed after
-  every batch, which is what makes an interrupted ingest resumable.
+* **Manifest** `data/manifest.json` — what is indexed, with chunk counts and two hashes per document: the
+  file bytes (`contentHash`, "did anything change") and the embedding inputs (`embedHash`, "is a vector still
+  valid"). Flushed after every batch, which is what makes an interrupted ingest resumable.
 * **Knowledge graph** `data/graph.json.gz` — the structure the chunk index throws away: which document
   links to which, the Confluence page tree, the project card of a repository, and the repository,
   space, catalog entity, owning team, tag and City Map node each document belongs to. Nodes are the
@@ -116,8 +119,10 @@ A page that a new filter now excludes is simply not emitted and its file is dele
   fit in ~185 kB. Built by `src/graph/build.ts` at the end of every ingest — no model, no embedding,
   a pass over the kb files — and never allowed to outlive the manifest it was built from. See
   [§ Relations](#relations).
-* **Sync state** `data/sync/<source>.json` — per-source item fingerprints and connector memory
-  (`coveredRepos`, `repoEntities`, `projectHeads`, `projectEnrichment`, Confluence space counts).
+* **Sync state** `data/sync/<source>.json` — per-source item fingerprints, the `KB_DOC_VERSION` that
+  rendered them, and connector memory (`coveredRepos`, `repoEntities`, `projectHeads`, `projectEnrichment`,
+  Confluence space counts). Written as the run goes, not only at the end: a killed sync costs the items it
+  had not reached yet, not the whole source.
 
 ## Relations
 

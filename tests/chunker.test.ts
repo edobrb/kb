@@ -18,6 +18,7 @@ function doc(body: string, title = "Test Doc", kind: Document["meta"]["kind"] = 
       lang: "en",
       lastModified: null,
       contentHash: "x",
+      embedHash: "y",
       relPath: "test/doc.md",
     },
   };

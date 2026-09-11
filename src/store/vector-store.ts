@@ -195,6 +195,35 @@ export class VectorStore {
     return out;
   }
 
+  /**
+   * The chunk text and vector already stored for whole documents, keyed by source_id then ordinal.
+   * Ingest uses it to rewrite a document's rows with fresh metadata when the text is unchanged, instead
+   * of embedding it again. `maxRows` bounds the scan; ask for more rows than expected so a document whose
+   * chunk count moved shows up as a mismatch instead of being silently truncated.
+   */
+  async chunkVectorsBySourceIds(sourceIds: string[], maxRows: number): Promise<Map<string, Map<number, { text: string; vector: number[] }>>> {
+    const out = new Map<string, Map<number, { text: string; vector: number[] }>>();
+    if (!this.table || !sourceIds.length) return out;
+    for (let i = 0; i < sourceIds.length; i += 200) {
+      const slice = sourceIds.slice(i, i + 200);
+      const rows = (await this.table
+        .query()
+        .where(`source_id IN (${slice.map(sqlString).join(", ")})`)
+        .select(["source_id", "ordinal", "text", "vector"])
+        .limit(maxRows)
+        .toArray()) as Array<Record<string, unknown>>;
+      for (const r of rows) {
+        const raw = r["vector"] as { toArray?: () => ArrayLike<number> } | ArrayLike<number>;
+        const arr = typeof (raw as { toArray?: unknown }).toArray === "function" ? (raw as { toArray: () => ArrayLike<number> }).toArray() : (raw as ArrayLike<number>);
+        const sourceId = String(r["source_id"]);
+        let doc = out.get(sourceId);
+        if (!doc) out.set(sourceId, (doc = new Map()));
+        doc.set(Number(r["ordinal"]), { text: String(r["text"]), vector: Array.from(arr) });
+      }
+    }
+    return out;
+  }
+
   /** Stream every row's index text (used to rebuild the BM25 index after ingest). */
   async *scanForKeywordIndex(): AsyncGenerator<{
     id: string;

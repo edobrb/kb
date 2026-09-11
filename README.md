@@ -480,7 +480,7 @@ exist only there, buried in spaces that are mostly meeting notes — hence whole
 rather than a curated page list that would go stale.
 
 Every document gets the frontmatter the ingest expects (`source_id`, `source_type`, `kind`, `title`, `source_url`,
-`authority`, `lang`, `last_modified`, `fetched_at`, `fingerprint`, `breadcrumb`) plus source-specific fields
+`authority`, `lang`, `last_modified`, `fetched_at`, `breadcrumb`) plus source-specific fields
 (`entity`, `owner`, `system`, `project`, `file_path`, `api_type`, `space`, `ancestors`, `labels`,
 `confluence_pages`…). `authority` and `source_type` are decided by the **rules** in `sources.yaml` (first match
 wins; e.g. `gitlab:oneplatform/adrs:*` → `source_type: adr, authority: binding`); rules can also `skip` documents
@@ -497,7 +497,11 @@ spaces), and every skip — with its reason — is counted in the log and listed
 
 Safety rails: a source that aborts (network, expired token) never deletes anything; `--only` never deletes;
 files in `kb/<source>/` that sync does not know about are reported but only removed with `--prune-foreign`;
-files are rewritten only when their content changed, so `npm run ingest` stays incremental.
+files are rewritten only when their content changed, so `npm run ingest` stays incremental — and when a
+rewrite only touched the frontmatter, the ingest rewrites the rows and keeps the vectors instead of paying
+the embedder again. The version marker the source gives an item (a TechDocs build stamp, a blob sha) stays in
+`data/sync/<source>.json` and is deliberately not written into the file: the portal shares one build stamp
+across every page of an entity, so having it in the frontmatter re-embedded whole entities on every rebuild.
 
 **Credentials** (all read-only, all in `.env`):
 

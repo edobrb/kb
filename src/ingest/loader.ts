@@ -55,6 +55,17 @@ function fallbackTitle(body: string, relPath: string): string {
   return path.basename(relPath, path.extname(relPath)).replace(/[-_]+/g, " ");
 }
 
+/**
+ * Hash of the only things that reach a chunk: the kind (it picks the chunker), the title and breadcrumb
+ * (they become the embedded heading path), `project` (code chunks prefix it) and the cleaned body.
+ * Everything else in the frontmatter is metadata that rides along on the row and can be updated without
+ * touching a vector — see `embedHash` in DocMeta.
+ */
+function embeddingHash(kind: DocKind, title: string, fm: Record<string, unknown>, body: string): string {
+  const parts = [kind, title, asString(fm["breadcrumb"]) ?? "", asString(fm["project"]) ?? "", cleanBody(body, kind)];
+  return `sha256:${createHash("sha256").update(parts.join("\n\u0000")).digest("hex")}`;
+}
+
 export function buildDocMeta(fm: Record<string, unknown>, body: string, relPath: string, raw: string): DocMeta {
   const topFolder = relPath.split(/[\\/]/)[0] ?? "kb";
   const sourceType = asString(fm["source_type"]) ?? (relPath.includes("/") || relPath.includes("\\") ? topFolder : "kb");
@@ -63,17 +74,20 @@ export function buildDocMeta(fm: Record<string, unknown>, body: string, relPath:
   // Always hash the actual file bytes: the frontmatter body_hash is informative, but a manual
   // edit that forgets to update it must still be picked up by the incremental ingest.
   const contentHash = `sha256:${createHash("sha256").update(raw).digest("hex")}`;
+  const kind = normalizeKind(fm["kind"]);
+  const title = asString(fm["title"]) ?? fallbackTitle(body, relPath);
 
   return {
     sourceId,
     sourceType,
-    kind: normalizeKind(fm["kind"]),
-    title: asString(fm["title"]) ?? fallbackTitle(body, relPath),
+    kind,
+    title,
     sourceUrl: asString(fm["source_url"]),
     authority: normalizeAuthority(fm["authority"]),
     lang: asString(fm["lang"]) ?? "und",
     lastModified: asString(fm["last_modified"]) ?? asString(fm["fetched_at"]),
     contentHash,
+    embedHash: embeddingHash(kind, title, fm, body),
     relPath,
   };
 }

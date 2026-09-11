@@ -40,6 +40,8 @@ export interface SyncState {
   version: 1;
   source: string;
   lastRunAt: string | null;
+  /** KB_DOC_VERSION that rendered these files; a mismatch re-renders every document once. */
+  docVersion?: number;
   items: Record<string, StateItem>;
   /** Connector-specific memory (e.g. devportal.coveredRepos, gitlab.projectHeads). */
   meta: Record<string, unknown>;

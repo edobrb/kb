@@ -7,7 +7,7 @@ import { VectorStore } from "../store/vector-store.js";
 import type { Chunk, DocKind, Document, StoredChunk } from "../types.js";
 import { chunkDocument } from "./chunker.js";
 import { listMarkdownFiles, loadDocument } from "./loader.js";
-import { emptyManifest, manifestIncompatible, readManifest, writeManifest, type Manifest } from "./manifest.js";
+import { emptyManifest, manifestIncompatible, readManifest, writeManifest, type Manifest, type ManifestEntry } from "./manifest.js";
 import { RateTracker, type IngestProgress } from "./progress.js";
 
 export interface IngestOptions {
@@ -27,8 +27,12 @@ export interface IngestReport {
   filesSeen: number;
   docsUnchanged: number;
   docsAdded: number;
+  /** Existing documents that were chunked and embedded again. */
   docsUpdated: number;
+  /** Existing documents whose rows were rewritten with new metadata, reusing the stored vectors. */
+  docsRefreshed: number;
   docsRemoved: number;
+  /** Chunks that went through the embedder. Rows rewritten from stored vectors are `docsRefreshed`. */
   chunksWritten: number;
   totalChunks: number;
   durationMs: number;
@@ -104,7 +108,9 @@ export async function ingest(opts: IngestOptions = {}): Promise<IngestReport> {
   log(`Found ${files.length} markdown files in ${kbDir}`);
 
   const seenSourceIds = new Set<string>();
-  const toIndex: Document[] = [];
+  const toEmbed: Document[] = [];
+  // Files whose bytes changed but whose embedding inputs did not: candidates for a metadata-only refresh.
+  const toRefresh: Document[] = [];
   let unchanged = 0;
   let added = 0;
   let updated = 0;
@@ -119,26 +125,39 @@ export async function ingest(opts: IngestOptions = {}): Promise<IngestReport> {
     const prev = manifest.docs[doc.meta.sourceId];
     if (prev && prev.contentHash === doc.meta.contentHash) {
       unchanged++;
+      // Manifests written before embedHash existed get it filled in from the very file they describe:
+      // the bytes match, so this is exactly what was indexed.
+      prev.embedHash ??= doc.meta.embedHash;
       continue;
     }
-    if (prev) updated++;
-    else added++;
-    toIndex.push(doc);
+    if (!prev) {
+      added++;
+      toEmbed.push(doc);
+      continue;
+    }
+    updated++;
+    // An unknown embedHash (older manifest) still goes down the refresh path: the stored chunk text decides.
+    if (!prev.embedHash || prev.embedHash === doc.meta.embedHash) toRefresh.push(doc);
+    else toEmbed.push(doc);
   }
 
   const removedIds = opts.only ? [] : Object.keys(manifest.docs).filter((id) => !seenSourceIds.has(id));
   log(`Unchanged: ${unchanged}, new: ${added}, changed: ${updated}, removed: ${removedIds.length}`);
 
-  // 2. Chunk.
-  toIndex.sort((a, b) => KIND_ORDER[a.meta.kind] - KIND_ORDER[b.meta.kind] || a.meta.relPath.localeCompare(b.meta.relPath));
-  const work: Work[] = toIndex.map((doc) => ({ doc, chunks: chunkDocument(doc, config.chunking) }));
-  const chunkTotal = work.reduce((n, w) => n + w.chunks.length, 0);
-  if (work.length) {
-    const sizes = work.flatMap((w) => w.chunks.map((c) => c.tokenEstimate));
+  // 2. Chunk. The refresh candidates are chunked too: their chunks are what gets compared with the store.
+  const chunkAll = (docs: Document[]): Work[] =>
+    docs
+      .sort((a, b) => KIND_ORDER[a.meta.kind] - KIND_ORDER[b.meta.kind] || a.meta.relPath.localeCompare(b.meta.relPath))
+      .map((doc) => ({ doc, chunks: chunkDocument(doc, config.chunking) }));
+  const work: Work[] = chunkAll(toEmbed);
+  const refreshWork: Work[] = chunkAll(toRefresh);
+  const all = [...work, ...refreshWork];
+  if (all.length) {
+    const sizes = all.flatMap((w) => w.chunks.map((c) => c.tokenEstimate));
     const { sum, max } = sizes.reduce((acc, n) => ({ sum: acc.sum + n, max: n > acc.max ? n : acc.max }), { sum: 0, max: 0 });
     const avg = sizes.length ? Math.round(sum / sizes.length) : 0;
-    const byKind = work.reduce<Record<string, number>>((acc, w) => ((acc[w.doc.meta.kind] = (acc[w.doc.meta.kind] ?? 0) + w.chunks.length), acc), {});
-    log(`Chunked ${work.length} docs into ${chunkTotal} chunks (avg ~${avg} tokens, max ${max}; ${Object.entries(byKind).map(([k, n]) => `${k}=${n}`).join(", ")})`);
+    const byKind = all.reduce<Record<string, number>>((acc, w) => ((acc[w.doc.meta.kind] = (acc[w.doc.meta.kind] ?? 0) + w.chunks.length), acc), {});
+    log(`Chunked ${all.length} docs into ${sizes.length} chunks (avg ~${avg} tokens, max ${max}; ${Object.entries(byKind).map(([k, n]) => `${k}=${n}`).join(", ")})`);
   }
 
   const report: IngestReport = {
@@ -146,6 +165,7 @@ export async function ingest(opts: IngestOptions = {}): Promise<IngestReport> {
     docsUnchanged: unchanged,
     docsAdded: added,
     docsUpdated: updated,
+    docsRefreshed: 0,
     docsRemoved: removedIds.length,
     chunksWritten: 0,
     totalChunks: 0,
@@ -153,7 +173,7 @@ export async function ingest(opts: IngestOptions = {}): Promise<IngestReport> {
   };
 
   if (opts.dryRun) {
-    for (const w of work.slice(0, 3)) {
+    for (const w of all.slice(0, 3)) {
       log(`\n--- ${w.doc.meta.relPath} (${w.doc.meta.kind}, ${w.chunks.length} chunks)`);
       for (const c of w.chunks.slice(0, 2)) log(`[${c.ordinal}] ${c.headingPath}${c.lineStart ? ` L${c.lineStart}-${c.lineEnd}` : ""} (${c.tokenEstimate} tok)\n${c.content.slice(0, 300)}...\n`);
     }
@@ -162,15 +182,14 @@ export async function ingest(opts: IngestOptions = {}): Promise<IngestReport> {
     return report;
   }
 
-  // 3. Remove stale/changed docs from the vector store.
-  const staleIds = [...removedIds, ...toIndex.filter((d) => manifest.docs[d.meta.sourceId]).map((d) => d.meta.sourceId)];
+  // 3. Remove stale/changed docs from the vector store. The refresh candidates are left alone: their rows
+  //    still hold the vectors that step 3b is about to reuse.
+  const staleIds = [...removedIds, ...toEmbed.filter((d) => manifest.docs[d.meta.sourceId]).map((d) => d.meta.sourceId)];
   if (staleIds.length) {
     await store.deleteBySourceIds(staleIds);
     for (const id of removedIds) delete manifest.docs[id];
   }
 
-  // 4. Embed + write, in batches of documents.
-  //
   // The manifest records what is already indexed, so it must reach disk regularly: a crash then only
   // costs the documents written since the last flush. Writing it after *every* document would be O(n²)
   // at this scale, hence the time-based flush.
@@ -181,6 +200,81 @@ export async function ingest(opts: IngestOptions = {}): Promise<IngestReport> {
     await writeManifest(paths.manifest, manifest);
     lastManifestWrite = Date.now();
   };
+  const now = new Date().toISOString();
+  const entryFor = (doc: Document, chunkCount: number): ManifestEntry => ({
+    sourceId: doc.meta.sourceId,
+    relPath: doc.meta.relPath,
+    contentHash: doc.meta.contentHash,
+    embedHash: doc.meta.embedHash,
+    chunkCount,
+    indexedAt: now,
+  });
+
+  // 3b. Metadata-only rewrites — a fresh fetched_at, a City Map field, a renamed owner, a sync bookkeeping
+  //     field. The chunk text is unchanged, so the vectors in the store are still the right ones: rewrite the
+  //     rows with the new metadata instead of embedding the document again. A document is only reused when
+  //     every chunk lines up with a stored row of exactly the same text, so a chunker change or a half-written
+  //     document can never pair a vector with the wrong text — anything else falls through to step 4.
+  let refreshedChunks = 0;
+  if (refreshWork.length) {
+    log(`Checking ${refreshWork.length.toLocaleString("en-US")} changed documents against the stored chunks before embedding them`);
+    /** Rows for `w` built from the stored vectors, or null when anything does not line up exactly. */
+    const reuseRows = (w: Work, have: Map<number, { text: string; vector: number[] }>): StoredChunk[] | null => {
+      if (have.size !== w.chunks.length) return null;
+      const rows: StoredChunk[] = [];
+      for (const c of w.chunks) {
+        const hit = have.get(c.ordinal);
+        if (!hit || hit.text !== c.text || hit.vector.length !== embedder.dimensions) return null;
+        rows.push(toStored(w.doc, c, hit.vector));
+      }
+      return rows;
+    };
+
+    const fellBack: string[] = [];
+    for (let i = 0; i < refreshWork.length; ) {
+      // Batch by rows, not documents: one store read and one write per ~2k chunks.
+      const batch: Work[] = [];
+      let batchRows = 0;
+      while (i < refreshWork.length && (!batch.length || batchRows + (refreshWork[i] as Work).chunks.length <= 2_000)) {
+        const w = refreshWork[i++] as Work;
+        batch.push(w);
+        batchRows += w.chunks.length;
+      }
+      // Ask for more rows than expected so a document whose chunk count moved reads back as a mismatch.
+      const stored = await store.chunkVectorsBySourceIds(batch.map((w) => w.doc.meta.sourceId), batchRows * 2 + 100);
+      const rows: StoredChunk[] = [];
+      const reused: Work[] = [];
+      for (const w of batch) {
+        const have = stored.get(w.doc.meta.sourceId);
+        const docRows = have ? reuseRows(w, have) : null;
+        if (docRows) {
+          reused.push(w);
+          rows.push(...docRows);
+        } else {
+          work.push(w);
+          fellBack.push(w.doc.meta.sourceId);
+        }
+      }
+      if (reused.length) {
+        await store.deleteBySourceIds(reused.map((w) => w.doc.meta.sourceId));
+        await store.add(rows);
+        for (const w of reused) manifest.docs[w.doc.meta.sourceId] = entryFor(w.doc, w.chunks.length);
+        report.docsRefreshed += reused.length;
+        refreshedChunks += rows.length;
+        await flushManifest();
+      }
+    }
+    // Their old rows were deliberately not deleted in step 3; drop them now that they go through the embedder.
+    if (fellBack.length) await store.deleteBySourceIds(fellBack);
+    report.docsUpdated -= report.docsRefreshed;
+    log(
+      `Reused stored embeddings for ${report.docsRefreshed} of ${refreshWork.length} changed documents ` +
+        `(${refreshedChunks.toLocaleString("en-US")} chunks, metadata only)`,
+    );
+  }
+
+  // 4. Embed + write, in batches of documents.
+  const chunkTotal = work.reduce((n, w) => n + w.chunks.length, 0);
 
   let written = 0;
   let embedded = 0;
@@ -190,7 +284,6 @@ export async function ingest(opts: IngestOptions = {}): Promise<IngestReport> {
   // throughput instead of the size of whichever document was written last.
   const overall = new RateTracker(30 * 60_000);
   overall.add(0, phaseStarted);
-  const now = new Date().toISOString();
 
   const progress = (phase: IngestProgress["phase"], chunksDone: number, currentPath: string) => {
     const t = Date.now();
@@ -225,13 +318,7 @@ export async function ingest(opts: IngestOptions = {}): Promise<IngestReport> {
       written += rows.length;
       embedded += chunks.length;
       docsDone++;
-      manifest.docs[doc.meta.sourceId] = {
-        sourceId: doc.meta.sourceId,
-        relPath: doc.meta.relPath,
-        contentHash: doc.meta.contentHash,
-        chunkCount: chunks.length,
-        indexedAt: now,
-      };
+      manifest.docs[doc.meta.sourceId] = entryFor(doc, chunks.length);
       progress("embedding", embedded, doc.meta.relPath);
     }
     await flushManifest();
@@ -251,7 +338,7 @@ export async function ingest(opts: IngestOptions = {}): Promise<IngestReport> {
   if (batch.length) await processBatch(batch);
   await flushManifest(true);
 
-  if (!written && !staleIds.length) {
+  if (!written && !refreshedChunks && !staleIds.length) {
     log("Nothing to do; index is up to date.");
   } else {
     await store.optimize();

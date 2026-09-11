@@ -23,8 +23,15 @@ export interface DocMeta {
   authority: Authority;
   lang: string;
   lastModified: string | null;
-  /** sha256 of the file bytes; used to detect changes between ingest runs. */
+  /** sha256 of the file bytes; used to detect that a file changed at all between ingest runs. */
   contentHash: string;
+  /**
+   * sha256 of everything the chunker and the embedder actually see: kind, title, breadcrumb, project and
+   * the cleaned body. Frontmatter bookkeeping (fetched_at, City Map fields, owner, build stamps...) is
+   * deliberately outside it, so a metadata-only rewrite refreshes the stored rows instead of paying for
+   * embeddings again. It is a hint, not a promise: the stored chunk text is what ingest finally compares.
+   */
+  embedHash: string;
   /** Path relative to the kb folder. */
   relPath: string;
 }

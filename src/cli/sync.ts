@@ -50,7 +50,10 @@ if (flags["ingest"] && !flags["dry-run"]) {
   else {
     console.log("\nIngesting...");
     const rep = await ingest({ kbDir: flagString(flags, "kb"), log: (m) => console.log(m) });
-    console.log(`Ingest done: files ${rep.filesSeen}, added ${rep.docsAdded}, updated ${rep.docsUpdated}, removed ${rep.docsRemoved}, chunks ${rep.totalChunks}`);
+    console.log(
+      `Ingest done: files ${rep.filesSeen}, added ${rep.docsAdded}, updated ${rep.docsUpdated}, ` +
+        `metadata only ${rep.docsRefreshed}, removed ${rep.docsRemoved}, chunks ${rep.totalChunks}`,
+    );
   }
 }
 process.exit(failed.length ? 1 : 0);

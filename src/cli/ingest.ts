@@ -40,6 +40,7 @@ progress.finish();
 const n = (v: number) => v.toLocaleString("en-US");
 console.log(
   `\nDone in ${formatDuration(report.durationMs)} — files: ${n(report.filesSeen)}, unchanged: ${n(report.docsUnchanged)}, ` +
-    `added: ${n(report.docsAdded)}, updated: ${n(report.docsUpdated)}, removed: ${n(report.docsRemoved)}, ` +
+    `added: ${n(report.docsAdded)}, updated: ${n(report.docsUpdated)}, metadata only: ${n(report.docsRefreshed)}, ` +
+    `removed: ${n(report.docsRemoved)}, ` +
     `chunks written: ${n(report.chunksWritten)}, total chunks in index: ${n(report.totalChunks)}`,
 );

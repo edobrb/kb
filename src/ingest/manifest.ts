@@ -9,6 +9,8 @@ export interface ManifestEntry {
   sourceId: string;
   relPath: string;
   contentHash: string;
+  /** Hash of the embedding inputs (see DocMeta.embedHash). Absent in manifests written before it existed. */
+  embedHash?: string;
   chunkCount: number;
   indexedAt: string;
 }

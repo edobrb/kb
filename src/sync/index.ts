@@ -5,7 +5,7 @@ import { createConfluenceLookup, resolveConfluenceApi, syncConfluence } from "./
 import { syncDevPortal } from "./devportal.js";
 import { syncGitLab } from "./gitlab.js";
 import { createHttp, type HttpClient } from "./http.js";
-import { renderKbDocument } from "./kb-writer.js";
+import { KB_DOC_VERSION, renderKbDocument } from "./kb-writer.js";
 import { duplicateKey } from "./quality.js";
 import { applyRules, loadSourcesConfig, type SourcesConfig } from "./sources-config.js";
 import { emptyState, readState, writeState } from "./state.js";
@@ -208,8 +208,26 @@ export async function runSync(opts: SyncOptions = {}): Promise<SourceReport[]> {
     }
 
     log(`\n[${name}] ${opts.full ? "full sync" : "incremental sync"}${opts.dryRun ? " (dry run)" : ""} from ${def.baseUrl}`);
-    const previous: SyncState = (opts.full ? null : await readState(stateDir, name)) ?? emptyState(name);
-    const next: SyncState = { ...emptyState(name), meta: { ...previous.meta } };
+    const stored: SyncState = (opts.full ? null : await readState(stateDir, name)) ?? emptyState(name);
+    // A change to what renderKbDocument writes must reach documents the source itself reports as unchanged:
+    // blanking the stored fingerprints makes every connector re-render once, then the new version is recorded.
+    const staleRender = stored.docVersion !== KB_DOC_VERSION;
+    const itemCount = Object.keys(stored.items).length;
+    if (staleRender && itemCount) log(`  kb document format v${stored.docVersion ?? 1} -> v${KB_DOC_VERSION}: re-rendering all ${itemCount} documents`);
+    const previous: SyncState = staleRender
+      ? { ...stored, items: Object.fromEntries(Object.entries(stored.items).map(([id, item]) => [id, { ...item, fingerprint: "" }])) }
+      : stored;
+    const next: SyncState = { ...emptyState(name), docVersion: KB_DOC_VERSION, lastRunAt: stored.lastRunAt, meta: { ...previous.meta } };
+    // The state is what makes the next run incremental, so it must survive a Ctrl-C: flush it as the run
+    // goes, not only at the end. A partial state only costs a re-fetch of the items it does not mention yet.
+    const STATE_FLUSH_MS = 5_000;
+    // 0, not Date.now(): the first document already puts a usable state on disk.
+    let lastStateWrite = 0;
+    const flushState = async () => {
+      if (opts.dryRun || Date.now() - lastStateWrite < STATE_FLUSH_MS) return;
+      await writeState(stateDir, next);
+      lastStateWrite = Date.now();
+    };
     const ownedDir = path.join(kbDir, def.folder);
     const takenPaths = new Map<string, string>();
     // Identical bodies under different ids (a README copied into ten repositories, a page duplicated in two
@@ -312,6 +330,7 @@ export async function runSync(opts: SyncOptions = {}): Promise<SourceReport[]> {
             break;
           }
         }
+        await flushState();
       }
       completed = true;
     } catch (err) {

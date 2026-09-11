@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runSync, type SourceDefinition } from "../src/sync/index.js";
 import { createHttp } from "../src/sync/http.js";
+import { KB_DOC_VERSION } from "../src/sync/kb-writer.js";
 import { readState } from "../src/sync/state.js";
 import { DEFAULT_SOURCES } from "../src/sync/sources-config.js";
 import type { SyncDoc, SyncEvent } from "../src/sync/types.js";
@@ -134,6 +135,50 @@ describe("runSync orchestration", () => {
 
     const r2 = await runSync({ kbDir: kb, stateDir: st, sourcesConfig: cfg, definitions: def(() => [], false) });
     expect(r2[0]?.fatal).toMatch(/missing credentials/);
+  });
+
+  it("keeps the source fingerprint out of the file and writes the state as the run goes", async () => {
+    const kb = path.join(tmp, "kb");
+    const st = path.join(tmp, "state");
+    const seen: unknown[] = [];
+    const defs = def(() => []);
+    defs["fake"]!.run = async function* () {
+      yield { type: "doc", doc: doc("1", "One", "v1") };
+      // Back here the runner has already handled document 1: a kill now must not cost the whole source.
+      seen.push(await readState(st, "fake"));
+      yield { type: "doc", doc: doc("2", "Two", "v1") };
+    };
+    await runSync({ kbDir: kb, stateDir: st, sourcesConfig: DEFAULT_SOURCES, definitions: defs });
+
+    const file = await readFile(path.join(kb, "fake/1-one.md"), "utf8");
+    expect(file).not.toContain("fingerprint:");
+    expect(file).toContain("fetched_at:");
+    expect(seen[0]).toMatchObject({ items: { "fake:1": { relPath: "fake/1-one.md", fingerprint: "v1" } } });
+    expect((await readState(st, "fake"))?.docVersion).toBe(KB_DOC_VERSION);
+  });
+
+  it("re-renders every document when the kb document format changes", async () => {
+    const kb = path.join(tmp, "kb");
+    const st = path.join(tmp, "state");
+    // A connector that trusts its own fingerprints, like the real ones do.
+    const defs = def(() => []);
+    defs["fake"]!.run = async function* (ctx) {
+      const d = doc("1", "One", "v1");
+      if (ctx.previous.items[d.sourceId]?.fingerprint === d.fingerprint) yield { type: "unchanged", sourceId: d.sourceId };
+      else yield { type: "doc", doc: d };
+    };
+    const opts = { kbDir: kb, stateDir: st, sourcesConfig: DEFAULT_SOURCES, definitions: defs };
+
+    expect((await runSync(opts))[0]).toMatchObject({ added: 1 });
+    expect((await runSync(opts))[0]).toMatchObject({ unchanged: 1, updated: 0 });
+
+    // An older renderer wrote these files: the fingerprint must not be allowed to keep them.
+    const state = JSON.parse(await readFile(path.join(st, "fake.json"), "utf8")) as Record<string, unknown>;
+    delete state["docVersion"];
+    await writeFile(path.join(st, "fake.json"), JSON.stringify(state), "utf8");
+
+    expect((await runSync(opts))[0]).toMatchObject({ updated: 1, unchanged: 0 });
+    expect((await runSync(opts))[0]).toMatchObject({ unchanged: 1, updated: 0 });
   });
 
   it("dry run writes nothing", async () => {

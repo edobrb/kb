@@ -30,6 +30,16 @@ export function ensureTitleHeading(body: string, title: string): string {
   return `# ${title}\n\n${trimmed}`;
 }
 
+/**
+ * Shape of the rendered document. Bump it when `renderKbDocument` starts writing something different
+ * (a new frontmatter field, a different body layout): the stored item fingerprints are then ignored for
+ * one run, so every document is re-rendered instead of keeping whatever the previous version wrote.
+ * Files whose prose did not change cost no embeddings — ingest hashes the embedding inputs separately.
+ *
+ * 2: `fingerprint` is no longer written into the frontmatter (it lives in data/sync/<source>.json).
+ */
+export const KB_DOC_VERSION = 2;
+
 /** Render frontmatter + body exactly as `src/ingest/loader.ts` expects it. */
 export function renderKbDocument(doc: SyncDoc, fetchedAt: string): string {
   const fm: Record<string, unknown> = {
@@ -42,7 +52,9 @@ export function renderKbDocument(doc: SyncDoc, fetchedAt: string): string {
     lang: doc.lang ?? "und",
     last_modified: doc.lastModified ?? undefined,
     fetched_at: fetchedAt,
-    fingerprint: doc.fingerprint,
+    // The source version marker deliberately stays out of the file: for the Dev Portal it is a TechDocs
+    // build stamp shared by every page of an entity, so writing it here rewrote — and re-embedded — whole
+    // entities whose prose had not changed. The sync state keeps it, keyed by source_id.
   };
   for (const [k, v] of Object.entries(doc.extra)) {
     if (v === undefined || v === null || v === "" || (Array.isArray(v) && v.length === 0)) continue;
