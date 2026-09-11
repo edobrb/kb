@@ -413,7 +413,7 @@
       <div class="bubble">
         <details class="think" hidden><summary><span class="label">Reasoning</span><span class="ttime"></span></summary><div class="think-body"></div></details>
         <div class="sources" hidden></div><div class="tools" hidden></div><div class="answer"></div><div class="timing"></div>
-        <div class="actions" hidden><button type="button" class="copy">Copy</button><button type="button" class="export">Export .md</button></div>
+        <div class="actions" hidden><button type="button" class="copy">Copy</button><button type="button" class="export">Export .md</button><button type="button" class="bundle" title="Zip: the answer plus the full text of every source document, for reading offline or handing to another assistant">Export .zip</button></div>
       </div>`;
     thread.appendChild(el); scroll();
     return el;
@@ -523,7 +523,7 @@
     el.querySelector(".answer").innerHTML = renderMarkdown(turn.answer);
     renderSources(el, turn.citations || [], turn.usedCitations, turn.carried);
     el.querySelector(".timing").textContent = timingText(turn.timings, turn.usage, turn.roundOut);
-    enableActions(el, turn.q, turn.answer, turn.citations || [], turn.usedCitations);
+    enableActions(el, turn);
   }
 
   // ---- export ------------------------------------------------------------------
@@ -549,11 +549,58 @@
     return out.join("\n") + "\n";
   }
 
-  function download(name, text) {
-    const url = URL.createObjectURL(new Blob([text], { type: "text/markdown;charset=utf-8" }));
+  function downloadBlob(name, blob) {
+    const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url; a.download = name; a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function download(name, text) {
+    downloadBlob(name, new Blob([text], { type: "text/markdown;charset=utf-8" }));
+  }
+
+  /**
+   * A *knowledge bundle*: the answer plus the whole markdown of every source document, zipped by
+   * the server. The markdown export can only link to Confluence / the Dev Portal / GitLab, which is
+   * no use to an external assistant or to a reader offline — this carries the sources themselves.
+   * It is a round trip: the browser only keeps trimmed excerpts, so the pages are re-read from kb/.
+   */
+  async function exportBundle(btn, turn) {
+    const citations = turn.citations || [];
+    const idle = "Export .zip";
+    if (!citations.length) {
+      btn.textContent = "No sources";
+      setTimeout(() => { btn.textContent = idle; }, 1800);
+      return;
+    }
+    btn.disabled = true;
+    btn.textContent = "Bundling…";
+    try {
+      const res = await fetch("/api/export/bundle", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          question: turn.q, answer: turn.answer, thinking: turn.thinking || "",
+          citations, usedCitations: turn.usedCitations || [],
+        }),
+      });
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        throw new Error(detail.error || `HTTP ${res.status}`);
+      }
+      downloadBlob(`ai-wiki-${slug(turn.q)}.zip`, await res.blob());
+      const docs = Number(res.headers.get("x-bundle-documents") || 0);
+      const missing = Number(res.headers.get("x-bundle-missing") || 0);
+      btn.textContent = `${docs} doc${docs === 1 ? "" : "s"}${missing ? ` · ${missing} missing` : ""}`;
+    } catch (err) {
+      console.error(err);
+      btn.textContent = "Export failed";
+      btn.title = String(err.message || err);
+    } finally {
+      btn.disabled = false;
+      setTimeout(() => { btn.textContent = idle; }, 2500);
+    }
   }
 
   async function copyText(text) {
@@ -573,10 +620,11 @@
 
   const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 60) || "answer";
 
-  /** Turn on the Copy / Export buttons of a finished answer. */
-  function enableActions(el, question, answer, citations, used) {
+  /** Turn on the Copy / Export buttons of a finished answer. `turn` is the shape saveTurn stores. */
+  function enableActions(el, turn) {
     const box = el.querySelector(".actions");
-    const md = () => answerMarkdown(question, answer, citations, used);
+    const citations = turn.citations || [];
+    const md = () => answerMarkdown(turn.q, turn.answer, citations, turn.usedCitations);
     box.hidden = false;
     const copyBtn = box.querySelector(".copy");
     copyBtn.onclick = async () => {
@@ -585,8 +633,10 @@
       setTimeout(() => { copyBtn.textContent = "Copy"; }, 1500);
     };
     box.querySelector(".export").onclick = () => {
-      download(`ai-wiki-${slug(question)}.md`, md());
+      download(`ai-wiki-${slug(turn.q)}.md`, md());
     };
+    const bundleBtn = box.querySelector(".bundle");
+    bundleBtn.onclick = () => exportBundle(bundleBtn, turn);
   }
 
   // ---- saved chats (localStorage) ----------------------------------------------
@@ -798,7 +848,7 @@
           if (ev.usage) applyUsage(ev.usage);
           el.querySelector(".timing").textContent = timingText(ev.timings, ev.usage, usage.roundOut);
           messages.push({ role: "assistant", content: ev.answer });
-          enableActions(el, q, ev.answer, citations, ev.usedCitations);
+          enableActions(el, { q, answer: ev.answer, thinking, citations, usedCitations: ev.usedCitations });
           // What the next question continues on: this turn's blocks, the cited ones flagged so they
           // are the last to be dropped when the carry has to be trimmed.
           carry = carryFrom(citations, ev.usedCitations);

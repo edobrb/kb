@@ -9,7 +9,8 @@ import { ask, askOnce, getRetriever, resetRetriever, toolsAvailable } from "../g
 import { getGraph, resetGraph, type Relation } from "../graph/index.js";
 import { ingest } from "../ingest/pipeline.js";
 import { DocumentNotFoundError, getDocumentStore, resetDocumentStore } from "../retrieval/documents.js";
-import type { AskMode, AskRequest, Authority, CarriedBlock, ChatMessage, RetrievalFilters } from "../types.js";
+import type { AskMode, AskRequest, Authority, Citation, CarriedBlock, ChatMessage, RetrievalFilters } from "../types.js";
+import { type BundleRequest, buildBundle } from "./bundle.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -74,6 +75,52 @@ function parseAskRequest(body: unknown): AskRequest {
   return { messages: parseMessages(body), context: parseContext(body), filters: parseFilters(body), topK, think, tools, mode };
 }
 
+/**
+ * One answer plus the citations the client holds, for `/api/export/bundle`. Only the source ids are
+ * acted on — the documents themselves are re-read from `kb/`, so a stale excerpt in the browser
+ * cannot end up in the bundle.
+ */
+function parseBundleRequest(body: unknown): BundleRequest {
+  const b = (body ?? {}) as { question?: unknown; answer?: unknown; thinking?: unknown; citations?: unknown; usedCitations?: unknown; used_citations?: unknown; maxChars?: unknown };
+  if (typeof b.question !== "string" || !b.question.trim()) throw new Error("`question` is required");
+  if (!Array.isArray(b.citations)) throw new Error("`citations` (array) is required");
+  const str = (v: unknown, fallback = "") => (typeof v === "string" ? v : fallback);
+  const int = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? Math.floor(v) : null);
+  const citations: Citation[] = b.citations.flatMap((c: unknown, i: number) => {
+    const cc = (c ?? {}) as Record<string, unknown>;
+    const sourceId = str(cc["sourceId"]) || str(cc["source_id"]) || str(cc["relPath"]);
+    if (!sourceId) return [];
+    const n = int(cc["n"]);
+    return [{
+      n: n && n > 0 ? n : i + 1,
+      chunkId: str(cc["chunkId"]) || str(cc["chunk_id"]),
+      sourceId,
+      title: str(cc["title"], sourceId),
+      sourceUrl: str(cc["sourceUrl"]) || str(cc["source_url"]) || null,
+      sourceType: str(cc["sourceType"]) || str(cc["source_type"]),
+      kind: str(cc["kind"]),
+      authority: str(cc["authority"]),
+      headingPath: str(cc["headingPath"]) || str(cc["heading_path"]),
+      relPath: str(cc["relPath"]) || str(cc["rel_path"]),
+      excerpt: str(cc["excerpt"]),
+      lineStart: int(cc["lineStart"] ?? cc["line_start"]),
+      lineEnd: int(cc["lineEnd"] ?? cc["line_end"]),
+      score: typeof cc["score"] === "number" ? cc["score"] : 0,
+    }];
+  });
+  if (!citations.length) throw new Error("no citation carried a `sourceId`, so there is nothing to bundle");
+  const usedRaw = Array.isArray(b.usedCitations) ? b.usedCitations : Array.isArray(b.used_citations) ? b.used_citations : [];
+  const maxChars = int(b.maxChars);
+  return {
+    question: b.question,
+    answer: str(b.answer),
+    thinking: str(b.thinking),
+    citations: citations.slice(0, 400),
+    usedCitations: usedRaw.map((n) => int(n)).filter((n): n is number => n !== null && n > 0),
+    ...(maxChars && maxChars > 0 ? { maxChars } : {}),
+  };
+}
+
 // ---- routes -------------------------------------------------------------------
 
 app.get("/api/health", async () => {
@@ -118,6 +165,41 @@ app.post("/api/document", async (req, reply) => {
     if (err instanceof DocumentNotFoundError) {
       return reply.code(404).send({ error: err.message, suggestions: err.suggestions });
     }
+    return reply.code(500).send({ error: (err as Error).message });
+  }
+});
+
+/**
+ * Citations as a *knowledge bundle*: a zip with the answer and the full markdown of every document
+ * behind it. What `Export .md` cannot do — its links only work for a reader inside the company —
+ * so an answer can be handed to an external model, or kept as what it was really based on.
+ */
+app.post("/api/export/bundle", async (req, reply) => {
+  let bundleReq: BundleRequest;
+  try {
+    bundleReq = parseBundleRequest(req.body);
+  } catch (err) {
+    return reply.code(400).send({ error: (err as Error).message });
+  }
+  try {
+    const bundle = await buildBundle(bundleReq, await getDocumentStore());
+    app.log.info(
+      `bundle: ${bundle.report.documents} docs, ${(bundle.report.bytes / 1024).toFixed(0)} KiB` +
+        (bundle.report.missing.length ? `, ${bundle.report.missing.length} missing` : "") +
+        (bundle.report.skipped ? `, ${bundle.report.skipped} over the document cap` : ""),
+    );
+    return reply
+      .type("application/zip")
+      // RFC 5987 form as well: the filename carries the question, which is rarely pure ASCII.
+      .header(
+        "content-disposition",
+        `attachment; filename="${bundle.filename.replace(/[^\x20-\x7e]/g, "_")}"; filename*=UTF-8''${encodeURIComponent(bundle.filename)}`,
+      )
+      .header("x-bundle-documents", String(bundle.report.documents))
+      .header("x-bundle-missing", String(bundle.report.missing.length))
+      .header("access-control-expose-headers", "content-disposition, x-bundle-documents, x-bundle-missing")
+      .send(bundle.zip);
+  } catch (err) {
     return reply.code(500).send({ error: (err as Error).message });
   }
 });
@@ -290,7 +372,7 @@ try {
   app.log.info(`Chat UI:  http://${config.server.host}:${config.server.port}/`);
   app.log.info(`Map:      http://${config.server.host}:${config.server.port}/map.html (after \`npm run map\`)`);
   app.log.info(`Arch:     http://${config.server.host}:${config.server.port}/architecture.html`);
-  app.log.info(`API:      POST /api/ask (SSE) · POST /api/ask/sync · POST /api/search · POST /api/document · GET /api/map · GET /api/graph · POST /api/graph/neighbors · POST /api/chunk · GET /api/health`);
+  app.log.info(`API:      POST /api/ask (SSE) · POST /api/ask/sync · POST /api/search · POST /api/document · GET /api/map · GET /api/graph · POST /api/graph/neighbors · POST /api/chunk · POST /api/export/bundle · GET /api/health`);
 } catch (err) {
   app.log.error(err);
   process.exit(1);

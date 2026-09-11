@@ -49,7 +49,7 @@ export const config = {
     provider: oneOf("EMBEDDING_PROVIDER", ["ollama", "mock"] as const, "ollama"),
     // Embedding touches every chunk and is prompt-bound, so the model size is the floor on ingest time:
     // on an M5 Pro the 0.6b does ~24 chunks/s against ~2.9 for the 8b (1.3 h vs 11 h over 114k chunks).
-    model: str("EMBEDDING_MODEL", "qwen3-embedding:0.6b"),
+    model: str("EMBEDDING_MODEL", "qwen3-embedding:8b"),
     dimensions: num("EMBEDDING_DIMENSIONS", 1024),
     batchSize: num("EMBED_BATCH_SIZE", 16),
     // Qwen3-Embedding is instruction-aware: queries get an instruction prefix, documents do not.
@@ -166,6 +166,17 @@ export const config = {
   server: {
     port: num("PORT", 8787),
     host: str("HOST", "127.0.0.1"),
+  },
+
+  /** `Export .zip`: one answer packaged with the full text of its sources (see src/server/bundle.ts). */
+  bundle: {
+    /**
+     * Character cap per document in a bundle. Unlike DOC_TOOL_MAX_CHARS this is not a context
+     * budget — nothing here goes to a model — so it is generous enough to hold whole pages.
+     */
+    maxChars: num("BUNDLE_MAX_CHARS", 200_000),
+    /** Documents one bundle may carry, a valve on a pathological citation list. */
+    maxDocs: num("BUNDLE_MAX_DOCS", 100),
   },
 
   eval: {

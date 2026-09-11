@@ -33,7 +33,7 @@ plus a hand-written folder.
      doc/api/project ──► heading-aware chunker ("Breadcrumb > Title > H2")      code (off by default) ──► declaration-aware chunker
                                                        │  text = heading path ⏎⏎ content
                                                        ▼
-   qwen3-embedding:0.6b ──► LanceDB data/lancedb (vector + kind, heading_path, line_start/end, …)
+   qwen3-embedding:8b ──► LanceDB data/lancedb (vector + kind, heading_path, line_start/end, …)
                             BM25   data/bm25.json.gz (rebuilt from the table)   manifest data/manifest.json
                             GRAPH  data/graph.json.gz (frontmatter + body links, rebuilt from the manifest)
                                                        │

@@ -106,7 +106,7 @@ npm install
 cp .env.example .env          # defaults are fine for a first run
 
 # Pull the models (once). Or run: ./scripts/setup-ollama.sh
-ollama pull qwen3-embedding:0.6b   # embedder: sets the floor on ingest time (see §10)
+ollama pull qwen3-embedding:8b   # embedder: sets the floor on ingest time (see §10)
 ollama pull qwen3:8b               # answers questions
 
 npm run doctor                # checks Ollama, models, kb/ folder, index state, source credentials
@@ -240,6 +240,35 @@ the document's markdown with its metadata, outline and truncation flags. Same vi
 `fetch_document`; 404 with `suggestions` when the id is unknown. `section` is optional (and reported back as
 `sectionNotFound` when no heading matches), `maxChars` overrides `DOC_TOOL_MAX_CHARS`.
 
+### `POST /api/export/bundle` — an answer with its sources inside, as a zip
+
+```bash
+curl -s -X POST http://127.0.0.1:8787/api/export/bundle -H 'content-type: application/json' \
+  -d '{"question":"How does the transfer flow retry?","answer":"…[1][2]",
+       "citations":[{"n":1,"sourceId":"confluence:TeamCore/transfer-flow"}],"usedCitations":[1]}' \
+  -OJ   # → ai-wiki-how-does-the-transfer-flow-retry.zip
+```
+
+`Export .md` can only *link* to Confluence / the Dev Portal / GitLab, which is no use to an external model or
+to a reader offline. This packages the answer **with the sources in it**:
+
+```
+README.md        the question, the answer with its [n] markers, and the source index
+                 (cited first, then "retrieved but not cited", then anything no longer in kb/)
+sources/01-….md  one file per document: the full markdown, with frontmatter
+                 (title, source_id, source_url, type/kind/authority, last_modified, kb_path,
+                 the [n] it answers for) and the retrieved passages listed in a comment
+manifest.json    the same index machine-readable: documents, passages with scores and excerpts,
+                 which file each [n] landed in, what was missing
+reasoning.md     only when the request carries `thinking`
+```
+
+Passages are grouped per document (twenty chunks routinely come from five pages) and every page is re-read
+from `kb/` at export time, so the bundle carries the current text rather than the excerpts the browser kept.
+Only `sourceId` is acted on; a document that has since left the knowledge base is listed under
+*Not available* instead of failing the export. `maxChars` overrides `BUNDLE_MAX_CHARS` per document. The
+response carries `content-disposition` plus `x-bundle-documents` / `x-bundle-missing` headers.
+
 ### `POST /api/ingest` — re-index
 
 `{"reset": false}` runs an incremental ingest and hot-swaps the index. Returns the ingest report. 409 if
@@ -305,10 +334,12 @@ the answer), a live grey token meter — prompt tokens, generated tokens and how
 turning amber past 85% — a line per tool call the model made (`search` queries and whole documents pulled in
 with `fetch_document`), a folded source bar above each answer (`24 passages from 17 documents · 24 cited`)
 that opens into cards with title → original URL, source-type and authority badges and the passage itself —
-clicking a `[n]` in the answer opens that bar and scrolls to the passage — **Copy** and **Export .md** under every answer
-(the markdown carries the question, the answer with its `[n]` markers, and the numbered sources with links —
-cited ones first, the rest folded into a `<details>` block), source-type filter chips and multi-turn
-conversation. Auto-scroll follows the stream but stops as soon as you scroll up to read.
+clicking a `[n]` in the answer opens that bar and scrolls to the passage — **Copy**, **Export .md** and
+**Export .zip** under every answer (the markdown carries the question, the answer with its `[n]` markers, and
+the numbered sources with links — cited ones first, the rest folded into a `<details>` block; the zip is a
+*knowledge bundle* that carries the **full text** of every source document, for reading offline or handing
+the whole thing to another assistant — see [`POST /api/export/bundle`](#post-apiexportbundle--an-answer-with-its-sources-inside-as-a-zip);
+the button reports how many documents went in), source-type filter chips and multi-turn conversation. Auto-scroll follows the stream but stops as soon as you scroll up to read.
 
 Conversations are saved in the browser's `localStorage` (never on the server, so they stay on the machine
 that asked): the left **Chats** sidebar lists them newest first with **+ New chat** on top, a `×` per chat and
@@ -724,7 +755,7 @@ Everything is an environment variable (`.env`, see `.env.example` for the full a
 |---|---|---|
 | `KB_DIR` / `DATA_DIR` | `./kb` / `./data` | Where the markdown lives / where the index lives |
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` | |
-| `EMBEDDING_MODEL` | `qwen3-embedding:0.6b` | Any Ollama embedding model; sets the floor on ingest time (§10); changing it triggers a full rebuild |
+| `EMBEDDING_MODEL` | `qwen3-embedding:8b` | Any Ollama embedding model; sets the floor on ingest time (§10); changing it triggers a full rebuild |
 | `EMBEDDING_DIMENSIONS` | `1024` | Matryoshka truncation, ≤ model output (1024 for the 0.6b/4b, 4096 for the 8b) |
 | `EMBED_BATCH_SIZE` | `16` | Texts per `/api/embed` call |
 | `INGEST_BATCH_CHUNKS` | `256` | Documents are embedded in batches of about this many chunks; the manifest is flushed after each batch |
@@ -750,6 +781,7 @@ Everything is an environment variable (`.env`, see `.env.example` for the full a
 | `RESEARCH_TOP_K` | `RETRIEVAL_TOP_K` × 1.5 | Passages retrieved in "extended research" mode (`"mode":"research"`, the UI switch) |
 | `RESEARCH_TOOL_MAX_ROUNDS` / `RESEARCH_TOOL_CHAR_BUDGET` | `TOOL_MAX_ROUNDS` × 2 / `TOOL_CHAR_BUDGET` × 1.5 | Tool rounds and characters in that mode; never applied below the plain values |
 | `PORT` / `HOST` | `8787` / `127.0.0.1` | Set `HOST=0.0.0.0` to reach the UI from other machines on the LAN |
+| `BUNDLE_MAX_CHARS` / `BUNDLE_MAX_DOCS` | `200000` / `100` | `Export .zip`: characters per document and documents per bundle (no model reads these, so they are generous) |
 | `EMBEDDING_PROVIDER` / `CHAT_PROVIDER` | `ollama` | `mock` runs the whole pipeline without Ollama (tests/CI) |
 | `SOURCES_FILE` | `./sources.yaml` | Scope, filters and rules for `npm run sync` |
 | `TAXONOMY_FILE` | `./taxonomy.yaml` | City Map placements for sources the Dev Portal catalog does not describe (Confluence spaces, uncatalogued GitLab groups); used by `npm run map` |
@@ -856,7 +888,7 @@ Budget the run as *chunks ÷ chunks-per-second* and pick the model accordingly. 
 
 | Embedder | Throughput | Whole KB (40 406 chunks) |
 |---|---|---|
-| `qwen3-embedding:0.6b` @1024d (default) | ~24 chunks/s | **~28 min** |
+| `qwen3-embedding:8b` @1024d (default) | ~24 chunks/s | **~28 min** |
 | `qwen3-embedding:8b` @4096d | ~2.9 chunks/s | ~3.9 h |
 
 In a synthetic retrieval benchmark (`scripts/bench/`: the chat model writes one question per chunk, we measure
@@ -865,7 +897,7 @@ time — the reason the 0.6b is the default. Levers if it is still too slow: `EM
 `sources.yaml` (more `exclude_projects`, fewer Confluence spaces, `roots` per space), larger
 `CHUNK_TARGET_TOKENS`. The run is resumable, so it is fine to stop it and pick it up later.
 
-**Memory.** `qwen3-embedding:0.6b` (~1.5 GB) and `qwen3:8b` (~6 GB) stay loaded together comfortably. Ollama
+**Memory.** `qwen3-embedding:8b` (~1.5 GB) and `qwen3:8b` (~6 GB) stay loaded together comfortably. Ollama
 unloads idle models after 5 minutes; the first request after idling pays a few seconds of load time. The KV
 cache scales with `CHAT_NUM_CTX`, so 32k costs a couple of GB more than 16k on an 8-9B model; if you move to a
 14B chat model, drop back to 16k.
@@ -971,6 +1003,7 @@ ai-wiki/
 │   ├── cli/                     sync · ingest · ask · search · eval · doctor · map · graph
 │   └── server/
 │       ├── index.ts             Fastify: /api/ask (SSE), /api/ask/sync, /api/search, /api/document, /api/map, /api/graph, /api/ingest, …
+│       ├── bundle.ts            knowledge bundles: answer + full source documents, zipped (no dependency)
 │       ├── public/index.html    chat UI
 │       ├── public/map.html      2-D map: City Map colours, cluster labels, density LOD, graph links (canvas, no build step)
 │       └── public/architecture.html  interactive architecture page: animated pipeline, live facets, RRF probe
@@ -986,7 +1019,7 @@ pipeline — ingest, storage, retrieval, API, UI — runs in tests and CI withou
 | Symptom | Fix |
 |---|---|
 | `Cannot reach Ollama at http://127.0.0.1:11434` | Start Ollama (`ollama serve` or the app). `npm run doctor` |
-| `model "qwen3-embedding:0.6b" not found` | `ollama pull qwen3-embedding:0.6b` (same for the chat model) |
+| `model "qwen3-embedding:8b" not found` | `ollama pull qwen3-embedding:8b` (same for the chat model) |
 | `The index is empty. Run npm run ingest first.` | Exactly that |
 | `Existing index is incompatible (...) rebuilding` | Expected after changing embedding model/dims or chunk sizes |
 | `[devportal] ... HTTP 401 ... Missing credentials` | `DEVPORTAL_TOKEN` missing or expired (user tokens last ~1 h): `./refresh-dev-portal-token.sh`, or use a static token |
