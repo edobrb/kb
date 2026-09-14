@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "ai-wiki": {
+      "type": "stdio",
+      "command": "node_modules/.bin/tsx",
+      "args": ["src/cli/mcp.ts"],
+      "env": {}
+    }
+  }
+}

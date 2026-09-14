@@ -19,7 +19,7 @@ no database server — the index is just a folder (`data/`).
 2. [Architecture](#2-architecture)
 3. [Quick start](#3-quick-start)
 4. [Commands](#4-commands)
-5. [HTTP API](#5-http-api)
+5. [APIs: HTTP and MCP](#5-apis-http-and-mcp)
 6. [Web UI](#6-web-ui)
 7. [How each stage works](#7-how-each-stage-works)
 8. [Configuration](#8-configuration)
@@ -166,13 +166,15 @@ npm run serve                 # then open http://127.0.0.1:8787
 | `npm run search -- "query"` | **Retrieval only** (no LLM): shows fused rank, vector rank, BM25 rank and text of each chunk. The main debugging tool — most RAG problems are retrieval problems. |
 | `npm run doc -- "<source-id>"` | Prints a whole kb document by `source_id` (or `kb/` path) — exactly what the model's `fetch_document` tool returns. Flags: `--section "Heading"`, `--outline` (headings only), `--max-chars 20000`, `--json` |
 | `npm run serve` | Starts the HTTP API + web UI on `HOST:PORT` (default `127.0.0.1:8787`) |
+| `npm run mcp` | Serves the **retrieval layer as MCP tools** on stdio (`search`, `fetch_document`, `related`) for Claude Code / Claude Desktop — no LLM of ours in the loop. Meant to be spawned by the client, not run by hand (`npm run mcp -- --help` prints the command to register). See [§5](#5-apis-http-and-mcp) |
+| `npm run mcp:install` | Registers that server with **Claude Desktop**: merges the `mcpServers` entry into the app's configuration file (backing it up, keeping every other setting and server). Flags: `--print`, `--out <file>` (standalone one-server file), `--config <path>`, `--name <n>`, `--dry-run` |
 | `npm run map` | Projects every chunk vector to 2-D with UMAP, groups the chunks into semantic clusters, places every document on the City Map (Dev Portal catalog + `taxonomy.yaml`) and writes `data/kb-map.json.gz`, rendered by the web UI at `/map.html`. Re-run after `ingest`. Flags: `--clusters 8`, `--neighbors 15`, `--min-dist 0.1`, `--epochs 400`, `--project 256`, `--seed 42`, `--out <file>`, `--relabel` (recompute names and City Map placements only, ~1 s) |
 | `npm run graph` | Rebuilds the knowledge graph `data/graph.json.gz` from the ingest manifest (frontmatter + body links; no model, a couple of seconds) and reports what it found. `npm run ingest` already does this at the end, so this is for iterating on the rules. Inspection flags read the existing file instead: `--neighbors "<source-id>"` (what one document is connected to, `--relations links_to,in_repo` to narrow), `--members "repo:oneplatform/adrs"`, `--hubs repo\|tree\|entity\|space\|team\|tag\|area\|subarea\|module`, `--broken-links` (internal links that point at nothing indexed), `--top 25`, `--json` |
 | `npm run eval` | Retrieval metrics (hit@k, MRR) over `evals/questions.jsonl`; `--answers` also grades answers by expected keywords |
 | `npm run doctor` | Environment check: Ollama reachable, models pulled, kb/ present, index consistency, facets, sync sources reachable with the configured tokens |
 | `npm test` / `npm run typecheck` | Unit tests (vitest) / `tsc --noEmit` |
 
-## 5. HTTP API
+## 5. APIs: HTTP and MCP
 
 All endpoints accept/return JSON. Filters are optional everywhere:
 `{ "filters": { "sourceTypes": ["adr", "confluence"], "kinds": ["api"], "authorities": ["binding"], "langs": ["en"] } }`.
@@ -324,6 +326,85 @@ connected to, ranked (direct links first, then documents sharing a small hub), e
 `relation`, its `direction` (`out` / `in` / `sibling`) and, for a sibling, the `via` hub with its size. This is
 what the map's side panel and `npm run graph -- --neighbors` show. Both 404 with a hint when the graph has not
 been built.
+
+### MCP: the knowledge base as tools for Claude / Claude Code (`npm run mcp`)
+
+`npm run mcp` speaks the [Model Context Protocol](https://modelcontextprotocol.io) over stdin/stdout and exposes the
+**retrieval layer only** — three read-only tools, no generation:
+
+| Tool | Arguments | Returns |
+|---|---|---|
+| `search` | `query`, `top_k` (≤ `MCP_MAX_TOP_K`), `source_type` / `kind` / `authority` / `lang` | the fused passages (§ [7.6](#76-hybrid-retrieval-srcretrievalretrieverts)), each with its `source_id`, `source_type`/`kind`/`authority`/`lang`, score and rank in each retriever, deep link and text |
+| `fetch_document` | `source_id`, `section`, `max_chars` | the whole kb page, or one section, with its metadata and heading outline (§ [7.7](#77-tools-search-again-read-whole-documents-srcgenerationtoolsts-srcretrievaldocumentsts)) |
+| `related` | `source_id`, `scope` (`all` \| `links` \| `same_place`), `limit` | the connected documents as titles + ids, grouped by how they are connected (§ [7.9](#79-the-knowledge-graph-srcgraph-npm-run-graph)); neighbours that are linked but not indexed are marked as such |
+
+Nothing under `src/mcp/` calls a chat model: the client *is* the model, so `CHAT_MODEL`, the system prompt, the tool
+loop and the citation numbering all stay out of it — the client cites the `source_id`s and URLs itself. The only
+Ollama traffic is the query embedding, so Ollama must be running and the index must be built.
+
+**Claude Code** (`<repo>` = the absolute path of this project):
+
+```bash
+claude mcp add ai-wiki --scope user -- <repo>/node_modules/.bin/tsx <repo>/src/cli/mcp.ts
+claude mcp list          # ai-wiki: ✓ connected
+```
+
+`--scope user` registers it for every project on the machine, which is the point — the knowledge base is most useful
+from the repository you are actually working in. Inside `ai-wiki/` itself nothing needs registering: the checked-in
+`.mcp.json` does it. Then `/mcp` in a session lists the three tools, and "search the knowledge base for …" uses them.
+
+**Claude Desktop** — `npm run mcp:install`:
+
+```bash
+npm run mcp:install                 # merge the entry into the app's configuration (backs it up first)
+npm run mcp:install -- --print      # just print the JSON
+npm run mcp:install -- --out claude_desktop_config.json   # standalone one-server file, to copy by hand
+npm run mcp:install -- --dry-run    # say what would change, write nothing
+```
+
+It writes this entry:
+
+```json
+{
+  "mcpServers": {
+    "ai-wiki": {
+      "command": "/absolute/path/to/node",
+      "args": ["<repo>/node_modules/tsx/dist/cli.mjs", "<repo>/src/cli/mcp.ts"]
+    }
+  }
+}
+```
+
+Then quit the app completely (⌘Q, not just the window) and start it again.
+
+The app has no "import a server" dialog: it reads `~/Library/Application Support/Claude/claude_desktop_config.json`
+at startup, and **that file also holds the app's own settings** (deployment mode, preferences, folder grants) and
+any other MCP server you have registered — so the snippet above is *merged* into it rather than copied over it,
+which is the whole reason for the command. A file that will not parse is reported, never replaced, and the
+previous version is copied to `claude_desktop_config.json.bak-<timestamp>` before anything is written. Re-running
+it is a no-op unless something actually changed, so it doubles as "point Claude Desktop at the repo's new path".
+
+Two details in the entry: `command` is the absolute path of a Node binary (`process.execPath` of whatever ran the
+installer) because the desktop app starts its servers with a minimal `PATH`, where `node`, `npx` and the
+`node_modules/.bin/tsx` shim — a `#!/usr/bin/env node` script — all fail to resolve; and there is no `env` block
+because `src/cli/mcp.ts` moves to the project root itself, so `.env`, `KB_DIR` and `DATA_DIR` resolve there
+wherever the app spawns it.
+
+Three details that make it work from anywhere:
+
+* **cwd.** `KB_DIR`, `DATA_DIR` and `.env` resolve against the working directory, and a client spawns its servers
+  from wherever it happens to be running, so `src/cli/mcp.ts` moves to the project root before the config is
+  imported. The server works from any cwd, with no env to set on the client side.
+* **stdout is the protocol.** Every `console.*` in the process is pointed at stderr, where MCP clients collect
+  server logs — one stray line on stdout would corrupt the JSON-RPC stream. Each call is logged there with its
+  arguments, result size and duration.
+* **Degrading honestly.** `related` is only advertised when `data/graph.json.gz` exists; a knowledge base that is
+  not indexed, or an Ollama that is down, comes back as a tool error naming the command to fix it, instead of a
+  dead server. The index, document store and graph open on the first call, so `initialize` stays instant.
+
+Budgets are deliberately larger than the local model's (`MCP_SEARCH_TOP_K`, `MCP_MAX_TOP_K`, `MCP_SEARCH_MAX_CHARS`,
+`MCP_DOC_MAX_CHARS`, `MCP_RELATED_LIMIT` — see § [8](#8-configuration)): the client's context window is not ours to
+fit, and a truncated passage only costs it another round-trip.
 
 ## 6. Web UI
 
@@ -785,6 +866,9 @@ Everything is an environment variable (`.env`, see `.env.example` for the full a
 | `RESEARCH_TOP_K` | `RETRIEVAL_TOP_K` × 1.5 | Passages retrieved in "extended research" mode (`"mode":"research"`, the UI switch) |
 | `RESEARCH_TOOL_MAX_ROUNDS` / `RESEARCH_TOOL_CHAR_BUDGET` | `TOOL_MAX_ROUNDS` × 2 / `TOOL_CHAR_BUDGET` × 1.5 | Tool rounds and characters in that mode; never applied below the plain values |
 | `PORT` / `HOST` | `8787` / `127.0.0.1` | Set `HOST=0.0.0.0` to reach the UI from other machines on the LAN |
+| `MCP_SEARCH_TOP_K` / `MCP_MAX_TOP_K` | `8` / `25` | `npm run mcp`: passages one `search` returns, and the ceiling a client may ask for |
+| `MCP_SEARCH_MAX_CHARS` / `MCP_DOC_MAX_CHARS` | `60000` / `40000` | Size of one `search` / `fetch_document` result (the MCP client's window, not ours) |
+| `MCP_RELATED_LIMIT` | `20` | Documents one `related` call lists |
 | `BUNDLE_MAX_CHARS` / `BUNDLE_MAX_DOCS` | `200000` / `100` | `Export .zip`: characters per document and documents per bundle (no model reads these, so they are generous) |
 | `EMBEDDING_PROVIDER` / `CHAT_PROVIDER` | `ollama` | `mock` runs the whole pipeline without Ollama (tests/CI) |
 | `SOURCES_FILE` | `./sources.yaml` | Scope, filters and rules for `npm run sync` |
@@ -963,6 +1047,7 @@ ai-wiki/
 ├── refresh-dev-portal-token.sh  prints a fresh Dev Portal bearer token (user tokens last ~1 h)
 ├── data/                        generated index (LanceDB, BM25, manifest, kb-map.json.gz, graph.json.gz) and data/sync/ state + skipped lists — git-ignored
 ├── evals/questions.jsonl        evaluation set
+├── .mcp.json                    MCP server registration, so Claude Code running inside this repo finds `npm run mcp`
 ├── scripts/setup-ollama.sh      pulls the two models · scripts/bench/ retrieval and embedding benchmarks
 ├── src/
 │   ├── config.ts                env → typed config
@@ -1004,7 +1089,11 @@ ai-wiki/
 │   │   ├── prompt.ts            system prompt, context formatting, citation extraction
 │   │   ├── tools.ts             search · fetch_document · related (schemas, dedup, formatting)
 │   │   └── ask.ts               the streaming RAG loop shared by CLI and API
-│   ├── cli/                     sync · ingest · ask · search · eval · doctor · map · graph
+│   ├── mcp/
+│   │   ├── tools.ts             the MCP tool set: search · fetch_document · related (schemas, formatting, budgets)
+│   │   ├── server.ts            MCP over stdio for Claude Code / Claude Desktop (retrieval only, no chat model)
+│   │   └── desktop-config.ts    where Claude Desktop's config lives and how to merge our entry into it
+│   ├── cli/                     sync · ingest · ask · search · eval · doctor · map · graph · mcp · mcp:install
 │   └── server/
 │       ├── index.ts             Fastify: /api/ask (SSE), /api/ask/sync, /api/search, /api/document, /api/map, /api/graph, /api/ingest, …
 │       ├── bundle.ts            knowledge bundles: answer + full source documents, zipped (no dependency)

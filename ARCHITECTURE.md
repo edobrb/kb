@@ -185,6 +185,19 @@ Offered only when `data/graph.json.gz` is actually loaded (`TOOL_RELATED`, `TOOL
 The loop is bounded by `TOOL_MAX_ROUNDS` and the last
 round runs without tools, so an answer always comes out.
 
+## Answering somewhere else: MCP
+
+Everything above assumes our model does the answering. `npm run mcp` (`src/mcp/`) publishes the layer
+underneath it — the same hybrid retrieval, the same whole-document reads, the same graph hop — as three
+read-only MCP tools on stdio, so Claude Code or the Claude desktop app can use the knowledge base with its
+own model: `search(query, top_k?, filters?)`, `fetch_document(source_id, section?)`, `related(source_id,
+scope?)`. Nothing under `src/mcp/` touches a chat model, which is the whole point: no system prompt, no tool
+loop, no citation numbering, no `CHAT_MODEL` — the client is the model and cites the `source_id`s and URLs
+the results carry. The only Ollama traffic is the query embedding, so the index (`npm run ingest`) and Ollama
+are still required. Budgets are separate (`MCP_*`) and larger, since they are sized for the client's context
+window rather than ours; `related` is advertised only when the graph exists, and a missing index or a
+stopped Ollama comes back as a tool error naming the command that fixes it.
+
 ## Where the code lives
 
 ```
@@ -204,6 +217,8 @@ src/retrieval/     retriever.ts (RRF, boosts, diversity, optional LLM rerank)
                    documents.ts (source_id → kb file: whole documents and sections for the fetch_document tool)
 src/generation/    prompt.ts (system prompt, context blocks, deep links) · ask.ts (streaming loop + tool loop)
                    tools.ts (search + fetch_document: schemas, dedup against the context, result formatting)
-src/cli/           sync · ingest · ask · doc · search · eval · doctor · map · graph
+src/mcp/           tools.ts (search + fetch_document + related as MCP tools) · server.ts (stdio server, no chat model)
+                   desktop-config.ts (merge the server entry into Claude Desktop's config, npm run mcp:install)
+src/cli/           sync · ingest · ask · doc · search · eval · doctor · map · graph · mcp
 src/server/        Fastify API + public/index.html (chat) + public/map.html (2-D map, graph overlay) + public/architecture.html (this document, interactive)
 ```

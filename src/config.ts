@@ -168,6 +168,26 @@ export const config = {
     host: str("HOST", "127.0.0.1"),
   },
 
+  /**
+   * The MCP server (`npm run mcp`, src/mcp): the retrieval layer — search, whole documents, the
+   * knowledge graph — exposed over stdio to an outside client (Claude Code, the Claude desktop
+   * app), which brings its own model. Nothing here generates text, so these budgets are not
+   * context budgets for our chat model: they are sized for a client with a large window, and a
+   * truncated passage would only cost it another round-trip.
+   */
+  mcp: {
+    /** Passages one `search` call returns by default. */
+    searchTopK: num("MCP_SEARCH_TOP_K", 8),
+    /** Ceiling on the `top_k` a client may ask for. */
+    maxTopK: num("MCP_MAX_TOP_K", 25),
+    /** Characters one `search` result may occupy; passages past it are left out with a note. */
+    searchMaxChars: num("MCP_SEARCH_MAX_CHARS", 60000),
+    /** Characters one `fetch_document` result may occupy (twice DOC_TOOL_MAX_CHARS by default). */
+    docMaxChars: num("MCP_DOC_MAX_CHARS", 40000),
+    /** Documents one `related` call lists by default. */
+    relatedLimit: num("MCP_RELATED_LIMIT", 20),
+  },
+
   /** `Export .zip`: one answer packaged with the full text of its sources (see src/server/bundle.ts). */
   bundle: {
     /**
