@@ -32,7 +32,8 @@ gitlab:
   enabled: true
   groups: # searched recursively (sub-groups included); only what the token can see
     - oneplatform
-  projects: [] # extra "group/subgroup/project" paths
+  projects: # extra "group/subgroup/project" paths
+    - tsdigital/common/cicd # shared CI/CD templates and the GitLab → GitHub Actions migration guides
   # The Dev Portal catalog points at ~260 repositories outside the oneplatform group (tsdigital, paas,
   # analytics-bi...). Their docs/ is already rendered by the portal; this adds their README and a project card
   # (owner, system, lifecycle) so "which repository / team owns X" is answerable. Unreadable repos are skipped.
@@ -130,6 +131,9 @@ confluence:
       - TeamWorksp # Registry team: analysis, documentation, design
       - RPDD       # Registry – Product Documentation & Delivery
       - OBO        # One Back Office
+      - MPDD       # Monetization: Product documentation & Delivery — Metering integration guides, webhook, APIs, FAQ
+      - ~60619c5c8d05750068588df4
+      - ~7120208f881b3981aa42a9953010a7e8d0ac1d
     exclude: []
   # Legacy PaaS-era spaces are deliberately out (TPAAS: a static 2024 import of 2019-2023 docs; TSDIGITAL).
   roots: {} # e.g. TONEPLAT: ["113147908"] to index only the "Core services" tree of that space

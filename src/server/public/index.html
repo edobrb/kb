@@ -224,6 +224,7 @@
   <h1>ai-wiki assistant</h1>
   <span class="meta" id="meta">connecting…</span>
   <span class="spacer"></span>
+  <a href="/search.html" class="navlink" title="Search the documents directly, with no answer written by the model">Search</a>
   <a href="/map.html" class="navlink" title="2-D map of every chunk in the index">Map</a>
   <a href="/architecture.html" class="navlink" title="How the knowledge base is gathered, indexed and searched">Architecture</a>
   <button id="sidebarToggle" title="Show or hide saved chats">Chats</button>
@@ -918,6 +919,15 @@
   setSidebar(sidebarOpen);
   chats = readChats();
   renderChatList();
+
+  // ?q= hands a query over from /search.html. It is typed into the composer rather than sent:
+  // the reader arrives from a list of passages and usually wants to reword before asking.
+  const handedOver = new URLSearchParams(location.search).get("q");
+  if (handedOver) {
+    input.value = handedOver;
+    autosize();
+    history.replaceState(null, "", location.pathname);
+  }
   input.focus();
 })();
 </script>

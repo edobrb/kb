@@ -1,0 +1,630 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ai-wiki · search</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1c1f26; --muted: #6b7280; --border: #e3e6eb;
+    --accent: #2f5bea; --accent-soft: #e8eefc; --user: #eef1f7; --code: #f1f3f6; --warn: #b45309;
+    --binding: #7c3aed; --normative: #0f766e; --descriptive: #6b7280;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --panel: #171a21; --text: #e6e8ee; --muted: #9aa1ad; --border: #262b35;
+      --accent: #7c9cff; --accent-soft: #1d2540; --user: #1f2430; --code: #1c2029;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { scroll-padding-top: 150px; }   /* sticky header + search bar, when jumping to a result */
+  body {
+    margin: 0; font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+    background: var(--bg); color: var(--text);
+  }
+  header {
+    display: flex; align-items: center; gap: 14px; padding: 12px 20px; border-bottom: 1px solid var(--border);
+    background: var(--panel); position: sticky; top: 0; z-index: 3;
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 650; letter-spacing: .1px; }
+  header .meta { color: var(--muted); font-size: 12.5px; }
+  header .spacer { flex: 1; }
+  header .nav { border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; font-size: 13px; color: var(--text); text-decoration: none; }
+  header .nav:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* ---- search bar ---- */
+  .searchbar {
+    position: sticky; top: 57px; z-index: 2; background: var(--bg);
+    border-bottom: 1px solid var(--border); padding: 14px 20px 10px;
+  }
+  .searchbar .inner { max-width: 940px; margin: 0 auto; display: flex; flex-direction: column; gap: 9px; }
+  .searchbar form { display: flex; gap: 8px; align-items: center; }
+  .searchbar input[type="search"] {
+    flex: 1; min-width: 0; font: inherit; font-size: 15px; color: var(--text); background: var(--panel);
+    border: 1px solid var(--border); border-radius: 11px; padding: 10px 14px; outline: none;
+    -webkit-appearance: none; appearance: none;
+  }
+  .searchbar input[type="search"]:focus { border-color: var(--accent); }
+  .searchbar select {
+    font: inherit; font-size: 13px; color: var(--text); background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 9px 8px; cursor: pointer;
+  }
+  .go {
+    font: inherit; border: none; background: var(--accent); color: #fff; border-radius: 10px;
+    padding: 10px 20px; cursor: pointer; font-weight: 600;
+  }
+  .go:disabled { opacity: .5; cursor: default; }
+
+  /* ---- facet filters ---- */
+  .filters summary {
+    cursor: pointer; color: var(--muted); font-size: 12.5px; list-style: none; display: inline-flex; gap: 7px; align-items: center;
+  }
+  .filters summary::-webkit-details-marker { display: none; }
+  .filters summary::before { content: "\25b8"; font-size: 11px; }
+  .filters[open] > summary::before { content: "\25be"; }
+  .filters summary:hover { color: var(--accent); }
+  .filters summary .count { color: var(--accent); font-weight: 600; }
+  .facets { display: flex; flex-direction: column; gap: 6px; padding: 9px 0 2px; }
+  .facetrow { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .facetrow .label {
+    color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .4px;
+    width: 66px; flex: 0 0 66px;
+  }
+  .chip {
+    border: 1px solid var(--border); background: var(--panel); border-radius: 999px; padding: 3px 10px;
+    font-size: 12.5px; cursor: pointer; color: var(--muted); user-select: none;
+  }
+  .chip:hover { border-color: var(--accent); }
+  .chip.on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+  .chip .n { opacity: .65; font-variant-numeric: tabular-nums; }
+  .filters .reset {
+    font: inherit; font-size: 12px; border: none; background: transparent; color: var(--muted);
+    cursor: pointer; padding: 3px 4px; text-decoration: underline;
+  }
+  .filters .reset:hover { color: #dc2626; }
+
+  /* ---- results ---- */
+  .wrap { max-width: 940px; margin: 0 auto; padding: 18px 20px 60px; }
+  .summary {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap; color: var(--muted); font-size: 12.5px;
+    margin-bottom: 14px; min-height: 20px;
+  }
+  .summary > * { min-width: 0; }
+  .summary .grow { flex: 1; }
+  .summary .ms { font-variant-numeric: tabular-nums; }
+  .summary .askchat {
+    border: 1px solid var(--border); border-radius: 8px; padding: 4px 10px; font-size: 12.5px;
+    color: var(--text); text-decoration: none; white-space: nowrap;
+  }
+  .summary .askchat:hover { border-color: var(--accent); color: var(--accent); }
+  .toggle-btn {
+    font: inherit; font-size: 12.5px; border: 1px solid var(--border); background: transparent; color: var(--muted);
+    border-radius: 999px; padding: 3px 11px; cursor: pointer;
+  }
+  .toggle-btn:hover { color: var(--text); border-color: var(--accent); }
+  .toggle-btn.on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); font-weight: 600; }
+
+  .group { margin: 0 0 18px; }
+  .group > .ghead {
+    display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; padding: 0 0 6px 2px;
+    border-bottom: 1px solid var(--border); margin-bottom: 8px;
+  }
+  .group > .ghead .gtitle { font-weight: 650; font-size: 14px; min-width: 0; overflow-wrap: anywhere; }
+  .group > .ghead .gtitle a { color: var(--text); text-decoration: none; }
+  .group > .ghead .gtitle a:hover { color: var(--accent); text-decoration: underline; }
+  .group > .ghead .gcount { color: var(--muted); font-size: 12px; }
+  .group .hit { margin-left: 14px; }
+
+  .hit {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; margin: 0 0 10px;
+  }
+  .hit .top { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .hit .rank { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; min-width: 22px; }
+  .hit .title { font-weight: 620; font-size: 14px; min-width: 0; overflow-wrap: anywhere; }
+  .hit .title a { color: var(--text); text-decoration: none; }
+  .hit .title a:hover { color: var(--accent); text-decoration: underline; }
+  .badge {
+    display: inline-block; font-size: 10.5px; padding: 1px 6px; border-radius: 5px; border: 1px solid var(--border);
+    color: var(--muted); vertical-align: middle;
+  }
+  .badge.binding { color: var(--binding); border-color: var(--binding); }
+  .badge.normative { color: var(--normative); border-color: var(--normative); }
+  /* Source ids and repository paths have no spaces to break at, so every place one is printed has
+     to be told it may break mid-token — otherwise a narrow window scrolls sideways. */
+  .hit .where { color: var(--muted); font-size: 12px; margin: 3px 0 0 30px; overflow-wrap: anywhere; }
+  .hit .where .sep { opacity: .5; padding: 0 3px; }
+  .hit .snippet {
+    margin: 8px 0 0 30px; color: var(--text); font-size: 13px; line-height: 1.5; white-space: pre-wrap;
+    overflow-wrap: anywhere; max-height: 96px; overflow: hidden; position: relative;
+  }
+  /* Fade rather than a hard cut, so a clipped passage reads as "there is more", not as the end. */
+  .hit .snippet::after {
+    content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 28px;
+    background: linear-gradient(transparent, var(--panel));
+  }
+  .hit.open .snippet { max-height: none; }
+  .hit.open .snippet::after { display: none; }
+  /* Bleeds with a ring rather than padding: padding would shift the glyphs and make a single
+     highlighted word like "rfc9457" read as two. */
+  mark {
+    background: var(--accent-soft); color: var(--accent); font-weight: 600;
+    border-radius: 3px; padding: 0; box-shadow: 0 0 0 1.5px var(--accent-soft);
+  }
+  .hit .acts { display: flex; gap: 6px; flex-wrap: wrap; margin: 9px 0 0 30px; align-items: center; }
+  .hit .acts button, .hit .acts a {
+    font: inherit; font-size: 11.5px; color: var(--muted); background: transparent; border: 1px solid var(--border);
+    border-radius: 7px; padding: 3px 9px; cursor: pointer; text-decoration: none;
+  }
+  .hit .acts button:hover, .hit .acts a:hover { color: var(--accent); border-color: var(--accent); }
+  .hit .acts .grow { flex: 1; }
+  /* The absolute RRF number means little; the bar shows how this passage stands against the best. */
+  .hit .acts .score { color: var(--muted); font-size: 11px; display: inline-flex; align-items: center; gap: 6px; }
+  .hit .bar { display: inline-block; width: 46px; height: 4px; border-radius: 2px; background: var(--border); overflow: hidden; }
+  .hit .bar i { display: block; height: 100%; background: var(--accent); }
+
+  .docpane { margin: 10px 0 0 30px; border: 1px solid var(--border); border-radius: 10px; background: var(--code); }
+  .docpane .dhead {
+    display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; padding: 8px 12px;
+    border-bottom: 1px solid var(--border); font-size: 12px; color: var(--muted);
+  }
+  .docpane .dhead > span { min-width: 0; overflow-wrap: anywhere; }
+  .docpane .dhead .dtitle { font-weight: 600; color: var(--text); font-size: 13px; }
+  .docpane .dhead .dtitle a { color: inherit; text-decoration: none; }
+  .docpane .dhead .dtitle a:hover { color: var(--accent); }
+  .docpane .dhead .grow { flex: 1; }
+  .docpane .dhead button {
+    font: inherit; font-size: 11.5px; color: var(--muted); background: transparent; border: 1px solid var(--border);
+    border-radius: 7px; padding: 2px 8px; cursor: pointer;
+  }
+  .docpane .dhead button:hover { color: var(--accent); border-color: var(--accent); }
+  .docpane .dbody {
+    margin: 0; padding: 10px 12px; max-height: 460px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+    font: 12.5px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--text);
+  }
+
+  .state { color: var(--muted); text-align: center; margin-top: 12vh; }
+  .state h2 { font-weight: 600; color: var(--text); font-size: 18px; margin: 0 0 6px; }
+  .state code { background: var(--code); padding: 1px 5px; border-radius: 5px; font-size: 13px; }
+  .state .ex, .state .recent span {
+    display: inline-block; margin: 4px; border: 1px solid var(--border); border-radius: 10px; padding: 6px 10px;
+    cursor: pointer; font-size: 13px; background: var(--panel); color: var(--text);
+  }
+  .state .ex:hover, .state .recent span:hover { border-color: var(--accent); color: var(--accent); }
+  .state .listlabel { color: var(--muted); font-size: 11.5px; text-transform: uppercase; letter-spacing: .4px; margin: 24px 0 2px; }
+  .state .clear { font: inherit; font-size: 12px; border: none; background: transparent; color: var(--muted); cursor: pointer; text-decoration: underline; }
+  .state .clear:hover { color: #dc2626; }
+  .error { color: #dc2626; }
+  .spin { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); margin-right: 6px; animation: pulse 1s infinite; }
+  @keyframes pulse { 50% { opacity: .3; } }
+
+  @media (max-width: 720px) {
+    header { gap: 8px; padding: 10px 12px; flex-wrap: wrap; }
+    header .meta { display: none; }
+    .searchbar { top: 49px; padding: 10px 12px 8px; }
+    .wrap { padding: 14px 12px 40px; }
+    .facetrow .label { width: auto; flex: none; }
+    .hit .where, .hit .snippet, .hit .acts, .docpane { margin-left: 0; }
+    .group .hit { margin-left: 0; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>ai-wiki search</h1>
+  <span class="meta" id="meta">connecting…</span>
+  <span class="spacer"></span>
+  <a class="nav" href="/">Chat</a>
+  <a class="nav" href="/map.html">Map</a>
+  <a class="nav" href="/architecture.html" title="How the knowledge base is gathered, indexed and searched">Architecture</a>
+</header>
+
+<div class="searchbar">
+  <div class="inner">
+    <form id="form" role="search">
+      <input id="q" type="search" placeholder="Search the knowledge base…  (press / to focus)" autocomplete="off" spellcheck="false" aria-label="Search query" />
+      <select id="k" title="How many passages to return" aria-label="Number of results">
+        <option value="10">10</option>
+        <option value="20" selected>20</option>
+        <option value="30">30</option>
+        <option value="50">50</option>
+      </select>
+      <button class="go" id="go" type="submit">Search</button>
+    </form>
+    <details class="filters" id="filters">
+      <summary>Filters<span class="count" id="filterCount"></span></summary>
+      <div class="facets" id="facets"></div>
+    </details>
+  </div>
+</div>
+
+<div class="wrap">
+  <div class="summary" id="summary"></div>
+  <div id="results">
+    <div class="state" id="state">
+      <h2>Search the documents directly</h2>
+      <div>Hybrid retrieval — embeddings plus BM25 — over <code>kb/</code>. No model writes an answer: these are the passages themselves.</div>
+      <div style="margin-top:14px">
+        <span class="ex">client credentials M2M</span>
+        <span class="ex">RFC 9457 problem details</span>
+        <span class="ex">social login TSID</span>
+        <span class="ex">data store tiers</span>
+      </div>
+      <div id="recentBox" hidden>
+        <div class="listlabel">Recent searches</div>
+        <div class="recent" id="recent"></div>
+        <button class="clear" id="clearRecent">Clear</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const $ = (s) => document.querySelector(s);
+  const qEl = $("#q"), kEl = $("#k"), goEl = $("#go"), formEl = $("#form");
+  const resultsEl = $("#results"), summaryEl = $("#summary");
+  const esc = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+  const DEFAULT_K = "20";
+  // Active facet filters, keyed the way /api/search wants them in `filters`.
+  const FACETS = [
+    { key: "sourceTypes", label: "Source", title: "Restrict the search to this source" },
+    { key: "kinds", label: "Kind", title: "Restrict the search to this kind of document (code = source files)" },
+    { key: "authorities", label: "Authority", title: "Restrict the search to passages of this authority" },
+  ];
+  const active = { sourceTypes: new Set(), kinds: new Set(), authorities: new Set() };
+  let grouped = false;
+  let lastResults = [], lastQuery = "", lastMs = 0;
+
+  // ---- header info --------------------------------------------------------------
+  fetch("/api/health").then(r => r.json()).then(h => {
+    $("#meta").textContent = `${h.chunks} chunks · ${h.documents} documents · ${h.embeddingModel}`;
+  }).catch(() => { $("#meta").textContent = "API not reachable"; });
+
+  // ---- facet chips ----------------------------------------------------------------
+  fetch("/api/facets").then(r => r.json()).then(f => {
+    const box = $("#facets");
+    for (const g of FACETS) {
+      const entries = Object.entries(f[g.key] || {}).sort((a, b) => b[1] - a[1]);
+      if (!entries.length) continue;
+      const row = document.createElement("div");
+      row.className = "facetrow";
+      row.innerHTML = `<span class="label">${g.label}</span>`;
+      for (const [value, n] of entries) {
+        const c = document.createElement("span");
+        c.className = "chip" + (active[g.key].has(value) ? " on" : "");
+        c.title = g.title;
+        c.dataset.group = g.key; c.dataset.value = value;
+        c.innerHTML = `${esc(value)} <span class="n">${n}</span>`;
+        c.onclick = () => {
+          c.classList.toggle("on");
+          c.classList.contains("on") ? active[g.key].add(value) : active[g.key].delete(value);
+          renderFilterCount();
+          // Changing a filter is a new question about the same words, so re-run straight away.
+          if (qEl.value.trim()) run(qEl.value);
+        };
+        row.appendChild(c);
+      }
+      box.appendChild(row);
+    }
+    const reset = document.createElement("button");
+    reset.type = "button"; reset.className = "reset"; reset.textContent = "Clear filters";
+    reset.onclick = () => {
+      for (const g of FACETS) active[g.key].clear();
+      syncChips();
+      if (qEl.value.trim()) run(qEl.value);
+    };
+    box.appendChild(reset);
+    renderFilterCount();
+  }).catch(() => {});
+
+  /** Paint the chips from `active` — used after a Clear and after a back/forward. */
+  function syncChips() {
+    document.querySelectorAll("#facets .chip").forEach(c => {
+      c.classList.toggle("on", active[c.dataset.group]?.has(c.dataset.value));
+    });
+    renderFilterCount();
+  }
+  const activeCount = () => FACETS.reduce((n, g) => n + active[g.key].size, 0);
+  function renderFilterCount() {
+    const n = activeCount();
+    $("#filterCount").textContent = n ? ` · ${n} active` : "";
+    if (n) $("#filters").open = true;
+  }
+  function filterPayload() {
+    const out = {};
+    for (const g of FACETS) if (active[g.key].size) out[g.key] = [...active[g.key]];
+    return Object.keys(out).length ? out : undefined;
+  }
+
+  // ---- query-term highlighting ------------------------------------------------------
+  // Marked on the raw text with sentinels and escaped afterwards: highlighting already-escaped
+  // HTML would let a term like "amp" match inside an &amp; entity and break the markup.
+  const OPEN = "", CLOSE = "";
+  const rxEsc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  function termRegex(query) {
+    const terms = [...new Set((query || "").toLowerCase().match(/[\p{L}\p{N}_]{2,}/gu) || [])].sort((a, b) => b.length - a.length);
+    if (!terms.length) return null;
+    try { return new RegExp(`(${terms.map(rxEsc).join("|")})`, "giu"); } catch { return null; }
+  }
+  function highlight(text, rx) {
+    const s = String(text ?? "");
+    if (!rx) return esc(s);
+    return esc(s.replace(rx, OPEN + "$&" + CLOSE))
+      .split(OPEN).join("<mark>")
+      .split(CLOSE).join("</mark>");
+  }
+
+  // ---- rendering -----------------------------------------------------------------------
+  function badges(r) {
+    const cls = r.authority === "binding" || r.authority === "normative" ? r.authority : "";
+    return `<span class="badge">${esc(r.sourceType)}</span>`
+      + (r.kind && r.kind !== "doc" ? ` <span class="badge">${esc(r.kind)}</span>` : "")
+      + ` <span class="badge ${cls}">${esc(r.authority)}</span>`;
+  }
+
+  /**
+   * The heading trail *inside* the document: `headingPath` leads with the source and the document
+   * title, both of which the passage already shows above it. Empty for a chunk at the top of a page.
+   */
+  function sectionOf(r) {
+    const parts = String(r.headingPath || "").split(/\s[›>]\s/).map(s => s.trim()).filter(Boolean);
+    const at = parts.lastIndexOf(String(r.title || "").trim());
+    return at >= 0 ? parts.slice(at + 1).join(" › ") : parts.join(" › ");
+  }
+
+  /** `withTitle` is off inside a document group, where the group heading already carries the title. */
+  function hitHtml(r, rank, rx, maxScore, withTitle) {
+    const link = r.sourceUrl
+      ? `<a href="${esc(r.sourceUrl)}" target="_blank" rel="noopener" title="Open the original page">${esc(r.title)}</a>`
+      : esc(r.title);
+    const ranks = [r.vectorRank ? `vec #${r.vectorRank}` : null, r.bm25Rank ? `bm25 #${r.bm25Rank}` : null].filter(Boolean).join(" · ");
+    const pct = maxScore > 0 ? Math.max(4, Math.round((r.score / maxScore) * 100)) : 0;
+    const section = sectionOf(r);
+    const lines = r.lineStart ? `L${r.lineStart}-${r.lineEnd}` : "";
+    // Grouped, the document is named once above and its path with it — only the section is new here.
+    const where = (withTitle
+      ? [section ? highlight(section, rx) : "", lines, esc(r.relPath || r.sourceId)]
+      : [lines]).filter(Boolean).join(`<span class="sep">·</span>`);
+    return `<div class="hit" data-source-id="${esc(r.sourceId)}">
+      <div class="top">
+        <span class="rank">#${rank}</span>
+        ${withTitle
+          ? `<span class="title">${link}</span>${badges(r)}`
+          : `<span class="title">${section ? highlight(section, rx) : "Top of the document"}</span>`}
+      </div>
+      ${where ? `<div class="where">${where}</div>` : ""}
+      <div class="snippet">${highlight(r.content, rx)}</div>
+      <div class="acts">
+        <button type="button" class="more">Show all</button>
+        <button type="button" class="opendoc">Open document</button>
+        <button type="button" class="copyid" title="Copy the source id — what a citation or a chat refers to">Copy id</button>
+        ${r.sourceUrl ? `<a href="${esc(r.sourceUrl)}" target="_blank" rel="noopener">Original ↗</a>` : ""}
+        <span class="grow"></span>
+        <span class="score" title="Fused score ${r.score.toFixed(4)}${ranks ? ` — rank in each retriever: ${ranks}` : ""}">
+          ${ranks || "score"}<span class="bar"><i style="width:${pct}%"></i></span>
+        </span>
+      </div>
+    </div>`;
+  }
+
+  function render(results, query, ms) {
+    lastResults = results; lastQuery = query; lastMs = ms;
+    const rx = termRegex(query);
+    if (!results.length) {
+      summaryEl.innerHTML = "";
+      resultsEl.innerHTML = `<div class="state"><h2>Nothing matched</h2>
+        <div>No passage for <strong>${esc(query)}</strong>${activeCount() ? " under the active filters" : ""}.
+        Try fewer words${activeCount() ? ", or clear the filters" : " or a different phrasing"}.</div></div>`;
+      return;
+    }
+    const maxScore = Math.max(...results.map(r => r.score));
+    const docs = new Set(results.map(r => r.sourceId)).size;
+
+    summaryEl.innerHTML =
+      `<span><strong>${results.length}</strong> passage${results.length === 1 ? "" : "s"} from <strong>${docs}</strong> document${docs === 1 ? "" : "s"}</span>`
+      + `<span class="ms">· ${ms} ms</span>`
+      + `<span class="grow"></span>`
+      + `<button type="button" class="toggle-btn${grouped ? " on" : ""}" id="groupBtn" title="Collect the passages under the document they came from">Group by document</button>`
+      + `<a class="askchat" href="/?q=${encodeURIComponent(query)}" title="Hand this query to the assistant, which answers from these same documents">Ask this in chat →</a>`;
+    $("#groupBtn").onclick = () => { grouped = !grouped; render(lastResults, lastQuery, lastMs); };
+
+    if (!grouped) {
+      resultsEl.innerHTML = results.map((r, i) => hitHtml(r, i + 1, rx, maxScore, true)).join("");
+      return;
+    }
+    // Documents keep the order of their best passage, so the strongest match is still first.
+    const order = [], byDoc = new Map();
+    results.forEach((r, i) => {
+      if (!byDoc.has(r.sourceId)) { byDoc.set(r.sourceId, []); order.push(r.sourceId); }
+      byDoc.get(r.sourceId).push({ r, rank: i + 1 });
+    });
+    resultsEl.innerHTML = order.map(id => {
+      const hits = byDoc.get(id), head = hits[0].r;
+      const link = head.sourceUrl
+        ? `<a href="${esc(head.sourceUrl)}" target="_blank" rel="noopener">${esc(head.title)}</a>`
+        : esc(head.title);
+      return `<div class="group">
+        <div class="ghead">
+          <span class="gtitle">${link}</span>${badges(head)}
+          <span class="gcount">${hits.length} passage${hits.length === 1 ? "" : "s"}</span>
+        </div>
+        ${hits.map(({ r, rank }) => hitHtml(r, rank, rx, maxScore, false)).join("")}
+      </div>`;
+    }).join("");
+  }
+
+  // ---- per-result actions (delegated: the list is rebuilt on every search) ------------
+  const docCache = new Map();
+  resultsEl.addEventListener("click", async (e) => {
+    const hit = e.target.closest(".hit");
+    if (!hit) return;
+
+    const more = e.target.closest(".more");
+    if (more) {
+      more.textContent = hit.classList.toggle("open") ? "Show less" : "Show all";
+      return;
+    }
+    const copy = e.target.closest(".copyid");
+    if (copy) {
+      try { await navigator.clipboard.writeText(hit.dataset.sourceId); copy.textContent = "Copied"; }
+      catch { copy.textContent = "Copy failed"; }
+      setTimeout(() => { copy.textContent = "Copy id"; }, 1500);
+      return;
+    }
+    const open = e.target.closest(".opendoc");
+    if (!open) return;
+    const pane = hit.querySelector(".docpane");
+    if (pane) { pane.remove(); open.textContent = "Open document"; return; }
+    open.textContent = "Loading…"; open.disabled = true;
+    try {
+      const id = hit.dataset.sourceId;
+      let doc = docCache.get(id);
+      if (!doc) {
+        const res = await fetch("/api/document", {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ sourceId: id, maxChars: 200000 }),
+        });
+        doc = await res.json();
+        if (!res.ok) throw new Error(doc.error || `HTTP ${res.status}`);
+        docCache.set(id, doc);
+      }
+      hit.insertAdjacentHTML("beforeend", docPaneHtml(doc, termRegex(lastQuery)));
+      hit.querySelector(".jump").onclick = (ev) => {
+        ev.target.closest(".docpane").querySelector("mark")?.scrollIntoView({ block: "center" });
+      };
+      open.textContent = "Hide document";
+    } catch (err) {
+      hit.insertAdjacentHTML("beforeend", `<div class="docpane"><pre class="dbody error">${esc(err.message)}</pre></div>`);
+      open.textContent = "Hide document";
+    } finally {
+      open.disabled = false;
+    }
+  });
+
+  /** The indexed markdown itself, highlighted — for a search tool that is the honest view of it. */
+  function docPaneHtml(doc, rx) {
+    const meta = [
+      doc.lastModified ? `updated ${esc(String(doc.lastModified).slice(0, 10))}` : "",
+      `${doc.outline?.length || 0} heading${doc.outline?.length === 1 ? "" : "s"}`,
+      esc(doc.relPath),
+    ].filter(Boolean).join(" · ");
+    const title = doc.sourceUrl
+      ? `<a href="${esc(doc.sourceUrl)}" target="_blank" rel="noopener">${esc(doc.title)}</a>`
+      : esc(doc.title);
+    return `<div class="docpane">
+      <div class="dhead">
+        <span class="dtitle">${title}</span>
+        <span>${meta}${doc.truncated ? ` <span class="badge">truncated</span>` : ""}</span>
+        <span class="grow"></span>
+        <button type="button" class="jump">Jump to match</button>
+      </div>
+      <pre class="dbody">${highlight(doc.content, rx)}</pre>
+    </div>`;
+  }
+
+  // ---- searching --------------------------------------------------------------------
+  let inflight = null;
+  async function run(query, opts = {}) {
+    query = (query || "").trim();
+    if (!query) return;
+    qEl.value = query;
+    remember(query);
+    syncUrl(query, opts.replace);
+    inflight?.abort();
+    const ctl = new AbortController();
+    inflight = ctl;
+    goEl.disabled = true;
+    summaryEl.innerHTML = `<span><span class="spin"></span>Searching…</span>`;
+    const started = performance.now();
+    try {
+      const res = await fetch("/api/search", {
+        method: "POST", headers: { "content-type": "application/json" }, signal: ctl.signal,
+        body: JSON.stringify({ query, topK: Number(kEl.value), filters: filterPayload() }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      render(data.results || [], query, Math.round(performance.now() - started));
+    } catch (err) {
+      if (err.name === "AbortError") return;   // superseded by a newer search
+      summaryEl.innerHTML = "";
+      resultsEl.innerHTML = `<div class="state"><h2 class="error">Search failed</h2><div>${esc(err.message)}</div></div>`;
+    } finally {
+      if (inflight === ctl) { inflight = null; goEl.disabled = false; }
+    }
+  }
+
+  // ---- URL state: a search is a place, so it can be linked and gone back to ----------
+  function queryString(query) {
+    const p = new URLSearchParams();
+    p.set("q", query);
+    if (kEl.value !== DEFAULT_K) p.set("k", kEl.value);
+    for (const g of FACETS) if (active[g.key].size) p.set(g.key, [...active[g.key]].join(","));
+    return String(p);
+  }
+  function syncUrl(query, replace) {
+    const qs = queryString(query);
+    const url = `${location.pathname}?${qs}`;
+    // Same search re-run (a filter toggled back, say): amend the entry instead of stacking one.
+    if (replace || location.search === `?${qs}`) history.replaceState({ q: query }, "", url);
+    else history.pushState({ q: query }, "", url);
+  }
+  function readUrl() {
+    const p = new URLSearchParams(location.search);
+    for (const g of FACETS) active[g.key] = new Set((p.get(g.key) || "").split(",").filter(Boolean));
+    const k = p.get("k");
+    if (k && [...kEl.options].some(o => o.value === k)) kEl.value = k; else kEl.value = DEFAULT_K;
+    return (p.get("q") || "").trim();
+  }
+  window.addEventListener("popstate", () => {
+    const q = readUrl();
+    syncChips();
+    if (q) run(q, { replace: true });
+    else { qEl.value = ""; summaryEl.innerHTML = ""; resultsEl.innerHTML = emptyState; renderRecent(); wireExamples(); }
+  });
+
+  // ---- recent searches ----------------------------------------------------------------
+  const RECENT_KEY = "ai-wiki.searches.v1";
+  const MAX_RECENT = 12;
+  const emptyState = $("#state").outerHTML;   // re-inserted when a back navigation empties the query
+  function readRecent() {
+    try {
+      const v = JSON.parse(localStorage.getItem(RECENT_KEY) || "[]");
+      return Array.isArray(v) ? v.filter(s => typeof s === "string" && s.trim()) : [];
+    } catch { return []; }   // private window, cleared storage, or a half-written value
+  }
+  function remember(query) {
+    try { localStorage.setItem(RECENT_KEY, JSON.stringify([query, ...readRecent().filter(s => s !== query)].slice(0, MAX_RECENT))); }
+    catch {}   // recent searches are a convenience; a full or blocked quota must not break search
+  }
+  function renderRecent() {
+    const box = $("#recent"), wrap = $("#recentBox");
+    if (!box || !wrap) return;
+    const list = readRecent();
+    wrap.hidden = !list.length;
+    box.innerHTML = list.map(s => `<span>${esc(s)}</span>`).join("");
+    box.querySelectorAll("span").forEach(el => { el.onclick = () => run(el.textContent); });
+    $("#clearRecent").onclick = () => { try { localStorage.removeItem(RECENT_KEY); } catch {} renderRecent(); };
+  }
+  function wireExamples() {
+    document.querySelectorAll("#state .ex").forEach(el => { el.onclick = () => run(el.textContent); });
+  }
+
+  // ---- wiring ---------------------------------------------------------------------------
+  formEl.addEventListener("submit", (e) => { e.preventDefault(); run(qEl.value); });
+  kEl.addEventListener("change", () => { if (qEl.value.trim()) run(qEl.value); });
+  document.addEventListener("keydown", (e) => {
+    const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || "");
+    if ((e.key === "k" || e.key === "K") && (e.metaKey || e.ctrlKey)) { e.preventDefault(); qEl.focus(); qEl.select(); }
+    else if (e.key === "/" && !typing && !e.metaKey && !e.ctrlKey && !e.altKey) { e.preventDefault(); qEl.focus(); qEl.select(); }
+    else if (e.key === "Escape" && document.activeElement === qEl) qEl.blur();
+  });
+
+  wireExamples();
+  renderRecent();
+  const initial = readUrl();
+  if (initial) run(initial, { replace: true }); else qEl.focus();
+})();
+</script>
+</body>
+</html>

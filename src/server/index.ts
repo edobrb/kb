@@ -370,6 +370,7 @@ app.post("/api/ingest", async (req, reply) => {
 try {
   await app.listen({ port: config.server.port, host: config.server.host });
   app.log.info(`Chat UI:  http://${config.server.host}:${config.server.port}/`);
+  app.log.info(`Search:   http://${config.server.host}:${config.server.port}/search.html`);
   app.log.info(`Map:      http://${config.server.host}:${config.server.port}/map.html (after \`npm run map\`)`);
   app.log.info(`Arch:     http://${config.server.host}:${config.server.port}/architecture.html`);
   app.log.info(`API:      POST /api/ask (SSE) · POST /api/ask/sync · POST /api/search · POST /api/document · GET /api/map · GET /api/graph · POST /api/graph/neighbors · POST /api/chunk · POST /api/export/bundle · GET /api/health`);
