@@ -2,7 +2,7 @@ import { config, paths } from "../config.js";
 import { getChatProvider } from "../llm/chat.js";
 import { getEmbedder } from "../llm/embeddings.js";
 import { Bm25Index } from "../store/bm25.js";
-import { VectorStore } from "../store/vector-store.js";
+import { needsTableFilter, VectorStore } from "../store/vector-store.js";
 import type { RetrievalFilters, RetrievedChunk } from "../types.js";
 import type { Row } from "../store/vector-store.js";
 
@@ -47,6 +47,7 @@ function toRetrieved(row: Row, score: number, vectorRank: number | null, bm25Ran
     content: row.content,
     lineStart: row.line_start >= 0 ? row.line_start : null,
     lineEnd: row.line_end >= 0 ? row.line_end : null,
+    lastModified: row.last_modified || null,
     score,
     vectorRank,
     bm25Rank,
@@ -106,10 +107,14 @@ export class Retriever {
       throw new Error("The index is empty. Run `npm run ingest` first.");
     }
 
+    // Dates and literal text are evaluated by the table, once; BM25 then keeps to the chunks that passed.
+    const allow = needsTableFilter(filters) ? await this.store.idsMatching(filters ?? {}) : undefined;
+    if (allow && !allow.size) return [];
+
     const embedder = getEmbedder();
     const [queryVector, bm25Hits] = await Promise.all([
       embedder.embedQuery(query),
-      Promise.resolve(this.bm25?.search(query, candidates, filters) ?? []),
+      Promise.resolve(this.bm25?.search(query, candidates, filters, allow) ?? []),
     ]);
     const vectorHits = await this.store.search(queryVector, candidates, filters);
 

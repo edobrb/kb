@@ -34,6 +34,12 @@ describe("parseFrontmatter + buildDocMeta", () => {
     expect(cleanBody(body).startsWith("# ADR0010")).toBe(true);
   });
 
+  it("leaves last_modified empty rather than passing the sync time off as an edit date", () => {
+    const raw = `---\nsource_id: "devportal:default/api/orders"\nfetched_at: "2026-09-22"\n---\n\n# Orders API\n`;
+    const { frontmatter, body } = parseFrontmatter(raw);
+    expect(buildDocMeta(frontmatter, body, "devportal/api/orders/__definition.md", raw).lastModified).toBeNull();
+  });
+
   it("falls back gracefully when there is no frontmatter", () => {
     const raw = "# My Page\n\nHello";
     const { frontmatter, body } = parseFrontmatter(raw);

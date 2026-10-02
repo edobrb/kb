@@ -62,6 +62,23 @@ const FILTER_PROPERTIES = {
     description: 'Restrict to these authority levels — ["binding","normative"] for ADRs and standards only.',
   },
   lang: { type: "array", items: { type: "string" }, description: 'Restrict to these languages, e.g. ["en"] or ["it"].' },
+  contains: {
+    type: "string",
+    description:
+      'Only passages containing this exact text, case-insensitive, like grep: an env var, error code, endpoint path, ' +
+      'config key or class name, e.g. "ORDER_SERVICE_URL" or "/api/v1/orders". The query still ranks them. An empty ' +
+      "result means no indexed passage contains it.",
+  },
+  modified_after: {
+    type: "string",
+    description:
+      'Only documents last modified on or after this date: "2026-06-15", "2026-06" or "2026". Documents without a ' +
+      "date are left out. Each result shows its last_modified and what that date is.",
+  },
+  modified_before: {
+    type: "string",
+    description: 'Only documents last modified before this date (exclusive), same formats: modified_after "2026-06" with modified_before "2026-07" is June.',
+  },
 } as const;
 
 export const SEARCH_TOOL: Tool = {
@@ -73,7 +90,8 @@ export const SEARCH_TOOL: Tool = {
     "Hybrid retrieval — embeddings plus BM25 — over the indexed passages; questions in Italian and English both " +
     "match. Returns the most relevant passages with their source_id, metadata and deep link. Use it before " +
     "answering anything about internal TeamSystem services, repositories, endpoints, settings or conventions, and " +
-    "before saying the documentation does not cover something; then read the whole page with fetch_document.",
+    "before saying the documentation does not cover something; then read the whole page with fetch_document. " +
+    "Use `contains` to find an exact identifier and `modified_after` for what changed recently.",
   inputSchema: {
     type: "object",
     properties: {
@@ -207,25 +225,61 @@ function asList(args: Record<string, unknown>, ...names: string[]): string[] | u
   return out.length ? out : undefined;
 }
 
-function filtersFrom(args: Record<string, unknown>): { filters: RetrievalFilters; described: string } {
+/**
+ * A date bound as the prefix `last_modified` is compared with: "2026", "2026-06" or "2026-06-15"; a
+ * timestamp is cut to its day. Undefined when absent, null when it is not a date.
+ */
+function asDate(raw: string): string | null | undefined {
+  if (!raw) return undefined;
+  return /^\d{4}(?:-\d{2}(?:-\d{2})?)?(?=$|[T ])/.exec(raw)?.[0] ?? null;
+}
+
+function filtersFrom(args: Record<string, unknown>): { filters: RetrievalFilters; described: string; problem?: string } {
+  const rawAfter = asString(args, "modified_after", "modifiedAfter", "since");
+  const rawBefore = asString(args, "modified_before", "modifiedBefore", "until");
+  const after = asDate(rawAfter);
+  const before = asDate(rawBefore);
+  // Not trimmed: a leading space can be part of what the client is looking for.
+  const contains = pick(args, "contains", "exact");
   const filters: RetrievalFilters = {
     sourceTypes: asList(args, "source_type", "sourceTypes", "source_types"),
     kinds: asList(args, "kind", "kinds"),
     authorities: asList(args, "authority", "authorities") as Authority[] | undefined,
     langs: asList(args, "lang", "langs"),
+    modifiedAfter: after ?? undefined,
+    modifiedBefore: before ?? undefined,
+    contains: typeof contains === "string" && contains.trim() ? contains : undefined,
   };
-  const described = Object.entries({
-    source_type: filters.sourceTypes,
-    kind: filters.kinds,
-    authority: filters.authorities,
-    lang: filters.langs,
-  })
-    .flatMap(([k, v]) => (v ? [`${k}=${v.join("|")}`] : []))
+  const described = [
+    ...Object.entries({
+      source_type: filters.sourceTypes,
+      kind: filters.kinds,
+      authority: filters.authorities,
+      lang: filters.langs,
+    }).flatMap(([k, v]) => (v ? [`${k}=${v.join("|")}`] : [])),
+    filters.modifiedAfter ? `modified_after=${filters.modifiedAfter}` : "",
+    filters.modifiedBefore ? `modified_before=${filters.modifiedBefore}` : "",
+    filters.contains ? `contains="${filters.contains}"` : "",
+  ]
+    .filter(Boolean)
     .join(" ");
-  return { filters, described };
+  const bad = after === null ? ["modified_after", rawAfter] : before === null ? ["modified_before", rawBefore] : null;
+  const problem = bad ? `${bad[0]} must be a date like "2026-06-15", "2026-06" or "2026" (got "${bad[1]}").` : undefined;
+  return { filters, described, problem };
 }
 
 // ---- formatting ----------------------------------------------------------------------------------
+
+/**
+ * What a document's last_modified is, where it is not the page's own last edit: sync stamps a Dev Portal
+ * page with its TechDocs build, and a project card or API definition with the repository's latest commit.
+ */
+function lastModifiedField(date: string | null, sourceType: string, kind: string): string {
+  if (!date) return "";
+  const note =
+    sourceType === "devportal" && kind === "doc" ? " (docs site build)" : sourceType === "gitlab" && kind !== "doc" ? " (repository's latest commit)" : "";
+  return ` last_modified=${date}${note}`;
+}
 
 const SEPARATOR = "\n\n----------------------------------------\n\n";
 
@@ -241,6 +295,7 @@ function formatChunk(c: RetrievedChunk, i: number): string {
     `${i}. ${c.title}${c.headingPath && c.headingPath !== c.title ? ` — ${c.headingPath}` : ""}`,
     `   source_id: ${c.sourceId}`,
     `   source_type=${c.sourceType} kind=${c.kind} authority=${c.authority} lang=${c.lang}` +
+      `${lastModifiedField(c.lastModified, c.sourceType, c.kind)}` +
       `${c.lineStart ? ` lines=${c.lineStart}-${c.lineEnd ?? c.lineStart}` : ""}`,
     `   score=${c.score.toFixed(4)}${ranks ? ` (${ranks})` : ""}`,
     url ? `   url: ${url}` : `   kb path: ${c.relPath}`,
@@ -259,7 +314,7 @@ export function formatDocument(doc: FetchedDocument): string {
     doc.title,
     `source_id: ${doc.sourceId}`,
     `source_type=${doc.sourceType} kind=${doc.kind} authority=${doc.authority} lang=${doc.lang}` +
-      `${doc.lastModified ? ` last_modified=${doc.lastModified}` : ""}`,
+      lastModifiedField(doc.lastModified, doc.sourceType, doc.kind),
     url ? `url: ${url}` : `kb path: ${doc.relPath}`,
     doc.sectionNotFound
       ? `no section matching "${doc.sectionNotFound}" — returning the ${scope}, ${size}`
@@ -274,11 +329,12 @@ export function formatDocument(doc: FetchedDocument): string {
 // ---- search --------------------------------------------------------------------------------------
 
 const runSearch: McpToolHandler = async (args, ctx) => {
-  const query = asString(args, "query", "q", "question");
-  if (!query) return { isError: true, text: "search needs a `query`." };
-
   const topK = asInt(args, config.mcp.searchTopK, 1, config.mcp.maxTopK, "top_k", "topK", "k", "limit");
-  const { filters, described } = filtersFrom(args);
+  const { filters, described, problem } = filtersFrom(args);
+  if (problem) return { isError: true, text: problem };
+  // A bare `contains` is a grep: the text itself ranks the passages that contain it.
+  const query = asString(args, "query", "q", "question") || filters.contains?.trim() || "";
+  if (!query) return { isError: true, text: "search needs a `query`." };
 
   let chunks: RetrievedChunk[];
   try {
@@ -290,7 +346,15 @@ const runSearch: McpToolHandler = async (args, ctx) => {
 
   const scope = described ? ` (filters: ${described})` : "";
   if (!chunks.length) {
-    return { text: `No passages matched "${query}"${scope}. ${RETRY_HINT}` };
+    // Every filter is applied before ranking, so an empty result is a fact about the index, not a ranking miss.
+    const { contains, ...others } = filters;
+    const narrowed = Object.values(others).some((v) => v !== undefined);
+    const hint = contains
+      ? `No indexed passage contains the exact text "${contains}"${narrowed ? " within the other filters" : ""}; drop \`contains\` to search by meaning.`
+      : filters.modifiedAfter || filters.modifiedBefore
+        ? `Only documents with a last_modified date inside the range are searched; widen it or drop it. ${RETRY_HINT}`
+        : RETRY_HINT;
+    return { text: `No passages matched "${query}"${scope}. ${hint}` };
   }
 
   // Fit the budget: always at least one passage, then stop before the one that would overflow.

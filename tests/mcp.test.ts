@@ -74,6 +74,7 @@ const chunk = (over: Partial<RetrievedChunk> = {}): RetrievedChunk => ({
   content: "Use client credentials for service-to-service calls.",
   lineStart: null,
   lineEnd: null,
+  lastModified: "2026-02-01",
   score: 0.0312,
   vectorRank: 2,
   bm25Rank: 5,
@@ -208,6 +209,61 @@ describe("search", () => {
       filters: { sourceTypes: ["adr", "gitlab"], kinds: ["doc"], authorities: ["binding"], langs: undefined },
     });
     expect(out.text).toContain("filters: source_type=adr|gitlab kind=doc authority=binding");
+  });
+
+  it("says what each last_modified date is, since not every source dates the page itself", async () => {
+    const out = await runMcpTool(
+      "search",
+      { query: "x" },
+      ctxWith(
+        stubSearcher([
+          chunk(),
+          chunk({ id: "p#0", sourceId: "devportal:default/component/hermes/", sourceType: "devportal", lastModified: "2026-09-21" }),
+          chunk({ id: "c#0", sourceId: "gitlab:oneplatform/gateway:__project", sourceType: "gitlab", kind: "project", lastModified: "2026-09-22" }),
+          chunk({ id: "n#0", sourceId: "devportal:default/api/orders", sourceType: "devportal", kind: "api", lastModified: null }),
+        ]),
+      ),
+    );
+    expect(out.text).toContain("lang=en last_modified=2026-02-01\n");
+    expect(out.text).toContain("last_modified=2026-09-21 (docs site build)");
+    expect(out.text).toContain("last_modified=2026-09-22 (repository's latest commit)");
+    expect(out.text).toContain("source_type=devportal kind=api authority=binding lang=en\n");
+  });
+
+  it("passes the date range and the literal text through, and says it applied them", async () => {
+    const searcher = stubSearcher([chunk()]);
+    const out = await runMcpTool(
+      "search",
+      { query: "order service", contains: "ORDER_SERVICE_URL", modified_after: "2026-06", modified_before: "2026-07-15T08:00:00Z" },
+      ctxWith(searcher),
+    );
+    expect(searcher.calls[0]?.opts).toMatchObject({
+      filters: { contains: "ORDER_SERVICE_URL", modifiedAfter: "2026-06", modifiedBefore: "2026-07-15" },
+    });
+    expect(out.text).toContain('filters: modified_after=2026-06 modified_before=2026-07-15 contains="ORDER_SERVICE_URL"');
+  });
+
+  it("searches for the literal text itself when `contains` comes without a query", async () => {
+    const searcher = stubSearcher([chunk()]);
+    await runMcpTool("search", { contains: "ORDER_SERVICE_URL" }, ctxWith(searcher));
+    expect(searcher.calls[0]?.query).toBe("ORDER_SERVICE_URL");
+  });
+
+  it("rejects a date it cannot compare instead of silently searching everything", async () => {
+    const searcher = stubSearcher([chunk()]);
+    const out = await runMcpTool("search", { query: "x", modified_after: "last week" }, ctxWith(searcher));
+    expect(out).toMatchObject({ isError: true });
+    expect(out.text).toContain('modified_after must be a date like "2026-06-15"');
+    expect(searcher.calls).toHaveLength(0);
+    const aliased = await runMcpTool("search", { query: "x", until: "soon" }, ctxWith(searcher));
+    expect(aliased.text).toContain('modified_before must be a date like "2026-06-15", "2026-06" or "2026" (got "soon")');
+  });
+
+  it("reads an empty `contains` result as the text not being in the index", async () => {
+    const out = await runMcpTool("search", { query: "x", contains: "NOPE_NOT_HERE" }, ctxWith(stubSearcher([])));
+    expect(out.text).toContain('No indexed passage contains the exact text "NOPE_NOT_HERE"; drop `contains`');
+    const narrowed = await runMcpTool("search", { query: "x", contains: "NOPE", kind: ["api"] }, ctxWith(stubSearcher([])));
+    expect(narrowed.text).toContain('"NOPE" within the other filters');
   });
 
   it("clamps top_k to the configured ceiling instead of trusting the client", async () => {

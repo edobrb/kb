@@ -98,7 +98,8 @@ export class Bm25Index {
     return idx;
   }
 
-  search(query: string, k: number, filters?: RetrievalFilters): Bm25Hit[] {
+  /** `allow`, when given, is the only chunk ids that may be returned: filters this index cannot evaluate itself. */
+  search(query: string, k: number, filters?: RetrievalFilters, allow?: ReadonlySet<string>): Bm25Hit[] {
     const terms = [...new Set(tokenize(query))];
     if (!terms.length || !this.ids.length) return [];
     const N = this.ids.length;
@@ -121,7 +122,9 @@ export class Bm25Index {
     const hits: Bm25Hit[] = [];
     for (const di of touched) {
       if (!this.passes(di, filters)) continue;
-      hits.push({ id: this.ids[di] as string, score: scores[di] as number });
+      const id = this.ids[di] as string;
+      if (allow && !allow.has(id)) continue;
+      hits.push({ id, score: scores[di] as number });
     }
     hits.sort((a, b) => b.score - a.score);
     return hits.slice(0, k);

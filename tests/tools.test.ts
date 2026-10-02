@@ -194,6 +194,7 @@ const passage = (id: string, sourceId: string, content: string): RetrievedChunk 
   content,
   lineStart: null,
   lineEnd: null,
+  lastModified: null,
   score: 0.5,
   vectorRank: 1,
   bm25Rank: null,

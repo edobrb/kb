@@ -85,7 +85,8 @@ export function buildDocMeta(fm: Record<string, unknown>, body: string, relPath:
     sourceUrl: asString(fm["source_url"]),
     authority: normalizeAuthority(fm["authority"]),
     lang: asString(fm["lang"]) ?? "und",
-    lastModified: asString(fm["last_modified"]) ?? asString(fm["fetched_at"]),
+    // Not fetched_at: that is when sync ran, and it would pass for an edit date in search results and date filters.
+    lastModified: asString(fm["last_modified"]),
     contentHash,
     embedHash: embeddingHash(kind, title, fm, body),
     relPath,

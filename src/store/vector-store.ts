@@ -66,7 +66,19 @@ export function buildWhere(filters?: RetrievalFilters): string | undefined {
   if (filters.kinds?.length) clauses.push(`kind IN (${filters.kinds.map(sqlString).join(", ")})`);
   if (filters.authorities?.length) clauses.push(`authority IN (${filters.authorities.map(sqlString).join(", ")})`);
   if (filters.langs?.length) clauses.push(`lang IN (${filters.langs.map(sqlString).join(", ")})`);
+  // ISO dates compare as strings, and a prefix bound works too: "2026-06-30" < "2026-07" <= "2026-07-01".
+  // An undated row is "" and would pass every `<`, so a date bound excludes it explicitly.
+  if (filters.modifiedAfter || filters.modifiedBefore) clauses.push("last_modified <> ''");
+  if (filters.modifiedAfter) clauses.push(`last_modified >= ${sqlString(filters.modifiedAfter)}`);
+  if (filters.modifiedBefore) clauses.push(`last_modified < ${sqlString(filters.modifiedBefore)}`);
+  // strpos, not LIKE: `_` and `%` are common in identifiers and would be wildcards there.
+  if (filters.contains) clauses.push(`strpos(lower(text), ${sqlString(filters.contains.toLowerCase())}) > 0`);
   return clauses.length ? clauses.join(" AND ") : undefined;
+}
+
+/** True when `filters` has a condition only the table can evaluate: the keyword index knows no dates or text. */
+export function needsTableFilter(filters?: RetrievalFilters): boolean {
+  return Boolean(filters?.modifiedAfter || filters?.modifiedBefore || filters?.contains);
 }
 
 /** Arrow record -> plain row (older tables without the newer columns read back as defaults). */
@@ -173,6 +185,17 @@ export class VectorStore {
     if (where) q = q.where(where);
     const rows = (await q.toArray()) as Array<Record<string, unknown>>;
     return rows.map((r) => ({ distance: Number(r["_distance"]), row: rowFromRecord(r) }));
+  }
+
+  /** Ids of every chunk matching `filters` (a scan of the table, ~50 ms for a `contains` over the whole index). */
+  async idsMatching(filters: RetrievalFilters): Promise<Set<string>> {
+    const out = new Set<string>();
+    const where = buildWhere(filters);
+    if (!this.table || !where) return out;
+    for await (const batch of this.table.query().where(where).select(["id"])) {
+      for (const r of batch.toArray() as Array<Record<string, unknown>>) out.add(String(r["id"]));
+    }
+    return out;
   }
 
   /** Fetch rows by chunk id (used to hydrate BM25 hits that the vector search did not return). */

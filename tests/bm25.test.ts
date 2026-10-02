@@ -31,6 +31,12 @@ describe("Bm25Index", () => {
     expect(idx.search("data tiers", 3, { sourceTypes: ["confluence"] })).toEqual([]);
   });
 
+  it("returns only allowed ids when the caller has evaluated filters the index cannot", () => {
+    const idx = Bm25Index.build(docs);
+    expect(idx.search("data tiers client credentials", 4, undefined, new Set(["d"])).map((h) => h.id)).toEqual(["d"]);
+    expect(idx.search("client credentials", 4, { langs: ["en"] }, new Set(["b", "c"]))).toEqual([]);
+  });
+
   it("round-trips through save/load", async () => {
     const idx = Bm25Index.build(docs);
     const file = path.join(await tmp, "bm25.json.gz");

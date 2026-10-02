@@ -334,9 +334,16 @@ been built.
 
 | Tool | Arguments | Returns |
 |---|---|---|
-| `search` | `query`, `top_k` (≤ `MCP_MAX_TOP_K`), `source_type` / `kind` / `authority` / `lang` | the fused passages (§ [7.6](#76-hybrid-retrieval-srcretrievalretrieverts)), each with its `source_id`, `source_type`/`kind`/`authority`/`lang`, score and rank in each retriever, deep link and text |
+| `search` | `query`, `top_k` (≤ `MCP_MAX_TOP_K`), `source_type` / `kind` / `authority` / `lang`, `contains` (exact text, case-insensitive), `modified_after` / `modified_before` (`2026`, `2026-06` or `2026-06-15`; after inclusive, before exclusive) | the fused passages (§ [7.6](#76-hybrid-retrieval-srcretrievalretrieverts)), each with its `source_id`, `source_type`/`kind`/`authority`/`lang`, `last_modified`, score and rank in each retriever, deep link and text |
 | `fetch_document` | `source_id`, `section`, `max_chars` | the whole kb page, or one section, with its metadata and heading outline (§ [7.7](#77-tools-search-again-read-whole-documents-srcgenerationtoolsts-srcretrievaldocumentsts)) |
 | `related` | `source_id`, `scope` (`all` \| `links` \| `same_place`), `limit` | the connected documents as titles + ids, grouped by how they are connected (§ [7.9](#79-the-knowledge-graph-srcgraph-npm-run-graph)); neighbours that are linked but not indexed are marked as such |
+
+`contains` and the date bounds are applied before ranking — a LanceDB predicate (`strpos`, so `_` and `%` are
+literal), and BM25 keeps to the ids that passed — so an empty result means no indexed passage qualifies, which
+is worth telling the user, not a ranking miss. `last_modified` is the page's own last edit for Confluence, GitLab
+docs and ADRs; a Dev Portal page carries its TechDocs build date and a project card or GitLab API definition the
+repository's latest commit (each result says which), and Dev Portal API definitions have none, so a date bound
+leaves them out.
 
 Nothing under `src/mcp/` calls a chat model: the client *is* the model, so `CHAT_MODEL`, the system prompt, the tool
 loop and the citation numbering all stay out of it — the client cites the `source_id`s and URLs itself. The only

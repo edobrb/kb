@@ -88,6 +88,14 @@ export interface RetrievalFilters {
   kinds?: string[];
   authorities?: Authority[];
   langs?: string[];
+  /**
+   * Bounds on `last_modified`, as an ISO date or a prefix of one ("2026", "2026-06", "2026-06-15"):
+   * after is inclusive, before exclusive. Documents without a date never pass either.
+   */
+  modifiedAfter?: string;
+  modifiedBefore?: string;
+  /** Literal text the chunk must contain, compared case-insensitively. */
+  contains?: string;
 }
 
 export interface RetrievedChunk {
@@ -105,6 +113,8 @@ export interface RetrievedChunk {
   content: string;
   lineStart: number | null;
   lineEnd: number | null;
+  /** The document's last_modified date, null when it has none. */
+  lastModified: string | null;
   /** Final fused score (higher is better). */
   score: number;
   /** Debug info: rank in each retriever (1-based) or null when not returned by it. */

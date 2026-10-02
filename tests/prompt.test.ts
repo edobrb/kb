@@ -4,7 +4,7 @@ import type { RetrievedChunk } from "../src/types.js";
 
 const chunk = (id: string, content: string, extra: Partial<RetrievedChunk> = {}): RetrievedChunk => ({
   id, sourceId: `s:${id}`, sourceType: "adr", kind: "doc", title: "T", sourceUrl: "https://x", authority: "binding", lang: "en",
-  relPath: "adr/x.md", ordinal: 0, headingPath: `T > ${id}`, content, lineStart: null, lineEnd: null, score: 1, vectorRank: 1, bm25Rank: null,
+  relPath: "adr/x.md", ordinal: 0, headingPath: `T > ${id}`, content, lineStart: null, lineEnd: null, lastModified: null, score: 1, vectorRank: 1, bm25Rank: null,
   ...extra,
 });
 
