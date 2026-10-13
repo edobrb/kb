@@ -66,9 +66,14 @@ orchestrator also drops a document whose normalised body is identical to one alr
 | kind | Body | Id → file | Chunked by |
 |---|---|---|---|
 | `doc` | Prose markdown: TechDocs page, README, ADR, in-repo documentation, Confluence page | `devportal:<ns>/<kind>/<name>/<page/>` → `kb/devportal/…`; `gitlab:<project>:<path>` → `kb/gitlab/<project>/<path>`; `confluence:<SPACE>:<pageId>` → `kb/confluence/<SPACE>/<pageId>-<slug>.md` | headings, ~450 tokens |
-| `api` | OpenAPI/AsyncAPI definition in a fenced block, preceded by its title/description | `devportal:<ns>/api/<name>#definition` → `kb/devportal/api/<name>/__definition.md`; `gitlab:<project>:<path>` → `kb/gitlab/<project>/<path>.md` | headings (the fence is split by lines when oversized) |
+| `api` | OpenAPI/AsyncAPI/GraphQL definition in a fenced block, preceded by its title/description | `devportal:<ns>/api/<name>#definition` → `kb/devportal/api/<name>/__definition.md`; `gitlab:<project>:<path>` → `kb/gitlab/<project>/<path>.md` | rewritten at load as one section per operation and per component, each with its part of the definition as YAML (`src/ingest/api-spec.ts`; a definition sync cut is repaired and flagged), then headings |
 | `project` | The repository card: description, Dev Portal entity (owner/system/lifecycle), languages, top-level folders, README excerpt, related Confluence pages | `gitlab:<project>:__project` → `kb/gitlab/<project>/__project.md` | headings |
 | `code` | One fenced block with the language tag, the file verbatim. **Off by default** (`gitlab.code.enabled`) | `gitlab:<project>:<path>` → `kb/gitlab/<project>/<path>.md` | top-level declarations, ~600 tokens |
+
+`authority` comes from the sources.yaml rules (where a document lives), corrected at load by what an ADR says
+about itself: `binding` only while in force, `descriptive` once deprecated, superseded, rejected or only proposed,
+and for templates and non-ADR pages that sit in an `adr/` folder (`src/ingest/adr-status.ts`). Credentials a page
+publishes are redacted at load (`src/secrets.ts`), so neither the index nor `fetch_document` holds them.
 
 Frontmatter every document carries: `source_id`, `source_type`, `kind`, `title`, `source_url`, `authority`,
 `lang`, `last_modified`, `fetched_at`, and `breadcrumb` — a short "where this lives" path
@@ -92,6 +97,7 @@ Everything is incremental, and each stage has its own key. Nothing is redone unl
 | Confluence card enrichment | `confluence.refresh_days` per project | The wiki is searched again for that project |
 | kb document format | `KB_DOC_VERSION` in `src/sync/kb-writer.ts` | Every document is re-rendered once, so a change to what sync writes also reaches the documents the source itself reports as unchanged |
 | Ingest of a document | sha256 of the file bytes (manifest `contentHash`) | Re-chunked |
+| Loader / chunker code | `INGEST_PIPELINE_VERSION` in `src/ingest/pipeline.ts` (manifest `pipeline`) | Every document is re-checked once; vectors are reused wherever the chunk text did not change, so only what the new code really changed is embedded |
 | Embedding of a document | sha256 of kind + title + breadcrumb + project + body (manifest `embedHash`), confirmed against the chunk text already in the table | Re-embedded. When only the metadata moved — a fresh `fetched_at`, a new City Map field, a renamed owner — the stored vectors are reused and the rows are simply rewritten |
 | Whole index | embedding model, dimensions, chunk sizes | Full rebuild |
 | Knowledge graph | nothing — rebuilt from the manifest at the end of every ingest (seconds, no model) | `data/graph.json.gz` is replaced, so it can never point at ids the index no longer has |
@@ -198,6 +204,12 @@ are still required. Budgets are separate (`MCP_*`) and larger, since they are si
 window rather than ours; `related` is advertised only when the graph exists, and a missing index or a
 stopped Ollama comes back as a tool error naming the command that fixes it.
 
+A fourth tool, `report(kind, note, question, source_ids)`, goes the other way: the client files a
+correction, a gap or a search tip for the maintainers. It is appended to `data/feedback/reports.jsonl`
+with the hashes of the documents it names, next to `events.jsonl`, which logs every tool call
+(`src/feedback/`). Neither file is indexed: an agent's conclusion is unverified, so
+a person reviews it before anything changes in the knowledge base.
+
 ## Where the code lives
 
 ```
@@ -217,8 +229,9 @@ src/retrieval/     retriever.ts (RRF, boosts, diversity, optional LLM rerank)
                    documents.ts (source_id → kb file: whole documents and sections for the fetch_document tool)
 src/generation/    prompt.ts (system prompt, context blocks, deep links) · ask.ts (streaming loop + tool loop)
                    tools.ts (search + fetch_document: schemas, dedup against the context, result formatting)
-src/mcp/           tools.ts (search + fetch_document + related as MCP tools) · server.ts (stdio server, no chat model)
+src/mcp/           tools.ts (search + fetch_document + related + report as MCP tools) · server.ts (stdio server, no chat model)
                    desktop-config.ts (merge the server entry into Claude Desktop's config, npm run mcp:install)
+src/feedback/      events.jsonl (MCP tool calls) + reports.jsonl (agent notes), never indexed
 src/cli/           sync · ingest · ask · doc · search · eval · doctor · map · graph · mcp
 src/server/        Fastify API + public/index.html (chat) + public/map.html (2-D map, graph overlay) + public/architecture.html (this document, interactive)
 ```

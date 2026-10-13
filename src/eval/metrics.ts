@@ -64,7 +64,7 @@ export const ABSTAIN_PATTERNS: RegExp[] = [
   /\bnon (trovo|risulta|risultano|compare|compaiono) (alcun|alcuna|nessun|nessuna|traccia|menzione)\b/i,
   /\bnon (viene|vengono) (menzionat|citat|indicat|riportat)/i,
   /\b(outside|beyond) the scope of the (knowledge base|documentation|context)/i,
-  new RegExp(`\\b(la|le|il|i|nella|nei) ${KB_SUBJECT_IT} non (copre|coprono|contiene|contengono|include|includono|menziona|menzionano|tratta|trattano|fornisce|forniscono|riporta|riportano|descrive|descrivono)`, "i"),
+  new RegExp(`\\b(la|le|il|i|nella|nei)( (mia|mie|mio|miei|nostra|nostre|nostro|nostri))? ${KB_SUBJECT_IT} non (copre|coprono|contiene|contengono|include|includono|menziona|menzionano|tratta|trattano|fornisce|forniscono|riporta|riportano|descrive|descrivono)`, "i"),
   new RegExp(`\\bnon (è|sono|viene|vengono) (coperto|coperta|coperti|coperte|trattato|trattata|trattati|trattate|documentato|documentata|documentati|documentate|presente|presenti|disponibile|disponibili|menzionato|menzionata) (nella|nel|nei|nelle|dalla|dal|dai|dalle) ${KB_SUBJECT_IT}`, "i"),
   /\bnessuna informazione\b/i,
   // Outright refusals: the model says it cannot answer at all, then lists what the KB does cover.

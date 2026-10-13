@@ -240,7 +240,7 @@ describe("buildGraph", () => {
 
   it("reports a dangling link written in the documentation, and only from the body", () => {
     expect(f.graph.brokenLinks).toEqual([
-      { from: "gitlab:oneplatform/adrs:Platform/ADR0007.md", href: `${PORTAL}/docs/default/component/adrs/gone/`, reason: "devportal-page" },
+      { from: "gitlab:oneplatform/adrs:Platform/ADR0007.md", href: `${PORTAL}/docs/default/component/adrs/gone/`, reason: "devportal-page", text: "missing page" },
     ]);
     expect(f.graph.stats.brokenLinksTotal).toBe(1);
     // A parent page and a card's wiki page that sync did not index are scope, not broken links.

@@ -1,13 +1,11 @@
 import { config, paths } from "../config.js";
 import { getChatProvider } from "../llm/chat.js";
 import { getEmbedder } from "../llm/embeddings.js";
+import { redact } from "../secrets.js";
 import { Bm25Index } from "../store/bm25.js";
 import { needsTableFilter, VectorStore } from "../store/vector-store.js";
 import type { RetrievalFilters, RetrievedChunk } from "../types.js";
 import type { Row } from "../store/vector-store.js";
-
-/** Reciprocal Rank Fusion constant (Cormack et al. 2009). 60 is the standard choice. */
-const RRF_K = 60;
 
 /** Binding/normative documents (ADRs, standards) are slightly favoured over descriptive ones. */
 const AUTHORITY_BOOST: Record<string, number> = {
@@ -44,7 +42,8 @@ function toRetrieved(row: Row, score: number, vectorRank: number | null, bm25Ran
     relPath: row.rel_path,
     ordinal: row.ordinal,
     headingPath: row.heading_path,
-    content: row.content,
+    // Already redacted at ingest; again here for rows written before src/secrets.ts existed.
+    content: redact(row.content),
     lineStart: row.line_start >= 0 ? row.line_start : null,
     lineEnd: row.line_end >= 0 ? row.line_end : null,
     lastModified: row.last_modified || null,
@@ -119,25 +118,26 @@ export class Retriever {
     const vectorHits = await this.store.search(queryVector, candidates, filters);
 
     // Fuse.
-    const fused = new Map<string, { score: number; vectorRank: number | null; bm25Rank: number | null; row?: Row }>();
+    const fused = new Map<string, { score: number; vectorRank: number | null; bm25Rank: number | null; similarity: number | null; row?: Row }>();
     vectorHits.forEach((hit, i) => {
       const rank = i + 1;
       fused.set(hit.row.id, {
-        score: config.retrieval.vectorWeight / (RRF_K + rank),
+        score: config.retrieval.vectorWeight / (config.retrieval.rrfK + rank),
         vectorRank: rank,
         bm25Rank: null,
+        similarity: Number.isFinite(hit.distance) ? 1 - hit.distance : null,
         row: hit.row,
       });
     });
     bm25Hits.forEach((hit, i) => {
       const rank = i + 1;
       const existing = fused.get(hit.id);
-      const add = config.retrieval.bm25Weight / (RRF_K + rank);
+      const add = config.retrieval.bm25Weight / (config.retrieval.rrfK + rank);
       if (existing) {
         existing.score += add;
         existing.bm25Rank = rank;
       } else {
-        fused.set(hit.id, { score: add, vectorRank: null, bm25Rank: rank });
+        fused.set(hit.id, { score: add, vectorRank: null, bm25Rank: rank, similarity: null });
       }
     });
 
@@ -153,12 +153,12 @@ export class Retriever {
     }
 
     // Boost + sort.
-    let ranked = [...fused.values()]
+    let ranked: RetrievedChunk[] = [...fused.values()]
       .filter((v) => v.row)
       .map((v) => {
         const row = v.row as Row;
-        const boost = AUTHORITY_BOOST[row.authority] ?? 1;
-        return toRetrieved(row, v.score * boost, v.vectorRank, v.bm25Rank);
+        const boost = config.retrieval.authorityBoost ? (AUTHORITY_BOOST[row.authority] ?? 1) : 1;
+        return { ...toRetrieved(row, v.score * boost, v.vectorRank, v.bm25Rank), similarity: v.similarity };
       })
       .sort((a, b) => b.score - a.score);
 
@@ -171,12 +171,51 @@ export class Retriever {
       return true;
     });
 
+    if (config.retrieval.dedupe) ranked = dropNearDuplicates(ranked);
+
     if (config.retrieval.rerank === "llm" && !opts.noRerank && ranked.length > topK) {
       ranked = await llmRerank(query, ranked.slice(0, Math.min(ranked.length, topK * 3)));
     }
 
     return ranked.slice(0, topK);
   }
+}
+
+/** Word 5-grams of a passage, the unit two copies of the same text share. */
+function shingles(text: string): Set<string> {
+  const words = text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim().split(" ");
+  const out = new Set<string>();
+  for (let i = 0; i + 5 <= words.length; i++) out.add(words.slice(i, i + 5).join(" "));
+  return out;
+}
+
+/**
+ * The same text indexed twice: a README as a file and inside its project card, a TechDocs page and the
+ * GitLab file it is built from, a definition copied once per year. Both copies rank alike and together
+ * take half of a small top_k. A passage that mostly repeats a better-ranked one from another document is
+ * dropped, and the one kept says where else the text lives.
+ */
+export function dropNearDuplicates(ranked: RetrievedChunk[], threshold = 0.8): RetrievedChunk[] {
+  const kept: { chunk: RetrievedChunk; grams: Set<string> }[] = [];
+  for (const chunk of ranked) {
+    const grams = shingles(chunk.content);
+    const twin =
+      grams.size >= 20
+        ? kept.find((k) => {
+            if (k.chunk.sourceId === chunk.sourceId || k.grams.size < 20) return false;
+            let shared = 0;
+            for (const g of grams) if (k.grams.has(g)) shared++;
+            return shared / Math.min(grams.size, k.grams.size) >= threshold;
+          })
+        : undefined;
+    if (twin) {
+      const dup = twin.chunk.duplicates ?? (twin.chunk.duplicates = []);
+      if (!dup.includes(chunk.sourceId)) dup.push(chunk.sourceId);
+      continue;
+    }
+    kept.push({ chunk, grams });
+  }
+  return kept.map((k) => k.chunk);
 }
 
 /**

@@ -10,6 +10,14 @@ import { listMarkdownFiles, loadDocument } from "./loader.js";
 import { emptyManifest, manifestIncompatible, readManifest, writeManifest, type Manifest, type ManifestEntry } from "./manifest.js";
 import { RateTracker, type IngestProgress } from "./progress.js";
 
+/**
+ * Bump when the loader or the chunker changes what a document becomes (see Manifest.pipeline).
+ *   1  until 2026-10-12
+ *   2  API definitions as one section per operation/component, credentials redacted, project-card wiki
+ *      snippets trimmed, underscores kept in headings, ADR status deciding `binding`, spec/card language
+ */
+export const INGEST_PIPELINE_VERSION = 2;
+
 export interface IngestOptions {
   kbDir?: string;
   /** Drop the existing index and rebuild everything. */
@@ -99,8 +107,11 @@ export async function ingest(opts: IngestOptions = {}): Promise<IngestReport> {
   }
   if (!manifest) {
     if (!opts.dryRun) await store.reset();
-    manifest = emptyManifest(wanted);
+    manifest = { ...emptyManifest(wanted), pipeline: INGEST_PIPELINE_VERSION };
   }
+  // A loader or chunker change does not touch the kb files, so the byte hash alone would never pick it up.
+  const recheck = manifest.pipeline !== INGEST_PIPELINE_VERSION;
+  if (recheck) log(`Ingest pipeline v${manifest.pipeline ?? 1} -> v${INGEST_PIPELINE_VERSION}: re-checking every document (stored vectors are reused where the chunk text is unchanged)`);
 
   // 1. Discover files and decide what changed.
   let files = await listMarkdownFiles(kbDir);
@@ -123,7 +134,7 @@ export async function ingest(opts: IngestOptions = {}): Promise<IngestReport> {
     }
     seenSourceIds.add(doc.meta.sourceId);
     const prev = manifest.docs[doc.meta.sourceId];
-    if (prev && prev.contentHash === doc.meta.contentHash) {
+    if (prev && prev.contentHash === doc.meta.contentHash && !recheck) {
       unchanged++;
       // Manifests written before embedHash existed get it filled in from the very file they describe:
       // the bytes match, so this is exactly what was indexed.
@@ -367,6 +378,8 @@ export async function ingest(opts: IngestOptions = {}): Promise<IngestReport> {
   }
   const bm25 = Bm25Index.build(bm25Docs);
   await bm25.save(paths.bm25Index);
+  // Only a full pass may claim the whole index is on this pipeline; `--only` touched a subset.
+  if (!opts.only) manifest.pipeline = INGEST_PIPELINE_VERSION;
   await writeManifest(paths.manifest, manifest);
   log(`Keyword index rebuilt over ${bm25.size} chunks`);
 

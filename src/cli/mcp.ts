@@ -1,6 +1,6 @@
 /**
  * `npm run mcp` — the knowledge base as an MCP server on stdio, for Claude Code / Claude Desktop.
- * Retrieval only: search, fetch_document, related (see src/mcp/tools.ts).
+ * Retrieval — search, fetch_document, related — plus report, for the maintainers (see src/mcp/tools.ts).
  *
  * Two things have to happen before anything imports the config, which is why this entry point is
  * separate and the real server is imported dynamically (static imports are hoisted above all
@@ -22,7 +22,8 @@ if (process.argv.includes("--help") || process.argv.includes("-h")) {
   process.stdout.write(
     `Usage: npm run mcp\n\n` +
       `Speaks the Model Context Protocol on stdin/stdout, exposing the knowledge base as three\n` +
-      `read-only tools: search, fetch_document, related. Meant to be spawned by an MCP client:\n\n` +
+      `read-only tools — search, fetch_document, related — and report, which files a note for the\n` +
+      `maintainers in data/feedback/. Meant to be spawned by an MCP client:\n\n` +
       `  claude mcp add ai-wiki --scope user -- ${root}/node_modules/.bin/tsx ${root}/src/cli/mcp.ts\n\n` +
       `Needs the index (\`npm run ingest\`) and, for query embeddings, Ollama running.\n`,
   );

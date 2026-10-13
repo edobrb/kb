@@ -2,6 +2,11 @@ import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import YAML from "yaml";
+import { headingText } from "../markdown.js";
+import { redact } from "../secrets.js";
+import { effectiveAuthority } from "./adr-status.js";
+import { detectLang } from "../sync/lang.js";
+import { renderApiSpec } from "./api-spec.js";
 import { DOC_KINDS, type Authority, type DocKind, type DocMeta, type Document } from "../types.js";
 
 const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
@@ -51,7 +56,7 @@ function normalizeKind(v: unknown): DocKind {
 /** Derive a title from the first markdown H1, else from the filename. */
 function fallbackTitle(body: string, relPath: string): string {
   const h1 = /^#\s+(.+)$/m.exec(body);
-  if (h1?.[1]) return h1[1].replace(/[*_`]/g, "").trim();
+  if (h1?.[1]) return headingText(h1[1]);
   return path.basename(relPath, path.extname(relPath)).replace(/[-_]+/g, " ");
 }
 
@@ -64,6 +69,42 @@ function fallbackTitle(body: string, relPath: string): string {
 function embeddingHash(kind: DocKind, title: string, fm: Record<string, unknown>, body: string): string {
   const parts = [kind, title, asString(fm["breadcrumb"]) ?? "", asString(fm["project"]) ?? "", cleanBody(body, kind)];
   return `sha256:${createHash("sha256").update(parts.join("\n\u0000")).digest("hex")}`;
+}
+
+/**
+ * A project card lists the wiki pages a full-text search found for the project name, each with a
+ * 400-character snippet. Those snippets are mostly about something else (the onboarding orchestrator's
+ * card quoted "Visto di conformità" requirements), and as card text they made unrelated cards match
+ * fiscal questions and decided the card's language. The link and title stay; the snippet goes.
+ */
+export function trimCardWikiSnippets(body: string): string {
+  const start = body.search(/^## Related Confluence pages\s*$/m);
+  if (start < 0) return body;
+  const lineEnd = body.indexOf("\n", start);
+  const from = lineEnd < 0 ? body.length : lineEnd + 1;
+  const nextHeading = body.slice(from).search(/^#{1,2} /m);
+  const end = nextHeading < 0 ? body.length : from + nextHeading;
+  const section = body
+    .slice(start, end)
+    .replace(/^(- \[[^\]]*\]\([^)\s]*\)(?: \([^)]*\))?):\s.*$/gm, "$1");
+  return body.slice(0, start) + section + body.slice(end);
+}
+
+/** A card's language from its own text (README, summary), not from the wiki snippets sync put on it. */
+function cardLang(kind: DocKind, body: string): string | null {
+  if (kind !== "project") return null;
+  const lang = detectLang(trimCardWikiSnippets(body.replace(/\r\n/g, "\n")));
+  return lang === "und" ? null : lang;
+}
+
+/**
+ * Sync tags an API definition by its one-line catalog description, so an all-Italian spec with an
+ * English blurb (or none) came out "en". The summaries and descriptions inside the spec decide instead.
+ */
+function specLang(kind: DocKind, body: string): string | null {
+  if (kind !== "api") return null;
+  const lang = renderApiSpec(body.replace(/\r\n/g, "\n"))?.lang;
+  return lang && lang !== "und" ? lang : null;
 }
 
 export function buildDocMeta(fm: Record<string, unknown>, body: string, relPath: string, raw: string): DocMeta {
@@ -83,8 +124,9 @@ export function buildDocMeta(fm: Record<string, unknown>, body: string, relPath:
     kind,
     title,
     sourceUrl: asString(fm["source_url"]),
-    authority: normalizeAuthority(fm["authority"]),
-    lang: asString(fm["lang"]) ?? "und",
+    // Sync says binding by location; a deprecated, proposed or template ADR is not (src/ingest/adr-status.ts).
+    authority: effectiveAuthority(normalizeAuthority(fm["authority"]), body, fm["status"]),
+    lang: specLang(kind, body) ?? cardLang(kind, body) ?? asString(fm["lang"]) ?? "und",
     // Not fetched_at: that is when sync ran, and it would pass for an edit date in search results and date filters.
     lastModified: asString(fm["last_modified"]),
     contentHash,
@@ -120,14 +162,21 @@ export async function loadDocument(kbDir: string, relPath: string): Promise<Docu
  * Remove noise that hurts embeddings but carries no meaning for readers. Source files are left alone
  * (an HTML comment or a run of blank lines is content there); prose gets HTML comments stripped and the
  * `\_` escapes that some exporters put in tables undone, so `subject_token` is one BM25 token everywhere.
+ * An API definition is rewritten as one section per operation and component (src/ingest/api-spec.ts).
+ * Credentials a page publishes by mistake are replaced in every kind (see src/secrets.ts): this is the
+ * body both the index and fetch_document read.
  */
 export function cleanBody(body: string, kind: DocKind = "doc"): string {
-  const unix = body.replace(/\r\n/g, "\n");
-  if (kind === "code") return unix.replace(/\n+$/, "").trim();
-  return unix
-    .replace(/<!--[\s\S]*?-->/g, "") // html comments (confluence-page-id etc.)
-    .replace(/\\_/g, "_")
-    .replace(/[ \t]+$/gm, "")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
+  let unix = body.replace(/\r\n/g, "\n");
+  if (kind === "code") return redact(unix.replace(/\n+$/, "").trim());
+  if (kind === "api") unix = renderApiSpec(unix)?.body ?? unix;
+  if (kind === "project") unix = trimCardWikiSnippets(unix);
+  return redact(
+    unix
+      .replace(/<!--[\s\S]*?-->/g, "") // html comments (confluence-page-id etc.)
+      .replace(/\\_/g, "_")
+      .replace(/[ \t]+$/gm, "")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim(),
+  );
 }

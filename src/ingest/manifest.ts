@@ -20,6 +20,11 @@ export interface Manifest {
   embeddingModel: string;
   embeddingDimensions: number;
   chunking: { targetTokens: number; maxTokens: number; overlapTokens: number; code?: { targetTokens: number; maxTokens: number } };
+  /**
+   * INGEST_PIPELINE_VERSION the documents were loaded and chunked with. A different (or missing) value makes
+   * the next ingest re-check every document, reusing the stored vectors wherever the chunk text is unchanged.
+   */
+  pipeline?: number;
   docs: Record<string, ManifestEntry>;
 }
 

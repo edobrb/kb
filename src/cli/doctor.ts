@@ -1,4 +1,5 @@
-import { stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
+import path from "node:path";
 import { totalmem } from "node:os";
 import { config, paths } from "../config.js";
 import { KbGraph } from "../graph/index.js";
@@ -9,6 +10,7 @@ import { Retriever } from "../retrieval/retriever.js";
 import { builtinDefinitions, builtinEnrichers } from "../sync/index.js";
 import { loadTaxonomy } from "../citymap.js";
 import { loadSourcesConfig } from "../sync/sources-config.js";
+import { desktopConfigPath } from "../mcp/desktop-config.js";
 import { readState } from "../sync/state.js";
 
 /** Checks the environment: Ollama reachable, models pulled, kb folder present, index state. */
@@ -193,6 +195,65 @@ if (!manifest) {
   } catch (err) {
     bad(`cannot open index: ${(err as Error).message}`);
     failures++;
+  }
+}
+
+// ---- MCP registrations ------------------------------------------------------------------------
+// The same server registered twice under one name (Claude Desktop's config via `npm run mcp:install`,
+// plus this repo's .mcp.json or a `claude mcp add`) gives a client two processes: on 2026-10-12 the read
+// tools went to one (started with an older .env) and `report` to the other, so events.jsonl held no
+// search at all and reports could not be joined with the searches behind them.
+console.log(`\nMCP registrations`);
+{
+  const home = process.env["HOME"] ?? process.env["USERPROFILE"] ?? "";
+  const repo = process.cwd();
+  // Claude Code merges its own scopes by name (local > project > user), so ".mcp.json" and a user-scope
+  // entry both called "ai-wiki" are one server. Claude Desktop's config is a separate registration that the
+  // app also brings into its Code tab: that one does duplicate.
+  const desktopNames: string[] = [];
+  const codeNames = new Set<string>();
+  const found: string[] = [];
+  const readJson = async (file: string): Promise<Record<string, unknown> | null> => {
+    try {
+      return JSON.parse(await readFile(file, "utf8")) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  };
+  const servers = (v: unknown): Record<string, unknown> =>
+    v && typeof v === "object" && "mcpServers" in v ? ((v as { mcpServers?: Record<string, unknown> }).mcpServers ?? {}) : {};
+  const mentionsRepo = (entry: unknown) => JSON.stringify(entry ?? "").includes("src/cli/mcp.ts");
+  const desktop = await readJson(desktopConfigPath());
+  for (const [name, e] of Object.entries(servers(desktop))) {
+    if (!mentionsRepo(e)) continue;
+    desktopNames.push(name);
+    found.push(`Claude Desktop config (${desktopConfigPath()}) as "${name}"`);
+  }
+  const project = await readJson(path.join(repo, ".mcp.json"));
+  const user = await readJson(path.join(home, ".claude.json"));
+  const projects = (user?.["projects"] ?? {}) as Record<string, unknown>;
+  for (const [label, cfg] of [
+    [".mcp.json (project scope)", project],
+    ["~/.claude.json (user scope)", user],
+    ["~/.claude.json (local scope, this repo)", projects[repo]],
+  ] as const) {
+    for (const [name, e] of Object.entries(servers(cfg))) {
+      if (!mentionsRepo(e)) continue;
+      codeNames.add(name);
+      found.push(`${label} as "${name}"`);
+    }
+  }
+  if (!found.length) console.log(`  none found (npm run mcp:install, or claude mcp add — README §8)`);
+  for (const f of found) console.log(`  · ${f}`);
+  const servedTwice = (desktopNames.length && codeNames.size) || codeNames.size > 1 || desktopNames.length > 1;
+  if (servedTwice) {
+    warn(
+      `ai-wiki is registered as more than one server (${[...desktopNames.map((n) => `desktop "${n}"`), ...[...codeNames].map((n) => `Claude Code "${n}"`)].join(", ")}). ` +
+        `A client that loads both runs two processes — Claude Desktop's Code tab loads its own config and Claude Code's — ` +
+        `so tool calls can split between them. Keep the Claude Code one (.mcp.json) for coding, and restart the client after changing .env.`,
+    );
+  } else if (found.length) {
+    ok(`one server per client${codeNames.size && found.length > 1 ? " (Claude Code merges its scopes by name)" : ""}`);
   }
 }
 

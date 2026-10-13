@@ -113,7 +113,7 @@ export const DEFAULT_SOURCES: SourcesConfig = {
   devportal: {
     enabled: true,
     include_api_definitions: true,
-    max_definition_chars: 60_000,
+    max_definition_chars: 3_000_000,
     exclude_entities: [],
     exclude_pages: [],
     min_body_chars: 40,

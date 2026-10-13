@@ -1,3 +1,4 @@
+import { headingText } from "../markdown.js";
 import { declaredSymbols, isDeclarationStart } from "../sync/code.js";
 import type { Chunk, Document } from "../types.js";
 
@@ -82,7 +83,7 @@ export function parseBlocks(markdown: string): Block[] {
     if (h) {
       flushPara();
       const level = (h[1] as string).length;
-      const text = (h[2] as string).replace(/[*_`]/g, "").trim();
+      const text = headingText(h[2] as string);
       while (headingStack.length && (headingStack.at(-1) as { level: number }).level >= level) headingStack.pop();
       if (text) headingStack.push({ level, text });
       blocks.push({ kind: "heading", text: line.trim(), level, path: currentPath() });

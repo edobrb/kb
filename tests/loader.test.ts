@@ -16,10 +16,31 @@ translated_from: {path: "raw/x.md", version_hash: "sha256:1"}
 
 # ADR0010 Client Credentials
 
+### Status
+
+Accepted.
+
 Body text.
 `;
 
 describe("parseFrontmatter + buildDocMeta", () => {
+  it("keeps binding only for a decision in force", () => {
+    const meta = (status: string) => {
+      const raw = sample.replace("Accepted.", status);
+      const { frontmatter, body } = parseFrontmatter(raw);
+      return buildDocMeta(frontmatter, body, "adr/file.md", raw).authority;
+    };
+    expect(meta("Accepted.")).toBe("binding");
+    expect(meta("Deprecated — as of 2025-05-21. See ADR0010.")).toBe("descriptive");
+    expect(meta("Outdated - as of 2025-02-08 see ADR0011")).toBe("descriptive");
+    expect(meta("Proposed (2026-01-23) — open to discussion")).toBe("descriptive");
+    expect(meta("What is the status, such as proposed, accepted, rejected, deprecated, superseded, etc.?")).toBe("descriptive");
+    // Not a decision record at all: a task checklist that lives in an adr/ folder.
+    const task = sample.replace(/### Status[\s\S]*$/, "- [ ] Task 006: add indexes\n- [x] Task 005\n");
+    const { frontmatter, body } = parseFrontmatter(task);
+    expect(buildDocMeta(frontmatter, body, "adr/file.md", task).authority).toBe("descriptive");
+  });
+
   it("reads the kb frontmatter fields", () => {
     const { frontmatter, body } = parseFrontmatter(sample);
     const meta = buildDocMeta(frontmatter, body, "adr/file.md", sample);
@@ -56,5 +77,35 @@ describe("parseFrontmatter + buildDocMeta", () => {
     const { frontmatter, body } = parseFrontmatter(raw);
     expect(body).toBe("body");
     expect(frontmatter["source_id"]).toBe("x:y");
+  });
+});
+
+describe("trimCardWikiSnippets", () => {
+  it("keeps a card's wiki links and titles, not the snippets that came with them", async () => {
+    const { trimCardWikiSnippets } = await import("../src/ingest/loader.js");
+    const card = [
+      "# oneplatform/onboarding",
+      "",
+      "## README",
+      "",
+      "Provisions workspaces.",
+      "",
+      "## Related Confluence pages",
+      "",
+      "Pages found by searching the wiki for the project name; some may be only loosely related.",
+      "",
+      "- [Visto di conformità - Raccolta requisiti](https://example.atlassian.net/wiki/spaces/T/pages/1/Visto) (TS OnePlatform, updated 2026-04-08): 1. Obiettivi e Requisiti Generali, il visto è un'attestazione…",
+      "- [Fiscal Orchestrator Bulk Actions - (AI)](https://example.atlassian.net/wiki/spaces/T/pages/2/Bulk): Validato 1. Introduction…",
+      "",
+      "## Languages",
+      "",
+      "TypeScript",
+    ].join("\n");
+    const out = trimCardWikiSnippets(card);
+    expect(out).toContain("- [Visto di conformità - Raccolta requisiti](https://example.atlassian.net/wiki/spaces/T/pages/1/Visto) (TS OnePlatform, updated 2026-04-08)\n");
+    expect(out).toContain("- [Fiscal Orchestrator Bulk Actions - (AI)](https://example.atlassian.net/wiki/spaces/T/pages/2/Bulk)\n");
+    expect(out).not.toContain("Obiettivi");
+    expect(out).toContain("## Languages\n\nTypeScript");
+    expect(out).toContain("Provisions workspaces.");
   });
 });

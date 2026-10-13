@@ -30,6 +30,7 @@ function oneOf<T extends string>(name: string, allowed: readonly T[], fallback: 
 }
 
 const root = process.cwd();
+const dataDir = path.resolve(root, str("DATA_DIR", "./data"));
 
 // Base effort knobs, read once: the "extended research" defaults are multiples of them, so raising
 // TOOL_MAX_ROUNDS / TOOL_CHAR_BUDGET / RETRIEVAL_TOP_K lifts research mode with them.
@@ -39,7 +40,7 @@ const retrievalTopK = num("RETRIEVAL_TOP_K", 6);
 
 export const config = {
   kbDir: path.resolve(root, str("KB_DIR", "./kb")),
-  dataDir: path.resolve(root, str("DATA_DIR", "./data")),
+  dataDir,
 
   ollama: {
     host: str("OLLAMA_HOST", "http://127.0.0.1:11434").replace(/\/$/, ""),
@@ -145,6 +146,17 @@ export const config = {
     vectorWeight: num("RETRIEVAL_VECTOR_WEIGHT", 1.0),
     bm25Weight: num("RETRIEVAL_BM25_WEIGHT", 1.0),
     maxChunksPerDoc: num("RETRIEVAL_MAX_CHUNKS_PER_DOC", 3),
+    /**
+     * Reciprocal Rank Fusion constant: score = weight / (k + rank). With the textbook 60, any passage both rankers
+     * returned outranked the top hit of one — which is how a cross-language page that the vectors put first
+     * (BM25 cannot match Italian against English) ended up last. Eval 2026-10-12, top 8: MRR 0.619 → 0.632,
+     * same-language 0.932 → 0.941, cross-language 0.667 → 0.698, no case lost.
+     */
+    rrfK: num("RETRIEVAL_RRF_K", 5),
+    /** Multiply the fused score of binding (×1.15) and normative (×1.12) passages. */
+    authorityBoost: bool("RETRIEVAL_AUTHORITY_BOOST", true),
+    /** Drop a passage that repeats a better-ranked one from another document (README vs project card, mirrors). */
+    dedupe: bool("RETRIEVAL_DEDUPE", true),
     rerank: oneOf("RERANK", ["none", "llm"] as const, "none"),
     /** Rewrite follow-up questions into standalone search queries using the chat history. */
     queryRewrite: bool("QUERY_REWRITE", true),
@@ -186,6 +198,27 @@ export const config = {
     docMaxChars: num("MCP_DOC_MAX_CHARS", 40000),
     /** Documents one `related` call lists by default. */
     relatedLimit: num("MCP_RELATED_LIMIT", 20),
+    /**
+     * Below this cosine similarity of the best passage, `search` says the match is weak. Measured on the
+     * eval set (2026-10-12, qwen3-embedding:8b): questions the KB answers score a median 0.78 (p10 0.71);
+     * the ones it cannot, 0.66. 0.65 flags 8 of 20 of those and 4 % of answered ones, hence a hint, not a verdict.
+     */
+    weakMatchSimilarity: num("MCP_WEAK_MATCH_SIMILARITY", 0.65),
+  },
+
+  /**
+   * What agents leave behind for the maintainers (src/feedback): every MCP tool call as an event,
+   * and the notes agents file with the MCP `report` tool. Two
+   * append-only JSONL files that nothing indexes — a person reviews them before anything reaches the
+   * knowledge base. Kept apart from DATA_DIR's index files so a rebuild never touches them, and
+   * movable with FEEDBACK_DIR (a shared folder, say, to collect from more than one machine).
+   */
+  feedback: {
+    dir: path.resolve(root, str("FEEDBACK_DIR", path.join(dataDir, "feedback"))),
+    /** Log MCP tool calls to events.jsonl. */
+    events: bool("FEEDBACK_EVENTS", true),
+    /** Offer the MCP `report` tool, which appends to reports.jsonl. */
+    reportTool: bool("MCP_REPORT_TOOL", true),
   },
 
   /** `Export .zip`: one answer packaged with the full text of its sources (see src/server/bundle.ts). */
@@ -241,4 +274,10 @@ export const paths = {
   graph: path.join(config.dataDir, "graph.json.gz"),
   /** Per-source sync state (data/sync/<source>.json). */
   syncState: path.join(config.dataDir, "sync"),
+  /** Notes agents filed with the MCP `report` tool, one JSON object per line. */
+  feedbackReports: path.join(config.feedback.dir, "reports.jsonl"),
+  /** MCP tool calls, one JSON object per line. */
+  feedbackEvents: path.join(config.feedback.dir, "events.jsonl"),
+  /** Credentials found in kb/ by `npm run secrets`, for the owners who have to rotate them. */
+  secretsReport: path.join(config.feedback.dir, "secrets.json"),
 };
