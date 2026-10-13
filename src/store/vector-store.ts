@@ -68,7 +68,12 @@ export function buildWhere(filters?: RetrievalFilters): string | undefined {
   if (filters.langs?.length) clauses.push(`lang IN (${filters.langs.map(sqlString).join(", ")})`);
   // ISO dates compare as strings, and a prefix bound works too: "2026-06-30" < "2026-07" <= "2026-07-01".
   // An undated row is "" and would pass every `<`, so a date bound excludes it explicitly.
-  if (filters.modifiedAfter || filters.modifiedBefore) clauses.push("last_modified <> ''");
+  if (filters.modifiedAfter || filters.modifiedBefore) {
+    clauses.push("last_modified <> ''");
+    // A Dev Portal TechDocs page carries the docs site's build date, not an edit date: every rebuild makes
+    // a years-old page "recent", which buried the pages that actually changed under a date filter.
+    clauses.push("NOT (source_type = 'devportal' AND kind = 'doc')");
+  }
   if (filters.modifiedAfter) clauses.push(`last_modified >= ${sqlString(filters.modifiedAfter)}`);
   if (filters.modifiedBefore) clauses.push(`last_modified < ${sqlString(filters.modifiedBefore)}`);
   // strpos, not LIKE: `_` and `%` are common in identifiers and would be wildcards there.

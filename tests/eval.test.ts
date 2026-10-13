@@ -115,6 +115,7 @@ describe("looksLikeAbstention", () => {
       "Based on the CONTEXT provided, there is no mention of an official Flutter SDK.",
       "I don't find a Zendesk integration for the ticket routing service in the provided context.",
       "La knowledge base non copre questo aspetto.",
+      "La mia knowledge base non contiene informazioni sui tuoi giorni di ferie personali.",
       "Non trovo alcun riferimento a questo servizio nel contesto.",
       "Non posso rispondere a questa domanda con i contenuti della knowledge base.",
       "Non riesco a rispondere a questa domanda con il materiale disponibile.",

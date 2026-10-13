@@ -330,20 +330,33 @@ been built.
 ### MCP: the knowledge base as tools for Claude / Claude Code (`npm run mcp`)
 
 `npm run mcp` speaks the [Model Context Protocol](https://modelcontextprotocol.io) over stdin/stdout and exposes the
-**retrieval layer only** — three read-only tools, no generation:
+**retrieval layer only** — three read-only tools and `report`, no generation:
 
 | Tool | Arguments | Returns |
 |---|---|---|
 | `search` | `query`, `top_k` (≤ `MCP_MAX_TOP_K`), `source_type` / `kind` / `authority` / `lang`, `contains` (exact text, case-insensitive), `modified_after` / `modified_before` (`2026`, `2026-06` or `2026-06-15`; after inclusive, before exclusive) | the fused passages (§ [7.6](#76-hybrid-retrieval-srcretrievalretrieverts)), each with its `source_id`, `source_type`/`kind`/`authority`/`lang`, `last_modified`, score and rank in each retriever, deep link and text |
-| `fetch_document` | `source_id`, `section`, `max_chars` | the whole kb page, or one section, with its metadata and heading outline (§ [7.7](#77-tools-search-again-read-whole-documents-srcgenerationtoolsts-srcretrievaldocumentsts)) |
-| `related` | `source_id`, `scope` (`all` \| `links` \| `same_place`), `limit` | the connected documents as titles + ids, grouped by how they are connected (§ [7.9](#79-the-knowledge-graph-srcgraph-npm-run-graph)); neighbours that are linked but not indexed are marked as such |
+| `fetch_document` | `source_id` (or the page's Dev Portal / Confluence / GitLab URL), `section` (a heading, or a path `Parent > Child` when one repeats), `max_chars`, `offset` | the whole kb page, or one section, with its metadata and heading outline (§ [7.7](#77-tools-search-again-read-whole-documents-srcgenerationtoolsts-srcretrievaldocumentsts)); a truncated reply gives the `offset` to continue from, and says when the stored copy itself was cut at sync |
+| `related` | `source_id`, `scope` (`all` \| `links` \| `same_place`), `limit` | the connected documents as titles + ids, grouped by how they are connected (§ [7.9](#79-the-knowledge-graph-srcgraph-npm-run-graph)); neighbours that are linked but not indexed are marked as such, and so are the links the page makes to pages the index does not have. `all` fills up from large groups when links and small groups leave room, so it never lists less than `same_place` |
+| `report` | `kind` (`correction` \| `gap` \| `tip` \| `security` \| `indexing`), `note`, `question`, `source_ids`, `target`, `section`, `quote`, `fix`, `owner_decision`, `evidence`, `model` | the id of the note it appended to `data/feedback/reports.jsonl`, and the reports already filed on the same page — see *Feedback* below; off with `MCP_REPORT_TOOL=false` |
 
 `contains` and the date bounds are applied before ranking — a LanceDB predicate (`strpos`, so `_` and `%` are
 literal), and BM25 keeps to the ids that passed — so an empty result means no indexed passage qualifies, which
 is worth telling the user, not a ranking miss. `last_modified` is the page's own last edit for Confluence, GitLab
 docs and ADRs; a Dev Portal page carries its TechDocs build date and a project card or GitLab API definition the
-repository's latest commit (each result says which), and Dev Portal API definitions have none, so a date bound
-leaves them out.
+repository's latest commit (each result says which), and Dev Portal API definitions have none. A date bound leaves
+out the undated documents and the Dev Portal pages too: a rebuild makes every page of an entity "recent", which
+buried the pages that had actually changed. An unknown `source_type`, `kind` or `lang` value is an error that lists
+the values the index has, rather than an empty result.
+
+Two things the server does to what it serves. **Credentials** a page publishes by mistake (SonarQube, npm and
+GitLab tokens, JWTs, signed webhook URLs, `client_secret: …` with a real-looking value) are replaced with
+`[REDACTED:<rule>]` at ingest and again on every retrieved passage (`src/secrets.ts`); `npm run secrets` lists the
+pages and writes `data/feedback/secrets.json`, the list to send to their owners, who still have to rotate the
+credential upstream. **API definitions** are rewritten at ingest as one section per operation (`GET /items —
+summary`) and per schema, each with that part of the definition as YAML (`src/ingest/api-spec.ts`), so a passage
+says which operation it belongs to and `fetch_document` can return one; a definition sync cut is repaired and
+says so. Near-identical passages from different documents (a README and its project card, a TechDocs page and its
+GitLab source) are reduced to the better-ranked one, which lists the others as `same text also in:`.
 
 Nothing under `src/mcp/` calls a chat model: the client *is* the model, so `CHAT_MODEL`, the system prompt, the tool
 loop and the citation numbering all stay out of it — the client cites the `source_id`s and URLs itself. The only
@@ -358,7 +371,7 @@ claude mcp list          # ai-wiki: ✓ connected
 
 `--scope user` registers it for every project on the machine, which is the point — the knowledge base is most useful
 from the repository you are actually working in. Inside `ai-wiki/` itself nothing needs registering: the checked-in
-`.mcp.json` does it. Then `/mcp` in a session lists the three tools, and "search the knowledge base for …" uses them.
+`.mcp.json` does it. Then `/mcp` in a session lists the four tools, and "search the knowledge base for …" uses them.
 
 **Claude Desktop** — `npm run mcp:install`:
 
@@ -412,6 +425,38 @@ Three details that make it work from anywhere:
 Budgets are deliberately larger than the local model's (`MCP_SEARCH_TOP_K`, `MCP_MAX_TOP_K`, `MCP_SEARCH_MAX_CHARS`,
 `MCP_DOC_MAX_CHARS`, `MCP_RELATED_LIMIT` — see § [8](#8-configuration)): the client's context window is not ours to
 fit, and a truncated passage only costs it another round-trip.
+
+#### Feedback: what agents leave for the maintainers (`src/feedback/`)
+
+Two append-only JSONL files under `data/feedback/` (`FEEDBACK_DIR`). **Neither is indexed or returned by any tool.**
+An agent's conclusion is unverified, and a note served as a search result would be cited like an ADR, so a person
+reviews them and decides what, if anything, goes into which document.
+
+* **`events.jsonl`** — signals nobody has to write (`FEEDBACK_EVENTS`). Every MCP tool call, with its `session` (one
+  per server process, i.e. per client connection), `seq`, `client`, arguments, duration and what came back (the
+  ranked `hits` of a search, the document a fetch resolved to, an error). Empty searches and rewordings within one
+  session are where the gaps are. The web UI and `/api/ask` are not logged.
+* **`reports.jsonl`** — notes an agent files with `report`: a `correction` (a document is wrong or outdated), a
+  `gap` (something it should cover and does not), a `tip` (a non-obvious way to find something), `security` (a page
+  publishes a credential or personal data — review these first) or `indexing` (the knowledge base's own copy is
+  broken: cut, garbled, mislabelled, a linked page missing — the fix is in sync or ingest, not upstream). The
+  optional `target` (the one page to change, apart from the evidence), `section`, `quote` (the wrong words), `fix`
+  (the proposed wording) and `owner_decision` (only the owning team can say which side is right) are what a
+  review needs most; the reply lists reports already filed on the same page, so a second agent need not repeat
+  one. Each records
+  `id`, `ts`, `status: "new"`, the `note`, the `question` it was working on, optional `evidence`, the declared
+  `model` (MCP does not tell a server which model calls), `session` and `client`, and its `sources` — every
+  `source_id` resolved and pinned to the `content_hash` / `embed_hash` that were indexed at the time, so a review can
+  tell whether the page has changed since, plus a `kb_hash` when the kb file on disk is already newer than the
+  index (search showed the old text, fetch_document the new). A report other than a gap without a `source_id`, or
+  with one that is not in the index, is refused with the reason; a gap may have none.
+
+```bash
+jq -c 'select(.event=="search" and .result.returned==0) | .args' data/feedback/events.jsonl   # empty searches
+jq -c 'select(.status=="new") | {kind, note, sources: [.sources[].source_id]}' data/feedback/reports.jsonl
+```
+
+`report` is the only tool not annotated `readOnlyHint`: it writes, though only to `reports.jsonl`.
 
 ## 6. Web UI
 
@@ -694,7 +739,7 @@ Documents are embedded in batches of about `INGEST_BATCH_CHUNKS` chunks (`EMBED_
 ### 7.6 Hybrid retrieval (`src/retrieval/retriever.ts`)
 
 1. Vector search and BM25 each return `RETRIEVAL_CANDIDATES` (24) chunks.
-2. **Reciprocal Rank Fusion** merges the two lists: `score = Σ weight / (60 + rank)`. RRF needs no score
+2. **Reciprocal Rank Fusion** merges the two lists: `score = Σ weight / (k + rank)`, `k` = `RETRIEVAL_RRF_K` (5). RRF needs no score
    calibration between the two systems and is robust in practice.
 3. Multiply by the authority boost; cap at `RETRIEVAL_MAX_CHUNKS_PER_DOC` (3) chunks per document so one long
    page cannot fill the whole context.
@@ -859,6 +904,9 @@ Everything is an environment variable (`.env`, see `.env.example` for the full a
 | `RETRIEVAL_CANDIDATES` / `RETRIEVAL_TOP_K` | `24` / `6` | Candidates per retriever before fusion / chunks sent to the LLM |
 | `RETRIEVAL_VECTOR_WEIGHT` / `RETRIEVAL_BM25_WEIGHT` | `1.0` / `1.0` | RRF weights |
 | `RETRIEVAL_MAX_CHUNKS_PER_DOC` | `3` | Diversity cap |
+| `RETRIEVAL_RRF_K` | `5` | Reciprocal Rank Fusion constant, `weight / (k + rank)`. The textbook 60 let any passage both retrievers found outrank the top hit of one, which buried cross-language matches; 5 raised cross-language MRR 0.667 → 0.698 with same-language unchanged or better (eval 2026-10-12) |
+| `RETRIEVAL_AUTHORITY_BOOST` | `true` | Multiply binding (×1.15) and normative (×1.12) passages; binding is kept only for ADRs in force (`src/ingest/adr-status.ts`) |
+| `RETRIEVAL_DEDUPE` | `true` | Drop a passage that repeats a better-ranked one from another document |
 | `RERANK` | `none` | `llm` for the LLM rerank stage |
 | `QUERY_REWRITE` | `true` | Rewrite follow-ups into standalone queries (only when the turn retrieves) |
 | `FOLLOWUP_SEARCH` | `false` | `true` retrieves on every turn; by default a follow-up continues on the blocks the chat already gathered |
@@ -876,6 +924,9 @@ Everything is an environment variable (`.env`, see `.env.example` for the full a
 | `MCP_SEARCH_TOP_K` / `MCP_MAX_TOP_K` | `8` / `25` | `npm run mcp`: passages one `search` returns, and the ceiling a client may ask for |
 | `MCP_SEARCH_MAX_CHARS` / `MCP_DOC_MAX_CHARS` | `60000` / `40000` | Size of one `search` / `fetch_document` result (the MCP client's window, not ours) |
 | `MCP_RELATED_LIMIT` | `20` | Documents one `related` call lists |
+| `MCP_REPORT_TOOL` | `true` | Offer the MCP `report` tool (notes for the maintainers, appended to `reports.jsonl`) |
+| `FEEDBACK_EVENTS` | `true` | Log every MCP tool call to `events.jsonl` |
+| `FEEDBACK_DIR` | `<DATA_DIR>/feedback` | Where `events.jsonl` and `reports.jsonl` live — a shared folder collects them from several machines |
 | `BUNDLE_MAX_CHARS` / `BUNDLE_MAX_DOCS` | `200000` / `100` | `Export .zip`: characters per document and documents per bundle (no model reads these, so they are generous) |
 | `EMBEDDING_PROVIDER` / `CHAT_PROVIDER` | `ollama` | `mock` runs the whole pipeline without Ollama (tests/CI) |
 | `SOURCES_FILE` | `./sources.yaml` | Scope, filters and rules for `npm run sync` |
@@ -1097,9 +1148,10 @@ ai-wiki/
 │   │   ├── tools.ts             search · fetch_document · related (schemas, dedup, formatting)
 │   │   └── ask.ts               the streaming RAG loop shared by CLI and API
 │   ├── mcp/
-│   │   ├── tools.ts             the MCP tool set: search · fetch_document · related (schemas, formatting, budgets)
-│   │   ├── server.ts            MCP over stdio for Claude Code / Claude Desktop (retrieval only, no chat model)
+│   │   ├── tools.ts             the MCP tool set: search · fetch_document · related · report (schemas, formatting, budgets)
+│   │   ├── server.ts            MCP over stdio for Claude Code / Claude Desktop (no chat model); logs each call as an event
 │   │   └── desktop-config.ts    where Claude Desktop's config lives and how to merge our entry into it
+│   ├── feedback/index.ts        events.jsonl + reports.jsonl: MCP tool-call log, agent reports (never indexed)
 │   ├── cli/                     sync · ingest · ask · search · eval · doctor · map · graph · mcp · mcp:install
 │   └── server/
 │       ├── index.ts             Fastify: /api/ask (SSE), /api/ask/sync, /api/search, /api/document, /api/map, /api/graph, /api/ingest, …

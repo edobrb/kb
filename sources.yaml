@@ -11,7 +11,11 @@
 devportal:
   enabled: true
   include_api_definitions: true
-  max_definition_chars: 200000
+  # Ingest splits a definition into one section per operation and component (src/ingest/api-spec.ts), so a
+  # big spec no longer needs cutting; the cap only guards against a runaway document. The largest today
+  # (ts-bil-backend) is ~850k characters. Part of each definition's fingerprint: raising it rewrites the
+  # definitions it used to cut on the next sync.
+  max_definition_chars: 3000000
   exclude_entities: [] # "component/some-name" or "*/module/learning-*" (wildcards, case-insensitive)
   # Page globs on "<kind>/<name>/<page path>" that are generated API reference, not documentation:
   # thousands of Swagger model pages and Sphinx module dumps would otherwise be 70 % of the portal corpus.

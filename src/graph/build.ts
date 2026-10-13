@@ -27,7 +27,7 @@ export interface BuildGraphOptions {
 }
 
 /** Markdown links, skipping images (`![alt](src)`). */
-const LINK_RE = /(!?)\[[^\]]*\]\(\s*([^)\s]+)(?:\s+"[^"]*")?\s*\)/g;
+const LINK_RE = /(!?)\[([^\]]*)\]\(\s*([^)\s]+)(?:\s+"[^"]*")?\s*\)/g;
 /** Bare autolinks: `<https://…>`. */
 const AUTOLINK_RE = /<((?:https?):\/\/[^>\s]+)>/g;
 
@@ -95,7 +95,7 @@ export async function buildGraph(opts: BuildGraphOptions): Promise<KbGraphFile> 
    * a `parent_id` or a `confluence_pages` entry pointing at a page sync deliberately excluded is a
    * scope decision, not a docs bug, and would otherwise be most of the report.
    */
-  const drop = (reason: string, sourceId: string, href: string, where: "body" | "frontmatter" = "body"): void => {
+  const drop = (reason: string, sourceId: string, href: string, where: "body" | "frontmatter" = "body", text?: string): void => {
     if (where === "frontmatter") {
       scopeGaps[reason] = (scopeGaps[reason] ?? 0) + 1;
       return;
@@ -103,7 +103,7 @@ export async function buildGraph(opts: BuildGraphOptions): Promise<KbGraphFile> 
     unresolved[reason] = (unresolved[reason] ?? 0) + 1;
     if (!RESOLUTION_REASONS[reason]?.internal) return;
     brokenTotal++;
-    if (brokenLinks.length < maxBroken) brokenLinks.push({ from: sourceId, href, reason });
+    if (brokenLinks.length < maxBroken) brokenLinks.push({ from: sourceId, href, reason, ...(text ? { text } : {}) });
   };
 
   // Documents first, so every node index below `entries.length` is a document and the label of a
@@ -184,13 +184,17 @@ export async function buildGraph(opts: BuildGraphOptions): Promise<KbGraphFile> 
       }
 
       // ---- body: the links the document itself makes ------------------------------------------
-      const hrefs: string[] = [];
-      for (const m of doc.body.matchAll(LINK_RE)) if (!m[1] && m[2]) hrefs.push(m[2]);
-      for (const m of doc.body.matchAll(AUTOLINK_RE)) if (m[1]) hrefs.push(m[1]);
-      for (const href of hrefs) {
+      const hrefs: { href: string; text?: string }[] = [];
+      for (const m of doc.body.matchAll(LINK_RE)) {
+        if (m[1] || !m[3]) continue;
+        const text = (m[2] ?? "").replace(/[*_`]/g, "").trim();
+        hrefs.push({ href: m[3], ...(text ? { text } : {}) });
+      }
+      for (const m of doc.body.matchAll(AUTOLINK_RE)) if (m[1]) hrefs.push({ href: m[1] });
+      for (const { href, text } of hrefs) {
         const hit = resolver.resolve(href, self);
         if (isResolved(hit)) edge(selfIdx, node(hit.id, "doc", hit.id), "links_to");
-        else if (hit.reason !== "unparsable") drop(hit.reason, self, href);
+        else if (hit.reason !== "unparsable") drop(hit.reason, self, href, "body", text);
       }
 
       read++;

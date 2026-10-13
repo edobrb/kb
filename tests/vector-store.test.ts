@@ -51,18 +51,25 @@ describe("date and literal filters on a table", () => {
       row("june", "2026-06-01", "The ORDERxSERVICExURL typo is not the variable."),
       row("july", "2026-07-01", "GET /api/v1/orders returns 100% of the orders."),
       row("undated", "", "ORDER_SERVICE_URL again, with no date."),
+      { ...row("portal-build", "2026-10-09", "A Dev Portal page rebuilt yesterday, unchanged since 2024."), source_type: "devportal" },
+      { ...row("portal-api", "2026-10-09", "A Dev Portal API definition."), source_type: "devportal", kind: "api" },
     ]);
   });
   afterAll(() => rm(dir, { recursive: true, force: true }));
 
   it("treats a date prefix as the whole period, after inclusive and before exclusive", async () => {
-    expect(await ids({ modifiedAfter: "2026-06" })).toEqual(["july", "june"]);
+    expect(await ids({ modifiedAfter: "2026-06" })).toEqual(["july", "june", "portal-api"]);
     expect(await ids({ modifiedAfter: "2026-06", modifiedBefore: "2026-07" })).toEqual(["june"]);
     expect(await ids({ modifiedAfter: "2026-06-01", modifiedBefore: "2026-06-02" })).toEqual(["june"]);
   });
 
   it("leaves undated documents out of any date range", async () => {
-    expect(await ids({ modifiedBefore: "2027" })).toEqual(["july", "june", "may"]);
+    expect(await ids({ modifiedBefore: "2027" })).toEqual(["july", "june", "may", "portal-api"]);
+  });
+
+  it("does not take a Dev Portal page's docs-build date for an edit", async () => {
+    expect(await ids({ modifiedAfter: "2026-10" })).toEqual(["portal-api"]);
+    expect(await ids({ sourceTypes: ["devportal"] })).toEqual(["portal-api", "portal-build"]);
   });
 
   it("matches literal text case-insensitively, with _ and % as plain characters", async () => {

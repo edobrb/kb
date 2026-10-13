@@ -1,13 +1,16 @@
+import { randomUUID } from "node:crypto";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { config } from "../config.js";
+import { REPORT_KINDS, type AgentReport, type ReportKind, type ReportSource } from "../feedback/index.js";
 import { deepLink } from "../generation/prompt.js";
-import { DOC_RELATIONS, relationPhrase, type KbGraph, type Neighbor, type Relation } from "../graph/index.js";
-import { DocumentNotFoundError, type DocumentStore, type FetchedDocument } from "../retrieval/documents.js";
+import { DOC_RELATIONS, RESOLUTION_REASONS, relationPhrase, type KbGraph, type Neighbor, type Relation } from "../graph/index.js";
+import type { AdrStatusInfo } from "../ingest/adr-status.js";
+import { DocumentNotFoundError, isAdrLike, type DocumentStore, type FetchedDocument } from "../retrieval/documents.js";
 import type { RetrieveOptions } from "../retrieval/retriever.js";
 import type { Authority, RetrievalFilters, RetrievedChunk } from "../types.js";
 
 /**
- * The knowledge base as MCP tools: retrieval only.
+ * The knowledge base as MCP tools: retrieval, plus a way to tell the maintainers what was wrong.
  *
  * `npm run serve` answers questions with the local model; this exposes the layer *underneath* that
  * — hybrid search, whole documents, the knowledge graph — to an outside client (Claude Code, the
@@ -19,6 +22,9 @@ import type { Authority, RetrievalFilters, RetrievedChunk } from "../types.js";
  *  - `fetch_document(id)`    the whole kb page a passage came from, optionally one section.
  *  - `related(id)`           one hop in the knowledge graph: what links here, what this links to,
  *                            the rest of its repository / space / module. Titles and ids only.
+ *  - `report(kind, note)`    a note for the maintainers — a wrong or outdated document, a gap, a
+ *                            search tip — appended to data/feedback/reports.jsonl. Not indexed and
+ *                            never returned by search: a person reviews it first (see src/feedback).
  *
  * The budgets (see config.mcp) are deliberately larger than the local model's: the client's context
  * window is not ours to fit, and a truncated passage costs it a second round-trip.
@@ -26,6 +32,8 @@ import type { Authority, RetrievalFilters, RetrievedChunk } from "../types.js";
 
 export interface Searcher {
   retrieve(query: string, opts?: RetrieveOptions): Promise<RetrievedChunk[]>;
+  /** Values present in the index, to reject a filter value that can only match nothing. */
+  facets?(): Promise<{ sourceTypes: Record<string, number>; kinds: Record<string, number>; authorities: Record<string, number>; langs: Record<string, number> }>;
 }
 
 export interface McpContext {
@@ -33,12 +41,26 @@ export interface McpContext {
   store: DocumentStore;
   /** Loaded on first use; null when the graph has not been built, which disables `related`. */
   graph: () => Promise<KbGraph | null>;
+  /** Where `report` files its notes, and who is filing them. Absent when MCP_REPORT_TOOL is off. */
+  feedback?: FeedbackSink;
+}
+
+export interface FeedbackSink {
+  /** The server process taking the call: one per client session. */
+  session: string | null;
+  /** The client, "name/version" as it introduced itself. */
+  client: string | null;
+  append(report: AgentReport): Promise<void>;
+  /** Reports already filed, to point out one the new report repeats. */
+  existing?(): Promise<AgentReport[]>;
 }
 
 export interface McpToolResult {
   text: string;
   /** Reported to the client as `isError`, so the model sees the failure rather than a plain answer. */
   isError?: boolean;
+  /** What the call found, for the event log (data/feedback/events.jsonl); never shown to the client. */
+  trace?: Record<string, unknown>;
 }
 
 export type McpToolHandler = (args: Record<string, unknown>, ctx: McpContext) => Promise<McpToolResult>;
@@ -48,13 +70,15 @@ const FILTER_PROPERTIES = {
     type: "array",
     items: { type: "string" },
     description:
-      'Restrict to these source types, e.g. ["devportal"], ["gitlab"], ["adr"]. Omit to search everything (the usual choice).',
+      'Restrict to these source types: "devportal", "gitlab", "confluence", "adr" (the ADRs of oneplatform/adrs, ' +
+      'which are not under "gitlab"), "manually-curated". Omit to search everything (the usual choice).',
   },
   kind: {
     type: "array",
     items: { type: "string", enum: ["doc", "code", "project", "api"] },
     description:
-      'Restrict to these document kinds: "doc" prose documentation, "code" a source file, "project" a repository card, "api" an OpenAPI/AsyncAPI definition.',
+      'Restrict to these document kinds: "doc" prose documentation, "project" a repository card, "api" an OpenAPI/AsyncAPI/GraphQL ' +
+        'definition (one section per operation and schema), "code" a source file (only when source code is indexed, which it is not by default).',
   },
   authority: {
     type: "array",
@@ -73,7 +97,8 @@ const FILTER_PROPERTIES = {
     type: "string",
     description:
       'Only documents last modified on or after this date: "2026-06-15", "2026-06" or "2026". Documents without a ' +
-      "date are left out. Each result shows its last_modified and what that date is.",
+      "real edit date are left out: undated ones, and Dev Portal pages, whose date is the docs site's build. " +
+      "Each result shows its last_modified and what that date is.",
   },
   modified_before: {
     type: "string",
@@ -86,7 +111,7 @@ export const SEARCH_TOOL: Tool = {
   title: "Search the OnePlatform knowledge base",
   description:
     "Search the TeamSystem OnePlatform knowledge base: Developer Portal documentation and API definitions, the " +
-    "OnePlatform GitLab repositories (docs, project cards and source code), ADRs and hand-written references. " +
+    "OnePlatform GitLab repositories (docs, API specs and project cards; not source code), ADRs and hand-written references. " +
     "Hybrid retrieval — embeddings plus BM25 — over the indexed passages; questions in Italian and English both " +
     "match. Returns the most relevant passages with their source_id, metadata and deep link. Use it before " +
     "answering anything about internal TeamSystem services, repositories, endpoints, settings or conventions, and " +
@@ -122,7 +147,8 @@ export const FETCH_DOCUMENT_TOOL: Tool = {
     "Read a whole knowledge-base document by its source_id, as returned by search. Use it when a passage is clearly " +
     "the right page but is cut off, refers to a section you cannot see, or you need the exact list, table, code or " +
     "steps around it. Returns the document's markdown with its metadata and heading outline; a long document is " +
-    "truncated, so call again with `section` (a heading from the outline) to read further.",
+    "truncated, so call again with `section` (a heading from the outline) or with the `offset` the reply gives. " +
+    "An API definition comes as one section per operation (\"GET /items\") and per schema.",
   inputSchema: {
     type: "object",
     properties: {
@@ -135,12 +161,18 @@ export const FETCH_DOCUMENT_TOOL: Tool = {
       section: {
         type: "string",
         description:
-          'Optional heading to return instead of the whole document, matched loosely against its headings, e.g. "Retry policy".',
+          'Optional heading to return instead of the whole document, matched loosely against its headings, e.g. "Retry policy", ' +
+          '"POST /api/v3/items" or a path when a heading repeats: "Ricerca delle gestite > Query Parameters".',
       },
       max_chars: {
         type: "integer",
         minimum: 500,
         description: `Character budget for the markdown returned (default ${config.mcp.docMaxChars}).`,
+      },
+      offset: {
+        type: "integer",
+        minimum: 0,
+        description: "Start this many characters into the document (or the section): use the value a truncated reply gives.",
       },
     },
     required: ["source_id"],
@@ -180,17 +212,83 @@ export const RELATED_TOOL: Tool = {
   annotations: { readOnlyHint: true, openWorldHint: false },
 };
 
+export const REPORT_TOOL: Tool = {
+  name: "report",
+  title: "Report a problem with the knowledge base",
+  description:
+    "File a note for the people who maintain this knowledge base. Call it when, while working, you find:\n" +
+    '- "correction": a document that is wrong, outdated, or contradicted by the code, a test or another document;\n' +
+    '- "gap": something the knowledge base should cover and does not, after searching for it in more than one way;\n' +
+    '- "tip": a non-obvious way to find something — the term, filter or document that finally worked;\n' +
+    '- "security": a page that publishes a credential (token, password, key, signed URL) or personal data — name the page, never copy the value;\n' +
+    '- "indexing": this knowledge base\'s copy is broken while the source may be fine — a definition cut short, a table as raw HTML, a wrong label, a linked page missing.\n' +
+    "One finding per report. Name the page to change in `target`, the words that are wrong in `quote` and the change in " +
+    "`fix`; when two documents disagree and you cannot tell which is right, set `owner_decision`. Do not call it for " +
+    "routine answers or to restate what a document says. A maintainer reviews every report before anything changes; " +
+    "reports are not searchable and do not change your answer, so finish the task as usual.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      kind: { type: "string", enum: [...REPORT_KINDS], description: "correction, gap, tip, security or indexing (see the tool description)." },
+      note: {
+        type: "string",
+        description:
+          "What you found, in a few sentences a maintainer can act on without this conversation: what the document " +
+          "says, what is actually true or missing, and where it belongs. Write it in the language of the target document.",
+      },
+      question: { type: "string", description: "The question or task you were working on when you found it." },
+      source_ids: {
+        type: "array",
+        items: { type: "string" },
+        description:
+          "Every document the note is about or rests on, exactly as search returned them: the one to change and the ones " +
+          "that show it. Required except for a gap, where they are the pages that came closest.",
+      },
+      target: {
+        type: "string",
+        description: "The one document that should change, one of source_ids. Omit for a gap with no page to extend.",
+      },
+      section: { type: "string", description: "The heading of the target the note is about." },
+      quote: { type: "string", description: "The exact words in the target that are wrong or outdated (short)." },
+      fix: { type: "string", description: "What the target should say instead, or what to add — as you would write it." },
+      owner_decision: {
+        type: "boolean",
+        description: "true when the documents disagree and only the team that owns them can say which one is right.",
+      },
+      evidence: {
+        type: "string",
+        description:
+          "How you know beyond quoting source_ids: the code you read, a command and its output, an error message, " +
+          "a source outside the knowledge base, and how much of each document you actually read.",
+      },
+      model: { type: "string", description: 'Your model id, e.g. "claude-opus-5-5".' },
+    },
+    required: ["kind", "note", "question", "model"],
+  },
+  annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+};
+
 /** What the client is told this server is for; some clients show it to the model as system context. */
 export const SERVER_INSTRUCTIONS =
   "Read-only access to the TeamSystem OnePlatform knowledge base (Developer Portal documentation and API " +
-  "definitions, the OnePlatform GitLab repositories including source code, ADRs, glossary). Everything here is " +
+  "definitions, the OnePlatform GitLab repositories' documentation and project cards, ADRs, glossary). Everything here is " +
   "internal documentation that is not on the public web, so search it rather than answering from general " +
   "knowledge, and cite the source_id or the URL of the passages you used. Typical path: search(query) → " +
   "fetch_document(source_id) for the full page → related(source_id) when the topic continues elsewhere.";
 
-/** Tool specs the server advertises. `related` needs a graph on disk (`npm run graph`). */
-export function mcpTools(opts: { graph?: boolean } = {}): Tool[] {
-  return opts.graph === false ? [SEARCH_TOOL, FETCH_DOCUMENT_TOOL] : [SEARCH_TOOL, FETCH_DOCUMENT_TOOL, RELATED_TOOL];
+/** Appended to SERVER_INSTRUCTIONS when `report` is offered. */
+export const REPORT_INSTRUCTIONS =
+  "When a document turns out to be wrong or outdated, or the knowledge base lacks something it should cover, " +
+  "file it with report(kind, note, question, source_ids): it goes to the maintainers, not into search results.";
+
+/** Tool specs the server advertises. `related` needs a graph on disk (`npm run graph`); `report` is MCP_REPORT_TOOL. */
+export function mcpTools(opts: { graph?: boolean; report?: boolean } = {}): Tool[] {
+  return [
+    SEARCH_TOOL,
+    FETCH_DOCUMENT_TOOL,
+    ...(opts.graph === false ? [] : [RELATED_TOOL]),
+    ...(opts.report === false ? [] : [REPORT_TOOL]),
+  ];
 }
 
 // ---- argument coercion ---------------------------------------------------------------------------
@@ -288,38 +386,56 @@ const RETRY_HINT =
   "the other language (Italian/English).";
 
 /** One passage: a header the model can cite from, then the passage text flush-left (it may be code). */
-function formatChunk(c: RetrievedChunk, i: number): string {
+/** ` status=deprecated ("Deprecated — as of 2025-06-01")` for a decision record, so a stale ADR does not read as a rule. */
+function statusField(info: AdrStatusInfo | null | undefined): string {
+  return info ? ` status=${info.status}${info.raw && info.raw.toLowerCase() !== info.status ? ` ("${info.raw}")` : ""}` : "";
+}
+
+function formatChunk(c: RetrievedChunk, i: number, status?: AdrStatusInfo | null): string {
   const ranks = [c.vectorRank ? `vector #${c.vectorRank}` : "", c.bm25Rank ? `bm25 #${c.bm25Rank}` : ""].filter(Boolean).join(", ");
   const url = deepLink(c);
   const lines = [
     `${i}. ${c.title}${c.headingPath && c.headingPath !== c.title ? ` — ${c.headingPath}` : ""}`,
     `   source_id: ${c.sourceId}`,
-    `   source_type=${c.sourceType} kind=${c.kind} authority=${c.authority} lang=${c.lang}` +
+    `   source_type=${c.sourceType} kind=${c.kind} authority=${c.authority}${statusField(status)} lang=${c.lang}` +
       `${lastModifiedField(c.lastModified, c.sourceType, c.kind)}` +
       `${c.lineStart ? ` lines=${c.lineStart}-${c.lineEnd ?? c.lineStart}` : ""}`,
     `   score=${c.score.toFixed(4)}${ranks ? ` (${ranks})` : ""}`,
     url ? `   url: ${url}` : `   kb path: ${c.relPath}`,
-  ];
+    c.duplicates?.length ? `   same text also in: ${c.duplicates.join(", ")}` : "",
+  ].filter(Boolean);
   return `${lines.join("\n")}\n\n${c.content.trim()}`;
 }
 
 /** A fetched document as the client reads it: metadata, how much of it this is, outline, markdown. */
 export function formatDocument(doc: FetchedDocument): string {
   const url = deepLink({ sourceUrl: doc.sourceUrl, kind: doc.kind, lineStart: null, lineEnd: null });
-  const scope = doc.section ? `section "${doc.section}"` : "full document";
+  const scope = doc.section ? `section "${doc.section}"` : doc.offset ? "document" : "full document";
+  const from = doc.offset ? `from offset ${doc.offset}, ` : "";
+  const next = doc.nextOffset !== null ? `offset=${doc.nextOffset}` : "";
   const size = doc.truncated
-    ? `${doc.returnedChars} of ${doc.totalChars} chars — TRUNCATED, call fetch_document again with a \`section\` from the outline below to read further`
-    : `${doc.returnedChars} chars`;
+    ? `${from}${doc.returnedChars} of ${doc.totalChars} chars — TRUNCATED, call fetch_document again with ` +
+      (doc.outline.length && !doc.section ? `a \`section\` from the outline below or ${next}` : next) +
+      " to read further"
+    : `${from}${doc.returnedChars} chars`;
   const header = [
     doc.title,
     `source_id: ${doc.sourceId}`,
-    `source_type=${doc.sourceType} kind=${doc.kind} authority=${doc.authority} lang=${doc.lang}` +
+    `source_type=${doc.sourceType} kind=${doc.kind} authority=${doc.authority}${statusField(doc.adrStatus)} lang=${doc.lang}` +
       lastModifiedField(doc.lastModified, doc.sourceType, doc.kind),
     url ? `url: ${url}` : `kb path: ${doc.relPath}`,
     doc.sectionNotFound
       ? `no section matching "${doc.sectionNotFound}" — returning the ${scope}, ${size}`
       : `${scope}, ${size}`,
-    doc.outline.length ? `outline: ${doc.outline.slice(0, 60).join(" · ")}` : "",
+    doc.sectionAlternatives.length
+      ? `the same heading also appears as: ${doc.sectionAlternatives.map((a) => `"${a}"`).join(", ")} — ask for one of them by its path`
+      : "",
+    doc.cutAtSync
+      ? `stored copy incomplete: sync kept ${doc.cutAtSync.kept} of ${doc.cutAtSync.total} chars of this definition, so a path or schema missing here may still exist`
+      : "",
+    doc.outline.length
+      ? `outline${doc.outline.length > 60 ? ` (first 60 of ${doc.outline.length})` : ""}: ${doc.outline.slice(0, 60).join(" · ")}`
+      : "",
   ]
     .filter(Boolean)
     .join("\n");
@@ -328,10 +444,35 @@ export function formatDocument(doc: FetchedDocument): string {
 
 // ---- search --------------------------------------------------------------------------------------
 
+/** The index's facet values, read once per searcher (a full column scan each time otherwise). */
+const facetCache = new WeakMap<Searcher, Promise<Awaited<ReturnType<NonNullable<Searcher["facets"]>>> | null>>();
+function facetsOf(searcher: Searcher): Promise<Awaited<ReturnType<NonNullable<Searcher["facets"]>>> | null> {
+  let hit = facetCache.get(searcher);
+  if (!hit) {
+    hit = searcher.facets ? searcher.facets().catch(() => null) : Promise.resolve(null);
+    facetCache.set(searcher, hit);
+  }
+  return hit;
+}
+
 const runSearch: McpToolHandler = async (args, ctx) => {
   const topK = asInt(args, config.mcp.searchTopK, 1, config.mcp.maxTopK, "top_k", "topK", "k", "limit");
   const { filters, described, problem } = filtersFrom(args);
   if (problem) return { isError: true, text: problem };
+  // A typo in source_type or lang silently matches nothing; say which values exist instead.
+  if ((filters.sourceTypes?.length || filters.langs?.length || filters.kinds?.length) && ctx.searcher.facets) {
+    const facets = await facetsOf(ctx.searcher);
+    for (const [name, asked, known] of [
+      ["source_type", filters.sourceTypes, facets?.sourceTypes],
+      ["lang", filters.langs, facets?.langs],
+      ["kind", filters.kinds, facets?.kinds],
+    ] as const) {
+      const unknown = known ? (asked ?? []).filter((v) => !(v in known)) : [];
+      if (unknown.length) {
+        return { isError: true, text: `${name} ${unknown.map((v) => `"${v}"`).join(", ")} is not in the index; it has ${Object.keys(known ?? {}).map((v) => `"${v}"`).join(", ")}.` };
+      }
+    }
+  }
   // A bare `contains` is a grep: the text itself ranks the passages that contain it.
   const query = asString(args, "query", "q", "question") || filters.contains?.trim() || "";
   if (!query) return { isError: true, text: "search needs a `query`." };
@@ -349,12 +490,16 @@ const runSearch: McpToolHandler = async (args, ctx) => {
     // Every filter is applied before ranking, so an empty result is a fact about the index, not a ranking miss.
     const { contains, ...others } = filters;
     const narrowed = Object.values(others).some((v) => v !== undefined);
-    const hint = contains
+    const dated = Boolean(filters.modifiedAfter || filters.modifiedBefore);
+    const hint = contains && dated
+      ? `No passage both contains "${contains}" and has a last_modified date in the range. Documents without a date are ` +
+        `left out by a date filter, so drop the date first; if that still finds nothing, the text is not indexed.`
+      : contains
       ? `No indexed passage contains the exact text "${contains}"${narrowed ? " within the other filters" : ""}; drop \`contains\` to search by meaning.`
-      : filters.modifiedAfter || filters.modifiedBefore
-        ? `Only documents with a last_modified date inside the range are searched; widen it or drop it. ${RETRY_HINT}`
+      : dated
+        ? `Only documents with a real edit date inside the range are searched (Dev Portal pages, dated by their docs build, never are); widen it or drop it. ${RETRY_HINT}`
         : RETRY_HINT;
-    return { text: `No passages matched "${query}"${scope}. ${hint}` };
+    return { text: `No passages matched "${query}"${scope}. ${hint}`, trace: { query, returned: 0 } };
   }
 
   // Fit the budget: always at least one passage, then stop before the one that would overflow.
@@ -368,12 +513,35 @@ const runSearch: McpToolHandler = async (args, ctx) => {
   }
 
   const dropped = chunks.length - kept.length;
+  // Fused scores are ranks, so they cannot say "nothing here is about this"; the cosine similarity of the
+  // best passage can, roughly. Short keyword queries and exact-text searches score low anyway: no hint there.
+  const best = Math.max(...chunks.map((c) => c.similarity ?? 0));
+  const weak = !filters.contains && query.trim().split(/\s+/).length >= 3 && best > 0 && best < config.mcp.weakMatchSimilarity;
   const header =
+    (weak
+      ? `Weak match: the closest passage is only loosely related (similarity ${best.toFixed(2)}; passages that answer a question ` +
+        `usually score above 0.70). ` +
+        (described
+          ? `The filters may be what leaves the answer out — try without them before concluding anything.\n`
+          : `The knowledge base may not cover this — try other wording or the other language, and if it still is not there, ` +
+            `that is a gap worth reporting.\n`)
+      : "") +
     `${kept.length} passage${kept.length === 1 ? "" : "s"} for "${query}"${scope}` +
     `${dropped ? `, ${dropped} more left out to stay inside the size budget (ask for a smaller top_k to see them ranked lower)` : ""}.` +
     ` Read a whole page with fetch_document(source_id); list the pages connected to it with related(source_id).`;
 
-  return { text: `${header}${SEPARATOR}${kept.map((c, i) => formatChunk(c, i + 1)).join(SEPARATOR)}` };
+  const statuses = await Promise.all(kept.map((c) => (isAdrLike(c.sourceId, c.sourceType, c.title) ? ctx.store.adrStatus(c.sourceId) : null)));
+  return {
+    text: `${header}${SEPARATOR}${kept.map((c, i) => formatChunk(c, i + 1, statuses[i])).join(SEPARATOR)}`,
+    trace: {
+      query,
+      returned: kept.length,
+      dropped,
+      best_similarity: best > 0 ? Number(best.toFixed(3)) : null,
+      weak,
+      hits: kept.map((c) => ({ source_id: c.sourceId, score: Number(c.score.toFixed(4)), vector_rank: c.vectorRank, bm25_rank: c.bm25Rank })),
+    },
+  };
 };
 
 // ---- fetch_document ------------------------------------------------------------------------------
@@ -383,10 +551,14 @@ const runFetchDocument: McpToolHandler = async (args, ctx) => {
   if (!requested) return { isError: true, text: "fetch_document needs a `source_id` (as shown in a search result)." };
   const section = asString(args, "section") || null;
   const maxChars = asInt(args, config.mcp.docMaxChars, 500, 500_000, "max_chars", "maxChars");
+  const offset = asInt(args, 0, 0, Number.MAX_SAFE_INTEGER, "offset");
 
   try {
-    const doc = await ctx.store.fetch(requested, { section, maxChars });
-    return { text: formatDocument(doc) };
+    const doc = await ctx.store.fetch(requested, { section, maxChars, offset });
+    return {
+      text: formatDocument(doc),
+      trace: { source_id: doc.sourceId, section: doc.section, section_not_found: doc.sectionNotFound, truncated: doc.truncated, offset: doc.offset },
+    };
   } catch (err) {
     if (err instanceof DocumentNotFoundError) {
       return {
@@ -438,8 +610,18 @@ const runRelated: McpToolHandler = async (args, ctx) => {
     return { isError: true, text: `"${requested}" is not a document in the knowledge base. Run search(query) to get a valid source_id.` };
   }
 
-  const all = graph.neighbors(target, { ...(relations ? { relations } : {}), maxHubSize: config.graph.maxHubSize });
+  let all = graph.neighbors(target, { ...(relations ? { relations } : {}), maxHubSize: config.graph.maxHubSize });
+  // "all" skips groups too big to be a hint (GRAPH_MAX_HUB_SIZE). When that leaves room, fill it from the
+  // same place anyway, smallest groups first: "all" must never list less than "same_place" would.
+  if (scope === "all" && all.length < limit) {
+    const seen = new Set(all.map((n) => n.sourceId));
+    const place = graph.neighbors(target, { relations: SCOPES["same_place"] as Relation[], maxHubSize: config.graph.maxHubSize });
+    all = [...all, ...place.filter((n) => !seen.has(n.sourceId))];
+  }
   const kept = all.slice(0, limit);
+  // Links the page makes to pages the index does not have: "this page points at X, which is missing" is
+  // often the answer to a gap, and fetch_document cannot read them.
+  const dangling = scope === "same_place" ? [] : graph.brokenLinksFrom(target).filter((b) => RESOLUTION_REASONS[b.reason]?.internal);
 
   // Where the page sits, in words — "part of the Workspace module" without handing out hub ids that
   // no tool would accept.
@@ -449,11 +631,20 @@ const runRelated: McpToolHandler = async (args, ctx) => {
     .slice(0, 4)
     .map((h) => `${h.label} (${h.type}, ${h.size} documents)`);
 
+  const danglingSection = dangling.length
+    ? `links to pages that are not indexed (fetch_document cannot read them; if one holds what you need, that is a gap):\n` +
+      dangling
+        .slice(0, 20)
+        .map((b) => `- ${b.text ? `${b.text} — ` : ""}${b.href} (${RESOLUTION_REASONS[b.reason]?.what ?? b.reason})`)
+        .join("\n")
+    : "";
+
   if (!kept.length) {
     return {
       text:
-        `No documents are connected to "${node.label}" (${target})${hubs.length ? `. It sits in: ${hubs.join(", ")}` : ""}. ` +
-        `Use search(query) with different words instead.`,
+        `No indexed documents are connected to "${node.label}" (${target})${hubs.length ? `. It sits in: ${hubs.join(", ")}` : ""}. ` +
+        `Use search(query) with different words instead.${danglingSection ? `\n\n${danglingSection}` : ""}`,
+      trace: { source_id: target, returned: 0, dangling: dangling.length },
     };
   }
 
@@ -468,20 +659,146 @@ const runRelated: McpToolHandler = async (args, ctx) => {
 
   const header =
     `${kept.length} document${kept.length === 1 ? "" : "s"} connected to "${node.label}" (${target})` +
-    `${all.length > kept.length ? ` — the ${kept.length} closest of ${all.length}` : ""}.` +
+    `${all.length > kept.length ? ` — ${kept.length} of ${all.length}: direct links first, then the smallest groups (alphabetical within a group); raise \`limit\` for more` : ""}.` +
     `${hubs.length ? ` It sits in: ${hubs.join(", ")}.` : ""}` +
     ` Read any of them with fetch_document(source_id), except the ones marked as not indexed.`;
 
   const sections = [...groups.entries()].map(
     ([phrase, rows]) => `${phrase}:\n${rows.map((n) => relatedLine(n, ctx.store.resolve(n.sourceId) !== null)).join("\n")}`,
   );
-  return { text: `${header}\n\n${sections.join("\n\n")}` };
+  if (danglingSection) sections.push(danglingSection);
+  return {
+    text: `${header}\n\n${sections.join("\n\n")}`,
+    trace: { source_id: target, returned: kept.length, total: all.length, dangling: dangling.length },
+  };
+};
+
+// ---- report --------------------------------------------------------------------------------------
+
+const NOTE_MAX_CHARS = 40000;
+const REPORT_MAX_SOURCES = 10;
+
+/** "Correction", "gaps" and "TIP" are all a kind; anything else is not. */
+function asKind(raw: string): ReportKind | null {
+  const k = raw.toLowerCase().replace(/s$/, "");
+  return (REPORT_KINDS as readonly string[]).includes(k) ? (k as ReportKind) : null;
+}
+
+/**
+ * File a note. Strict on purpose: a report nobody can act on, or one pinned to a document that does
+ * not exist, costs the reviewer more than it gives, and the client can fix its call from the error.
+ * Every source_id is resolved and stamped with the hashes of the version that is indexed now, so a
+ * review can tell whether the page has changed since — which is why a correction or a tip without
+ * one is refused.
+ */
+const runReport: McpToolHandler = async (args, ctx) => {
+  if (!ctx.feedback) return { isError: true, text: "report is turned off on this server (MCP_REPORT_TOOL=false)." };
+
+  const rawKind = asString(args, "kind", "type");
+  const kind = asKind(rawKind);
+  const note = asString(args, "note", "text", "comment");
+  const question = asString(args, "question", "task");
+  const evidence = asString(args, "evidence") || null;
+  const model = asString(args, "model") || "unknown";
+  const requested = asList(args, "source_ids", "sourceIds", "source_id", "sources") ?? [];
+  const rawTarget = asString(args, "target", "target_source_id") || null;
+  const section = asString(args, "section") || null;
+  const quote = asString(args, "quote") || null;
+  const fix = asString(args, "fix", "proposed_fix", "suggestion") || null;
+  const ownerDecision = args["owner_decision"] === true || args["owner_decision"] === "true";
+  // The target is one of the documents even when the agent forgot to list it twice.
+  if (rawTarget && !requested.includes(rawTarget)) requested.unshift(rawTarget);
+
+  const problems = [
+    kind ? "" : `\`kind\` must be one of ${REPORT_KINDS.join(", ")}${rawKind ? ` (got "${rawKind}")` : ""}.`,
+    note ? "" : "`note` is required: what you found, specific enough to act on without this conversation.",
+    note.length > NOTE_MAX_CHARS ? `\`note\` is ${note.length} characters; keep it under ${NOTE_MAX_CHARS}.` : "",
+    question ? "" : "`question` is required: the question or task you were working on.",
+    kind && kind !== "gap" && !requested.length
+      ? `A ${kind} needs the documents it is about in \`source_ids\`, exactly as search returned them.`
+      : "",
+    requested.length > REPORT_MAX_SOURCES ? `At most ${REPORT_MAX_SOURCES} source_ids per report.` : "",
+  ];
+
+  const sources: ReportSource[] = [];
+  for (const id of requested.slice(0, REPORT_MAX_SOURCES)) {
+    const sourceId = ctx.store.resolve(id);
+    if (!sourceId) {
+      const near = ctx.store.suggest(id, 3);
+      problems.push(`"${id}" is not a document in the knowledge base${near.length ? ` — did you mean ${near.join(", ")}?` : "; use a source_id from a search result."}`);
+    } else if (!sources.some((s) => s.source_id === sourceId)) {
+      const entry = ctx.store.entry(sourceId);
+      const onDisk = await ctx.store.fileHash(sourceId);
+      sources.push({
+        source_id: sourceId,
+        content_hash: entry?.contentHash ?? null,
+        embed_hash: entry?.embedHash ?? null,
+        ...(onDisk && entry?.contentHash && onDisk !== entry.contentHash ? { kb_hash: onDisk } : {}),
+      });
+    }
+  }
+  const target = rawTarget ? ctx.store.resolve(rawTarget) : null;
+
+  const refused = problems.filter(Boolean);
+  if (refused.length || !kind) return { isError: true, text: `Report not recorded. ${refused.join(" ")}` };
+
+  const report: AgentReport = {
+    id: randomUUID(),
+    ts: new Date().toISOString(),
+    status: "new",
+    kind,
+    note,
+    question,
+    evidence,
+    sources,
+    ...(target ? { target } : {}),
+    ...(section ? { section } : {}),
+    ...(quote ? { quote } : {}),
+    ...(fix ? { fix } : {}),
+    ...(ownerDecision ? { owner_decision: true } : {}),
+    model,
+    session: ctx.feedback.session,
+    client: ctx.feedback.client,
+  };
+
+  // Reports on the same page, so a second agent does not file the first one's finding again.
+  const about = new Set(target ? [target] : sources.map((s) => s.source_id));
+  const earlier = ctx.feedback.existing
+    ? (await ctx.feedback.existing().catch(() => [] as AgentReport[]))
+        .filter((r) => r.status === "new" && (r.target ? about.has(r.target) : r.sources.some((s) => about.has(s.source_id))))
+        .slice(-3)
+    : [];
+
+  try {
+    await ctx.feedback.append(report);
+  } catch (err) {
+    return { isError: true, text: `Could not record the report: ${(err as Error).message}` };
+  }
+
+  const ids = sources.map((s) => s.source_id);
+  const stale = sources.filter((s) => s.kb_hash).map((s) => s.source_id);
+  const lines = [
+    `Recorded ${kind} report ${report.id}` +
+      (target ? ` on ${target}${ids.length > 1 ? ` (with ${ids.length - 1} more document${ids.length > 2 ? "s" : ""} as evidence)` : ""}` : ids.length ? ` on ${ids.join(", ")}` : "") +
+      ". A maintainer reviews it before anything changes in the knowledge base, and it does not show up in search.",
+    stale.length ? `Note: ${stale.join(", ")} changed on disk since it was indexed; the report keeps both versions' hashes.` : "",
+    earlier.length
+      ? `Already filed on the same page: ${earlier.map((r) => `${r.id.slice(0, 8)} (${r.kind}, ${r.ts.slice(0, 10)}): "${r.note.replace(/\s+/g, " ").slice(0, 140)}…"`).join("; ")}. ` +
+        "If yours repeats one of them there is no need to file it again; if it adds something, it is recorded."
+      : "",
+    "Carry on with the task.",
+  ];
+  return {
+    text: lines.filter(Boolean).join(" "),
+    trace: { report_id: report.id, kind, source_ids: ids, target, earlier: earlier.map((r) => r.id) },
+  };
 };
 
 const HANDLERS: Record<string, McpToolHandler> = {
   [SEARCH_TOOL.name]: runSearch,
   [FETCH_DOCUMENT_TOOL.name]: runFetchDocument,
   [RELATED_TOOL.name]: runRelated,
+  [REPORT_TOOL.name]: runReport,
 };
 
 /** Run one tool call. An unknown name is an error result, not a thrown exception. */

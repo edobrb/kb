@@ -100,6 +100,8 @@ export interface BrokenLink {
   href: string;
   /** Why it did not resolve; see RESOLUTION_REASONS. */
   reason: string;
+  /** The link text, when the link had one ("Launchpad"). Absent in graphs built before it was kept. */
+  text?: string;
 }
 
 /**

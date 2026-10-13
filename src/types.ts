@@ -120,6 +120,10 @@ export interface RetrievedChunk {
   /** Debug info: rank in each retriever (1-based) or null when not returned by it. */
   vectorRank: number | null;
   bm25Rank: number | null;
+  /** Other documents whose passage said the same thing and was dropped in favour of this one. */
+  duplicates?: string[];
+  /** Cosine similarity to the query (1 = same direction), when the vector search returned this chunk. */
+  similarity?: number | null;
 }
 
 /** A tool call as the model asked for it (Ollama/OpenAI shape). */

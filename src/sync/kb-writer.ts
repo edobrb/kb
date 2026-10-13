@@ -1,4 +1,5 @@
 import YAML from "yaml";
+import { headingText } from "../markdown.js";
 import type { SyncDoc } from "./types.js";
 
 /** File-name safe slug, ASCII only, max `max` chars. */
@@ -17,7 +18,7 @@ export function slugify(s: string, max = 80): string {
 /** Title from the first ATX H1, if any. */
 export function firstHeading(md: string): string | null {
   const m = /^#\s+(.+?)\s*#*\s*$/m.exec(md);
-  return m?.[1] ? m[1].replace(/[*_`]/g, "").trim() || null : null;
+  return m?.[1] ? headingText(m[1]) || null : null;
 }
 
 /** Ensure the body starts with `# title` (the chunker uses it as the breadcrumb root). */

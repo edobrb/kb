@@ -21,6 +21,7 @@
     "eval": "tsx src/cli/eval.ts",
     "eval:validate": "tsx src/cli/validate-evals.ts",
     "doctor": "tsx src/cli/doctor.ts",
+    "secrets": "tsx src/cli/secrets.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },

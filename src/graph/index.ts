@@ -127,6 +127,21 @@ export class KbGraph {
     return this.data.brokenLinks;
   }
 
+  private brokenByDoc: Map<string, BrokenLink[]> | null = null;
+
+  /** Links written in one document whose target is not indexed (a renamed page, an excluded tree…). */
+  brokenLinksFrom(sourceId: string): BrokenLink[] {
+    if (!this.brokenByDoc) {
+      this.brokenByDoc = new Map();
+      for (const b of this.data.brokenLinks ?? []) {
+        const list = this.brokenByDoc.get(b.from);
+        if (list) list.push(b);
+        else this.brokenByDoc.set(b.from, [b]);
+      }
+    }
+    return this.brokenByDoc.get(sourceId) ?? [];
+  }
+
   has(sourceId: string): boolean {
     const i = this.index.get(sourceId);
     return i !== undefined && this.typeAt(i) === "doc";

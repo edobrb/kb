@@ -354,7 +354,9 @@ export const syncDevPortal: Connector = async function* (ctx): AsyncGenerator<Sy
       }
       const def = e.spec?.["definition"];
       if (typeof def !== "string" || !def.trim()) continue;
-      const fingerprint = `sha256:${createHash("sha256").update(def).digest("hex").slice(0, 16)}`;
+      const truncated = def.length > cfg.max_definition_chars;
+      // The cap is part of the key: raising it must rewrite the definitions it used to cut.
+      const fingerprint = `sha256:${createHash("sha256").update(def).digest("hex").slice(0, 16)}${truncated ? `:cut${cfg.max_definition_chars}` : ":full"}`;
       if (ctx.previous.items[sourceId]?.fingerprint === fingerprint) {
         yield { type: "unchanged", sourceId };
         continue;
@@ -362,7 +364,6 @@ export const syncDevPortal: Connector = async function* (ctx): AsyncGenerator<Sy
       const title = `${e.metadata.title ?? name} (API definition)`;
       const description = e.metadata.description?.trim() ?? "";
       const apiType = typeof e.spec?.["type"] === "string" ? (e.spec["type"] as string) : "";
-      const truncated = def.length > cfg.max_definition_chars;
       const lang = apiType === "openapi" || apiType === "asyncapi" ? "yaml" : apiType;
       const definition = truncated ? `${def.slice(0, cfg.max_definition_chars)}\n# … truncated (${def.length} chars)` : def.trimEnd();
       const body = [description, `API type: ${apiType || "unknown"}. Owner: ${String(e.spec?.["owner"] ?? "unknown")}.`, `\`\`\`${lang}\n${definition}\n\`\`\``]

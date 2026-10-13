@@ -118,6 +118,21 @@ describe("incremental ingest", () => {
     expect(written.docs["test:a"]?.embedHash).toMatch(/^sha256:/);
   });
 
+  it("re-checks every document when the pipeline changes, and embeds nothing whose chunks are the same", async () => {
+    const before = JSON.parse(await readFile(paths.manifest, "utf8")) as { pipeline?: number; docs: Record<string, unknown> };
+    expect(before.pipeline).toBeGreaterThanOrEqual(2);
+    // An index built by an older loader/chunker: the file bytes alone would call everything unchanged.
+    delete before.pipeline;
+    await writeFile(paths.manifest, JSON.stringify(before, null, 2), "utf8");
+    const r = await run();
+    expect(r.docsUnchanged).toBe(0);
+    expect(r.docsRefreshed).toBe(Object.keys(before.docs).length);
+    expect(r.chunksWritten).toBe(0);
+    const after = JSON.parse(await readFile(paths.manifest, "utf8")) as { pipeline?: number };
+    expect(after.pipeline).toBe(before.pipeline ?? (await import("../src/ingest/pipeline.js")).INGEST_PIPELINE_VERSION);
+    expect((await run()).docsUnchanged).toBe(Object.keys(before.docs).length);
+  });
+
   it("drops documents whose file disappeared", async () => {
     await rm(path.join(kb, "src", "b.md"));
     const r = await run();
